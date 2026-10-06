@@ -8,18 +8,35 @@ The Formiq backend is written in Python and uses [FastAPI](https://fastapi.tiang
 
 ## Status
 
-Phase 1.6: the FastAPI application with a `GET /health` endpoint, typed configuration, the
-PostgreSQL database foundation (SQLAlchemy engine, session factory, and declarative base),
-Alembic migrations (one initial, empty migration), and pytest unit and integration tests.
-Database models and other backend layers are planned for later phases.
+Phase 2.5: a FastAPI application with a health check and an API for creating users and their
+onboarding profiles, stored in PostgreSQL through SQLAlchemy, with Alembic migrations and unit and
+integration tests (integration tests use a dedicated test database). Authentication, AI coaching,
+and other features are planned for later phases.
+
+## Architecture
+
+Requests flow through four layers:
+
+```
+API route (app/api) → service (app/services) → repository (app/repositories) → PostgreSQL
+```
+
+- Routes handle HTTP: request validation, status codes, and mapping service errors to responses.
+- Services hold the business rules and own the database transactions (commit and rollback).
+- Repositories only read and write the database; they never commit.
 
 ## Contents
 
 - `app/main.py`: creates the FastAPI application and registers routers
 - `app/core/config.py`: application settings, read from environment variables and `.env`
 - `app/db/database.py`: SQLAlchemy engine, session factory, and the `get_db()` dependency
-- `app/db/base.py`: declarative base for future database models
-- `app/api/routes/health.py`: `GET /health` endpoint
+- `app/db/base.py`: declarative base for the database models
+- `app/models/`: SQLAlchemy models (`User`, `UserProfile`)
+- `app/schemas/`: Pydantic request and response schemas
+- `app/repositories/`: database access for users and profiles
+- `app/services/`: business logic and service-level errors
+- `app/api/dependencies.py`: the database session dependency for routes
+- `app/api/routes/`: `GET /health` and the `/users` endpoints
 - `alembic.ini`, `migrations/`: Alembic configuration and migration scripts
 - `tests/`: unit tests (`tests/unit/`) and integration tests (`tests/integration/`)
 - `pytest.ini`: pytest configuration
@@ -117,4 +134,28 @@ From the `backend/` directory, with the virtual environment activated:
 uvicorn app.main:app --reload
 ```
 
-The health endpoint is then available at http://127.0.0.1:8000/health.
+The health endpoint is then available at http://127.0.0.1:8000/health, and interactive API
+documentation at http://127.0.0.1:8000/docs.
+
+## API
+
+| Method | Path | Request body | Success |
+|---|---|---|---|
+| `GET` | `/health` | | 200 |
+| `POST` | `/users` | email and/or phone (at least one) | 201 |
+| `GET` | `/users/{user_id}` | | 200 |
+| `POST` | `/users/{user_id}/profile` | onboarding profile | 201 |
+| `GET` | `/users/{user_id}/profile` | | 200 |
+| `PATCH` | `/users/{user_id}/profile` | profile fields to change | 200 |
+
+`PATCH` changes only the fields that are sent. Optional fields (`last_name`, `target_weight_kg`,
+`goal_period_weeks`, `dietary_preference`) can be cleared with `null`; other fields cannot.
+
+Errors return `{"detail": "..."}` with these status codes:
+
+- `400`: the request is invalid for the service (for example, `null` for a required profile field)
+- `404`: the user or profile does not exist
+- `409`: a user with the same email or phone, or a profile for the user, already exists
+- `422`: the request body or `user_id` fails validation
+
+The API has no authentication yet; run it only for local development.
