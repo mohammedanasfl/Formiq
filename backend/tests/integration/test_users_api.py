@@ -5,6 +5,8 @@ sends every request to the test database and empties the user tables before
 and after each test.
 """
 
+from datetime import datetime
+
 import pytest
 from sqlalchemy.orm import Session
 
@@ -88,6 +90,25 @@ def test_create_user_with_duplicate_phone_returns_409(client):
 
     assert response.status_code == 409
     assert response.json() == {"detail": "a user with this phone already exists"}
+
+
+def test_users_without_email_or_phone_can_coexist(client):
+    bodies = [
+        {"phone": PHONE},
+        {"phone": "+910000000021"},
+        {"email": EMAIL},
+        {"email": f"second-{EMAIL}"},
+    ]
+
+    responses = [client.post("/users", json=body) for body in bodies]
+
+    assert [response.status_code for response in responses] == [201, 201, 201, 201]
+    duplicate_phone = client.post("/users", json={"phone": PHONE})
+    assert duplicate_phone.status_code == 409
+    assert duplicate_phone.json() == {"detail": "a user with this phone already exists"}
+    duplicate_email = client.post("/users", json={"email": EMAIL})
+    assert duplicate_email.status_code == 409
+    assert duplicate_email.json() == {"detail": "a user with this email already exists"}
 
 
 # GET /users/{user_id}
@@ -182,6 +203,22 @@ def test_create_profile_without_required_field_returns_422(client, user_id, prof
     assert client.post(f"/users/{user_id}/profile", json=profile_body).status_code == 422
 
 
+def test_create_profile_ignores_user_id_in_body(client, user_id, profile_body, test_engine):
+    # UserProfileCreate does not declare user_id, so it is ignored, not rejected:
+    # the profile belongs to the user in the path
+    other_user_id = client.post("/users", json={"phone": PHONE}).json()["id"]
+
+    response = client.post(
+        f"/users/{user_id}/profile", json={**profile_body, "user_id": other_user_id}
+    )
+
+    assert response.status_code == 201
+    assert response.json()["user_id"] == user_id
+    with Session(test_engine) as session:
+        assert session.get(UserProfile, response.json()["id"]).user_id == user_id
+    assert client.get(f"/users/{other_user_id}/profile").status_code == 404
+
+
 # GET /users/{user_id}/profile
 
 
@@ -225,6 +262,31 @@ def test_patch_profile_sets_nullable_field_to_null(client, user_id, profile):
     assert response.status_code == 200
     assert response.json()["target_weight_kg"] is None
     assert client.get(f"/users/{user_id}/profile").json()["target_weight_kg"] is None
+
+
+def test_patch_profile_ignores_identity_and_timestamp_fields(client, user_id, profile):
+    # UserProfileUpdate does not declare these fields, so they are ignored, not
+    # rejected: only weight_kg changes
+    other_user_id = client.post("/users", json={"phone": PHONE}).json()["id"]
+    protected = {
+        "id": profile["id"] + 1,
+        "user_id": other_user_id,
+        "created_at": "2000-01-01T00:00:00Z",
+        "updated_at": "2000-01-01T00:00:00Z",
+    }
+
+    response = client.patch(f"/users/{user_id}/profile", json={**protected, "weight_kg": 68.0})
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["weight_kg"] == 68.0
+    unchanged = set(profile) - {"weight_kg", "updated_at"}
+    assert {key: updated[key] for key in unchanged} == {key: profile[key] for key in unchanged}
+    # updated_at is set by the database on update, not taken from the request
+    updated_at = datetime.fromisoformat(updated["updated_at"])
+    assert updated_at >= datetime.fromisoformat(profile["updated_at"])
+    assert client.get(f"/users/{user_id}/profile").json() == updated
+    assert client.get(f"/users/{other_user_id}/profile").status_code == 404
 
 
 def test_patch_profile_with_null_required_field_returns_400(client, user_id, profile):

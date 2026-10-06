@@ -71,6 +71,26 @@ def test_create_user_rejects_duplicate_phone(service, test_engine):
     assert count_users(test_engine) == 1
 
 
+def test_users_without_email_or_phone_can_coexist(service, test_engine):
+    # a missing email or phone is stored as NULL and is not a duplicate of
+    # another user's missing value
+    phones = [PHONE, "+910000000011"]
+    emails = [EMAIL, f"second-{EMAIL}"]
+    phone_only = [service.create_user(UserCreate(phone=phone)) for phone in phones]
+    email_only = [service.create_user(UserCreate(email=email)) for email in emails]
+
+    assert [user.email for user in phone_only] == [None, None]
+    assert [user.phone for user in email_only] == [None, None]
+    assert count_users(test_engine) == 4
+
+    with pytest.raises(UserAlreadyExistsError, match="phone"):
+        service.create_user(UserCreate(phone=PHONE))
+    with pytest.raises(UserAlreadyExistsError, match="email"):
+        service.create_user(UserCreate(email=EMAIL))
+
+    assert count_users(test_engine) == 4
+
+
 def test_get_user_by_id_returns_the_user(service, test_engine):
     user_id = service.create_user(UserCreate(email=EMAIL)).id
 
