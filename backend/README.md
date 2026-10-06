@@ -8,9 +8,9 @@ The Formiq backend is written in Python and uses [FastAPI](https://fastapi.tiang
 
 ## Status
 
-Phase 1.5: the FastAPI application with a `GET /health` endpoint, typed configuration, the
-PostgreSQL database foundation (SQLAlchemy engine, session factory, and declarative base), and
-Alembic migrations (one initial, empty migration).
+Phase 1.6: the FastAPI application with a `GET /health` endpoint, typed configuration, the
+PostgreSQL database foundation (SQLAlchemy engine, session factory, and declarative base),
+Alembic migrations (one initial, empty migration), and pytest unit and integration tests.
 Database models and other backend layers are planned for later phases.
 
 ## Contents
@@ -21,7 +21,8 @@ Database models and other backend layers are planned for later phases.
 - `app/db/base.py`: declarative base for future database models
 - `app/api/routes/health.py`: `GET /health` endpoint
 - `alembic.ini`, `migrations/`: Alembic configuration and migration scripts
-- `tests/`: tests (empty for now)
+- `tests/`: unit tests (`tests/unit/`) and integration tests (`tests/integration/`)
+- `pytest.ini`: pytest configuration
 - `requirements.txt`: Python dependencies
 - `.env.example`: example environment variables. Copy it to `.env` for local development;
   `.env` is ignored by Git and must not be committed.
@@ -68,6 +69,19 @@ alembic upgrade head     # apply all migrations
 alembic downgrade base   # revert all migrations
 alembic current          # show the current revision
 ```
+
+## Tests
+
+Run the tests from the `backend/` directory, with the virtual environment activated:
+
+```bash
+pytest                     # all tests
+pytest tests/unit          # unit tests
+pytest tests/integration   # integration tests
+```
+
+Integration tests require the local PostgreSQL container to be running (`docker compose up -d`
+from the repository root). Unit tests do not need PostgreSQL.
 
 ## Running the application
 
