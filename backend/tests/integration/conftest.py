@@ -3,10 +3,14 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db import database
+from app.db.database import get_db
+from app.main import app
 from app.models import User, UserProfile
 from tests.integration.database import check_test_database_url
 
@@ -63,6 +67,35 @@ def service_session(test_engine):
         yield session
     finally:
         session.close()
+        delete_user_rows(test_engine)
+
+
+@pytest.fixture
+def client(test_engine, monkeypatch):
+    """TestClient whose requests use the test database.
+
+    get_db is overridden so each request gets a session on the test database,
+    and the development SessionLocal raises if anything still reaches it. The
+    routes commit, so the user tables are emptied before and after each test.
+    """
+
+    def get_test_db():
+        session = Session(test_engine)
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def development_session_not_allowed():
+        raise RuntimeError("API tests must not use the development database")
+
+    monkeypatch.setattr(database, "SessionLocal", development_session_not_allowed)
+    app.dependency_overrides[get_db] = get_test_db
+    delete_user_rows(test_engine)
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_db, None)
         delete_user_rows(test_engine)
 
 
