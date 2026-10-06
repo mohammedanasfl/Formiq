@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# IDEs
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Build
+dist/
+build/
+
+# Node
+node_modules/
