@@ -6,6 +6,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Formiq"
     app_env: str = "development"
+    database_url: str
 
 
 settings = Settings()
