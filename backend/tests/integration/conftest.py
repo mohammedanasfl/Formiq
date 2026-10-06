@@ -3,10 +3,11 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.models import User, UserProfile
 from tests.integration.database import check_test_database_url
 
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
@@ -40,6 +41,29 @@ def db_session(test_engine):
         yield session
     finally:
         session.close()
+
+
+def delete_user_rows(engine):
+    with Session(engine) as session:
+        session.execute(delete(UserProfile))
+        session.execute(delete(User))
+        session.commit()
+
+
+@pytest.fixture
+def service_session(test_engine):
+    """Session for service tests.
+
+    Services commit, so rolling back is not enough: the users and user_profiles
+    tables of the test database are emptied before and after each test.
+    """
+    delete_user_rows(test_engine)
+    session = Session(test_engine)
+    try:
+        yield session
+    finally:
+        session.close()
+        delete_user_rows(test_engine)
 
 
 @pytest.fixture
