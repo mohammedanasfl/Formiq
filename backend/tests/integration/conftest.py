@@ -100,6 +100,64 @@ def client(test_engine, monkeypatch):
 
 
 @pytest.fixture
+def rollback_connection(test_engine):
+    """Connection to the test database whose transaction is rolled back after the test."""
+    with test_engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            yield connection
+        finally:
+            transaction.rollback()
+
+
+def rollback_connection_session(connection):
+    """Session in the connection's transaction: its commits only release a savepoint."""
+    return Session(bind=connection, join_transaction_mode="create_savepoint")
+
+
+@pytest.fixture
+def catalog_session(rollback_connection):
+    """Session for adding the test data that catalog_client requests read.
+
+    Nothing is committed, so the exercise catalog's seeded reference data stays
+    as it is.
+    """
+    session = rollback_connection_session(rollback_connection)
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+@pytest.fixture
+def catalog_client(rollback_connection, monkeypatch):
+    """TestClient for the read-only exercise catalog routes.
+
+    Unlike client, it commits and deletes nothing: each request gets its own
+    session in the transaction of catalog_session, so it reads the test data
+    added there (once flushed), and the transaction is rolled back after the
+    test. The development SessionLocal raises if anything still reaches it.
+    """
+
+    def get_test_db():
+        session = rollback_connection_session(rollback_connection)
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def development_session_not_allowed():
+        raise RuntimeError("API tests must not use the development database")
+
+    monkeypatch.setattr(database, "SessionLocal", development_session_not_allowed)
+    app.dependency_overrides[get_db] = get_test_db
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture
 def profile_fields():
     """Values for the required user profile fields."""
     return {
