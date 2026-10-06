@@ -8,16 +8,18 @@ The Formiq backend is written in Python and uses [FastAPI](https://fastapi.tiang
 
 ## Status
 
-Phase 1.2: the FastAPI application with a `GET /health` endpoint.
+Phase 1.3: the FastAPI application with a `GET /health` endpoint and typed configuration.
 The database and other backend layers are planned for later phases.
 
 ## Contents
 
 - `app/main.py`: creates the FastAPI application and registers routers
+- `app/core/config.py`: application settings, read from environment variables and `.env`
 - `app/api/routes/health.py`: `GET /health` endpoint
 - `tests/`: tests (empty for now)
 - `requirements.txt`: Python dependencies
-- `.env.example`: example environment variables (not loaded by the application yet)
+- `.env.example`: example environment variables. Copy it to `.env` for local development;
+  `.env` is ignored by Git and must not be committed.
 
 ## Installing dependencies
 
