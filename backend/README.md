@@ -8,9 +8,10 @@ The Formiq backend is written in Python and uses [FastAPI](https://fastapi.tiang
 
 ## Status
 
-Phase 1.4: the FastAPI application with a `GET /health` endpoint, typed configuration, and
-the PostgreSQL database foundation (SQLAlchemy engine, session factory, and declarative base).
-Database models, migrations, and other backend layers are planned for later phases.
+Phase 1.5: the FastAPI application with a `GET /health` endpoint, typed configuration, the
+PostgreSQL database foundation (SQLAlchemy engine, session factory, and declarative base), and
+Alembic migrations (one initial, empty migration).
+Database models and other backend layers are planned for later phases.
 
 ## Contents
 
@@ -19,6 +20,7 @@ Database models, migrations, and other backend layers are planned for later phas
 - `app/db/database.py`: SQLAlchemy engine, session factory, and the `get_db()` dependency
 - `app/db/base.py`: declarative base for future database models
 - `app/api/routes/health.py`: `GET /health` endpoint
+- `alembic.ini`, `migrations/`: Alembic configuration and migration scripts
 - `tests/`: tests (empty for now)
 - `requirements.txt`: Python dependencies
 - `.env.example`: example environment variables. Copy it to `.env` for local development;
@@ -54,6 +56,18 @@ DATABASE_URL=postgresql+psycopg://formiq:formiq@localhost:5432/formiq
 ```
 
 `DATABASE_URL` is required: the application does not start if it is not set.
+
+## Migrations
+
+Alembic is used for database migrations. It uses the same `DATABASE_URL` as the application.
+Run Alembic from the `backend/` directory, with PostgreSQL running and the virtual
+environment activated:
+
+```bash
+alembic upgrade head     # apply all migrations
+alembic downgrade base   # revert all migrations
+alembic current          # show the current revision
+```
 
 ## Running the application
 
