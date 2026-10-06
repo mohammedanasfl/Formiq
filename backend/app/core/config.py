@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     app_name: str = "Formiq"
     app_env: str = "development"
     database_url: str
+    # Used only by the integration tests; the application uses database_url.
+    test_database_url: str | None = None
 
 
 settings = Settings()

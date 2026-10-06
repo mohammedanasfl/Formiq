@@ -1,23 +1,17 @@
 """Integration tests for the users and user_profiles migration.
 
 They require the local PostgreSQL container to be running. They upgrade and
-downgrade the database that DATABASE_URL points to, and leave it at head.
+downgrade the test database (TEST_DATABASE_URL), and leave it at head.
 Rows are only added inside transactions that are rolled back.
 """
 
-from pathlib import Path
-
 import pytest
 from alembic import command
-from alembic.config import Config
 from psycopg.errors import UniqueViolation
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
-from app.db.database import engine
 from app.models import User, UserProfile
-
-ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 
 # The revision before the users and user_profiles migration.
 REVISION_BEFORE_USERS = "a4020d4605a0"
@@ -72,23 +66,22 @@ PROFILE_FIELDS = {
 
 
 @pytest.fixture
-def alembic_config():
-    config = Config(str(ALEMBIC_INI))
-    command.upgrade(config, "head")
-    yield config
-    command.upgrade(config, "head")
+def alembic_config(test_alembic_config):
+    command.upgrade(test_alembic_config, "head")
+    yield test_alembic_config
+    command.upgrade(test_alembic_config, "head")
 
 
-def table_names():
+def table_names(engine):
     return inspect(engine).get_table_names()
 
 
-def test_upgrade_creates_users_and_user_profiles_tables(alembic_config):
-    assert {"users", "user_profiles"} <= set(table_names())
+def test_upgrade_creates_users_and_user_profiles_tables(alembic_config, test_engine):
+    assert {"users", "user_profiles"} <= set(table_names(test_engine))
 
 
-def test_users_table_has_expected_columns(alembic_config):
-    inspector = inspect(engine)
+def test_users_table_has_expected_columns(alembic_config, test_engine):
+    inspector = inspect(test_engine)
     columns = inspector.get_columns("users")
     unique_constraints = inspector.get_unique_constraints("users")
 
@@ -98,8 +91,8 @@ def test_users_table_has_expected_columns(alembic_config):
     assert {tuple(c["column_names"]) for c in unique_constraints} == {("email",), ("phone",)}
 
 
-def test_user_profiles_table_has_expected_columns(alembic_config):
-    inspector = inspect(engine)
+def test_user_profiles_table_has_expected_columns(alembic_config, test_engine):
+    inspector = inspect(test_engine)
     columns = inspector.get_columns("user_profiles")
 
     assert {column["name"] for column in columns} == USER_PROFILES_COLUMNS
@@ -109,8 +102,8 @@ def test_user_profiles_table_has_expected_columns(alembic_config):
     assert inspector.get_pk_constraint("user_profiles")["constrained_columns"] == ["id"]
 
 
-def test_user_profiles_user_id_references_users_id(alembic_config):
-    foreign_keys = inspect(engine).get_foreign_keys("user_profiles")
+def test_user_profiles_user_id_references_users_id(alembic_config, test_engine):
+    foreign_keys = inspect(test_engine).get_foreign_keys("user_profiles")
 
     assert len(foreign_keys) == 1
     assert foreign_keys[0]["constrained_columns"] == ["user_id"]
@@ -118,8 +111,8 @@ def test_user_profiles_user_id_references_users_id(alembic_config):
     assert foreign_keys[0]["referred_columns"] == ["id"]
 
 
-def test_user_profiles_user_id_is_unique(alembic_config):
-    unique_constraints = inspect(engine).get_unique_constraints("user_profiles")
+def test_user_profiles_user_id_is_unique(alembic_config, test_engine):
+    unique_constraints = inspect(test_engine).get_unique_constraints("user_profiles")
 
     assert ["user_id"] in [c["column_names"] for c in unique_constraints]
 
@@ -148,12 +141,12 @@ def test_user_cannot_have_two_profiles(alembic_config, db_session):
     assert isinstance(error.value.orig, UniqueViolation)
 
 
-def test_downgrade_removes_tables_and_upgrade_recreates_them(alembic_config):
+def test_downgrade_removes_tables_and_upgrade_recreates_them(alembic_config, test_engine):
     command.downgrade(alembic_config, REVISION_BEFORE_USERS)
-    assert not {"users", "user_profiles"} & set(table_names())
+    assert not {"users", "user_profiles"} & set(table_names(test_engine))
 
     command.upgrade(alembic_config, "head")
-    assert {"users", "user_profiles"} <= set(table_names())
+    assert {"users", "user_profiles"} <= set(table_names(test_engine))
 
 
 def test_models_match_migrations(alembic_config):

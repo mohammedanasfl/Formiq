@@ -3,20 +3,39 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
-from app.db.database import SessionLocal
+from app.core.config import settings
+from tests.integration.database import check_test_database_url
 
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 
 
 @pytest.fixture(scope="session")
-def migrated_database():
-    command.upgrade(Config(str(ALEMBIC_INI)), "head")
+def test_database_url():
+    return check_test_database_url(settings.test_database_url, settings.database_url)
+
+
+@pytest.fixture(scope="session")
+def test_alembic_config(test_database_url):
+    """Alembic configuration that migrates the test database, not DATABASE_URL."""
+    config = Config(str(ALEMBIC_INI))
+    config.attributes["database_url"] = test_database_url
+    return config
+
+
+@pytest.fixture(scope="session")
+def test_engine(test_database_url, test_alembic_config):
+    command.upgrade(test_alembic_config, "head")
+    engine = create_engine(test_database_url)
+    yield engine
+    engine.dispose()
 
 
 @pytest.fixture
-def db_session(migrated_database):
-    session = SessionLocal()
+def db_session(test_engine):
+    session = Session(test_engine)
     try:
         yield session
     finally:

@@ -1,12 +1,13 @@
 """Integration tests for repository transaction behavior.
 
 Repositories flush but never commit; the caller owns commit and rollback.
-They require the local PostgreSQL container to be running.
+They require the local PostgreSQL container to be running (test database).
 """
 
 from unittest.mock import patch
 
-from app.db.database import SessionLocal
+from sqlalchemy.orm import Session
+
 from app.models import User, UserProfile
 from app.repositories import UserProfileRepository, UserRepository
 
@@ -33,10 +34,10 @@ def test_repositories_never_commit(db_session, profile_fields):
     commit.assert_not_called()
 
 
-def test_flushed_changes_are_not_visible_to_other_sessions(db_session):
+def test_flushed_changes_are_not_visible_to_other_sessions(db_session, test_engine):
     user = UserRepository(db_session).create(User(email=EMAIL))
 
-    with SessionLocal() as other_session:
+    with Session(test_engine) as other_session:
         assert UserRepository(other_session).get_by_id(user.id) is None
 
     assert db_session.in_transaction()
@@ -51,17 +52,17 @@ def test_caller_rollback_discards_repository_changes(db_session):
     assert users.get_by_id(user_id) is None
 
 
-def test_caller_commit_persists_repository_changes(db_session):
+def test_caller_commit_persists_repository_changes(db_session, test_engine):
     users = UserRepository(db_session)
     user = users.create(User(email=EMAIL))
     db_session.commit()
 
     try:
-        with SessionLocal() as other_session:
+        with Session(test_engine) as other_session:
             assert UserRepository(other_session).get_by_email(EMAIL) is not None
     finally:
         users.delete(user)
         db_session.commit()
 
-    with SessionLocal() as other_session:
+    with Session(test_engine) as other_session:
         assert UserRepository(other_session).get_by_email(EMAIL) is None

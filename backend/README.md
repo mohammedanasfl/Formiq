@@ -83,6 +83,32 @@ pytest tests/integration   # integration tests
 Integration tests require the local PostgreSQL container to be running (`docker compose up -d`
 from the repository root). Unit tests do not need PostgreSQL.
 
+### Test database
+
+Integration tests use a separate database, `formiq_test`, in the same PostgreSQL container. They
+never use the development database (`DATABASE_URL`). Configure it in `.env`:
+
+```
+TEST_DATABASE_URL=postgresql+psycopg://formiq:formiq@localhost:5432/formiq_test
+```
+
+The tests stop with an error if `TEST_DATABASE_URL` is missing, points to the same database as
+`DATABASE_URL`, or points to a database other than `formiq_test`. They apply the Alembic
+migrations to `formiq_test` themselves.
+
+`formiq_test` is created automatically when the PostgreSQL data volume is first initialized. For a
+volume created before the test database was added, create it once (from the repository root):
+
+```bash
+docker compose exec postgres createdb -U formiq formiq_test
+```
+
+To run Alembic commands against the test database, override `DATABASE_URL` for that command:
+
+```bash
+DATABASE_URL=postgresql+psycopg://formiq:formiq@localhost:5432/formiq_test alembic current
+```
+
 ## Running the application
 
 From the `backend/` directory, with the virtual environment activated:
