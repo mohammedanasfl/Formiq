@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.api.routes import (
+    coach,
     equipment,
     exercises,
     health,
@@ -20,3 +21,4 @@ app.include_router(muscle_groups.router)
 app.include_router(equipment.router)
 app.include_router(workout_plans.router)
 app.include_router(workout_sessions.router)
+app.include_router(coach.router)

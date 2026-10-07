@@ -1,3 +1,4 @@
+from app.schemas.coach import CoachMessageRequest, CoachMessageResponse
 from app.schemas.equipment import EquipmentResponse
 from app.schemas.exercise import (
     Difficulty,
@@ -73,4 +74,6 @@ __all__ = [
     "WorkoutSetCreate",
     "WorkoutSetUpdate",
     "WorkoutSetResponse",
+    "CoachMessageRequest",
+    "CoachMessageResponse",
 ]

@@ -6,3 +6,5 @@ psycopg[binary]
 alembic
 pytest
 httpx
+google-genai>=1.0
+langgraph>=1.0
