@@ -133,7 +133,10 @@ def test_catalog_migrations_follow_the_phase_2_head(alembic_config):
 
     assert script.get_revision(CATALOG_TABLES_REVISION).down_revision == REVISION_BEFORE_CATALOG
     assert script.get_revision(SEED_REVISION).down_revision == CATALOG_TABLES_REVISION
-    assert script.get_current_head() == SEED_REVISION
+    # later migrations build on the catalog: it is in the history of the one head
+    head = script.get_current_head()
+    history = {revision.revision for revision in script.iterate_revisions(head, "base")}
+    assert SEED_REVISION in history
 
 
 def test_upgrade_creates_the_catalog_tables(alembic_config, test_engine):
@@ -231,9 +234,13 @@ def test_seeded_exercises_are_valid_catalog_entries(alembic_config, db_session):
 def test_running_the_seed_again_adds_no_duplicates(alembic_config, test_engine):
     before = row_counts(test_engine)
 
-    # mark the seed as not applied while its rows are still there, then run it again
+    # mark the seed as not applied while its rows are still there and run it
+    # again; then mark the database as being at head again, which it is
     command.stamp(alembic_config, CATALOG_TABLES_REVISION)
-    command.upgrade(alembic_config, "head")
+    try:
+        command.upgrade(alembic_config, SEED_REVISION)
+    finally:
+        command.stamp(alembic_config, "head")
 
     assert row_counts(test_engine) == before
 

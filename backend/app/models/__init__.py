@@ -5,6 +5,8 @@ from app.models.exercise_muscle import ExerciseMuscle
 from app.models.muscle_group import MuscleGroup
 from app.models.user import User
 from app.models.user_profile import UserProfile
+from app.models.workout_plan import WorkoutPlan
+from app.models.workout_plan_exercise import WorkoutPlanExercise
 
 __all__ = [
     "User",
@@ -14,4 +16,6 @@ __all__ = [
     "ExerciseMuscle",
     "Equipment",
     "exercise_equipment",
+    "WorkoutPlan",
+    "WorkoutPlanExercise",
 ]

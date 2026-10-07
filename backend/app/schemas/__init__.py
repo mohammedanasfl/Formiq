@@ -15,6 +15,16 @@ from app.schemas.user_profile import (
     UserProfileResponse,
     UserProfileUpdate,
 )
+from app.schemas.workout_plan import (
+    WorkoutPlanCreate,
+    WorkoutPlanExerciseCreate,
+    WorkoutPlanExerciseResponse,
+    WorkoutPlanExerciseUpdate,
+    WorkoutPlanFilters,
+    WorkoutPlanResponse,
+    WorkoutPlanStatus,
+    WorkoutPlanUpdate,
+)
 
 __all__ = [
     "UserCreate",
@@ -31,4 +41,12 @@ __all__ = [
     "ExerciseResponse",
     "MuscleGroupResponse",
     "EquipmentResponse",
+    "WorkoutPlanStatus",
+    "WorkoutPlanCreate",
+    "WorkoutPlanUpdate",
+    "WorkoutPlanResponse",
+    "WorkoutPlanFilters",
+    "WorkoutPlanExerciseCreate",
+    "WorkoutPlanExerciseUpdate",
+    "WorkoutPlanExerciseResponse",
 ]

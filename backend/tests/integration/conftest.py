@@ -4,14 +4,14 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db import database
 from app.db.database import get_db
 from app.main import app
-from app.models import User, UserProfile
+from app.models import Exercise, User, UserProfile, WorkoutPlan, WorkoutPlanExercise
 from tests.integration.database import check_test_database_url
 
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
@@ -49,6 +49,9 @@ def db_session(test_engine):
 
 def delete_user_rows(engine):
     with Session(engine) as session:
+        # workout plans first: a user with plans cannot be deleted (RESTRICT);
+        # their exercises are deleted with them (CASCADE)
+        session.execute(delete(WorkoutPlan))
         session.execute(delete(UserProfile))
         session.execute(delete(User))
         session.commit()
@@ -155,6 +158,38 @@ def catalog_client(rollback_connection, monkeypatch):
         yield TestClient(app)
     finally:
         app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture
+def catalog_exercise_ids(test_engine):
+    """IDs of the seeded catalog exercises, by name."""
+    with Session(test_engine) as session:
+        return dict(session.execute(select(Exercise.name, Exercise.id)).all())
+
+
+@pytest.fixture
+def retirable_exercise_id(test_engine):
+    """A committed, active catalog exercise that the test may retire.
+
+    It is deleted afterwards, with the plan exercises that use it, because the
+    catalog tests expect the catalog to hold only the seed.
+    """
+    with Session(test_engine) as session:
+        exercise = Exercise(
+            name="Test Retirable Exercise", difficulty="BEGINNER", movement_pattern="SQUAT"
+        )
+        session.add(exercise)
+        session.commit()
+        exercise_id = exercise.id
+    try:
+        yield exercise_id
+    finally:
+        with Session(test_engine) as session:
+            session.execute(
+                delete(WorkoutPlanExercise).where(WorkoutPlanExercise.exercise_id == exercise_id)
+            )
+            session.execute(delete(Exercise).where(Exercise.id == exercise_id))
+            session.commit()
 
 
 @pytest.fixture
