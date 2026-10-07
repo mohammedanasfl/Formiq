@@ -5,15 +5,16 @@ sends every request to the test database. The model is a mock, or a real
 GeminiProvider whose SDK client is a mock: no test calls the Gemini API.
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
-from google.genai import errors
+from google.genai import errors, types
 
-from app.ai import GeminiProvider
+from app.ai import GeminiProvider, user_content
 from app.api.dependencies import get_ai_provider
 from app.main import app
+from tests.coach import fake_provider, text_turn
 
 API_KEY = "test-secret-key"
 URL = "/coach/message"
@@ -40,9 +41,7 @@ def use_provider(client):
 
 @pytest.fixture
 def provider(use_provider):
-    provider = Mock(spec=GeminiProvider)
-    provider.generate.return_value = "Start with three sets of eight."
-    return use_provider(provider)
+    return use_provider(fake_provider(text_turn("Start with three sets of eight.")))
 
 
 def test_message_returns_200_and_the_reply(client, user_id, provider):
@@ -51,7 +50,7 @@ def test_message_returns_200_and_the_reply(client, user_id, provider):
     assert response.status_code == 200
     assert response.json() == {"reply": "Start with three sets of eight."}
     # surrounding whitespace is dropped before the model sees the message
-    assert provider.generate.call_args.args == ("How should I start?",)
+    assert provider.generate_turn.call_args.args == ([user_content("How should I start?")],)
 
 
 def test_message_of_an_unknown_user_returns_404(client, provider):
@@ -59,7 +58,7 @@ def test_message_of_an_unknown_user_returns_404(client, provider):
 
     assert response.status_code == 404
     assert response.json() == {"detail": "user 2147483647 does not exist"}
-    provider.generate.assert_not_called()
+    provider.generate_turn.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -91,7 +90,7 @@ def test_invalid_body_returns_422(client, provider, body):
     response = client.post(URL, json=body)
 
     assert response.status_code == 422
-    provider.generate.assert_not_called()
+    provider.generate_turn.assert_not_called()
 
 
 def test_longest_message_is_accepted(client, user_id, provider):
@@ -138,9 +137,44 @@ def test_provider_failure_returns_502_without_its_details(client, user_id, use_p
 
 def test_reply_without_text_returns_502(client, user_id, use_provider):
     with patch("app.ai.gemini.genai.Client") as client_class:
-        client_class.return_value.models.generate_content.return_value.text = None
+        client_class.return_value.models.generate_content.return_value = (
+            types.GenerateContentResponse(candidates=[])
+        )
         use_provider(GeminiProvider(API_KEY, "gemini-3.8-flash", timeout_seconds=30))
 
         response = client.post(URL, json={"user_id": user_id, "message": "Hi"})
 
     assert response.status_code == 502
+
+
+def test_the_coach_answers_after_a_tool_call(client, user_id, use_provider):
+    # a real provider and graph, with the real tools on the test database
+    calls_profile = types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(
+                    role="model",
+                    parts=[types.Part(function_call=types.FunctionCall(name="get_user_profile"))],
+                )
+            )
+        ]
+    )
+    answers = types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(role="model", parts=[types.Part(text="Set up a profile.")])
+            )
+        ]
+    )
+    with patch("app.ai.gemini.genai.Client") as client_class:
+        generate_content = client_class.return_value.models.generate_content
+        generate_content.side_effect = [calls_profile, answers]
+        use_provider(GeminiProvider(API_KEY, "gemini-3.8-flash", timeout_seconds=30))
+
+        response = client.post(URL, json={"user_id": user_id, "message": "What is my goal?"})
+
+    assert response.status_code == 200
+    assert response.json() == {"reply": "Set up a profile."}
+    # the user has no profile: the model got the tool's error, the client only the reply
+    tool_result = generate_content.call_args.kwargs["contents"][-1].parts[0].function_response
+    assert tool_result.response["error"]["code"] == "PROFILE_NOT_FOUND"

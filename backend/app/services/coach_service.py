@@ -4,6 +4,12 @@ from app.agent import CoachContext, coach_graph
 from app.ai import GeminiProvider
 from app.repositories import UserRepository
 from app.services.exceptions import UserNotFoundError
+from app.services.exercise_catalog_service import ExerciseCatalogService
+from app.services.user_profile_service import UserProfileService
+from app.services.user_service import UserService
+from app.services.workout_plan_service import WorkoutPlanService
+from app.services.workout_session_service import WorkoutSessionService
+from app.tools import FormiqTools
 
 
 class CoachService:
@@ -20,12 +26,24 @@ class CoachService:
         """
         if self.users.get_by_id(user_id) is None:
             raise UserNotFoundError(f"user {user_id} does not exist")
-        # Nothing else is read: end the read transaction, so its connection goes
-        # back to the pool while the model answers, which can take seconds.
+        # End the read transaction, so its connection goes back to the pool
+        # while the model answers, which can take seconds. The tools end theirs
+        # the same way.
         self.session.rollback()
 
         state = coach_graph.invoke(
             {"user_id": user_id, "message": message},
-            context=CoachContext(provider=self.provider),
+            context=CoachContext(provider=self.provider, tools=self._tools()),
         )
         return state["reply"]
+
+    def _tools(self) -> FormiqTools:
+        """The coach's read-only tools, reading through the services on this session."""
+        return FormiqTools(
+            users=UserService(self.session),
+            profiles=UserProfileService(self.session),
+            plans=WorkoutPlanService(self.session),
+            sessions=WorkoutSessionService(self.session),
+            catalog=ExerciseCatalogService(self.session),
+            end_read=self.session.rollback,
+        )
