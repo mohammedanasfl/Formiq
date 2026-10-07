@@ -75,8 +75,8 @@ def test_history_reaches_the_model_compacted(client, user_id, use_provider):
     context, message = sent_contents(provider, 0)[0].parts
     assert message.text == "And Fridays?"
     assert "[44 earlier messages are left out.]" in context.text
-    assert "Coach: turn 49" in context.text
-    assert "turn 0\n" not in context.text
+    assert '<turn from="coach">turn 49</turn>' in context.text
+    assert ">turn 0<" not in context.text
 
 
 @pytest.mark.parametrize(
@@ -119,7 +119,7 @@ def test_a_user_id_inside_the_history_changes_nothing(client, user_id, use_provi
 
     assert response.status_code == 200
     context = sent_contents(provider, 0)[0].parts[0].text
-    assert "User: Hello" in context
+    assert '<turn from="user">Hello</turn>' in context
     assert str(user_id + 1) not in context
 
 

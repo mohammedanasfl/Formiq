@@ -109,7 +109,7 @@ def test_the_earlier_conversation_comes_before_the_message_as_its_own_text():
     assert first.role == "user"
     assert message.text == "And on Fridays?"
     assert context.text == render_conversation(compact_conversation(history))
-    assert "Coach: answer 1" in context.text
+    assert '<turn from="coach">answer 1</turn>' in context.text
 
 
 def test_earlier_coach_replies_are_never_sent_as_the_models_own_turns():
@@ -129,7 +129,8 @@ def test_a_long_conversation_reaches_the_model_compacted():
     assert state["conversation"].omitted == 400 - 6
     assert len(state["conversation"].turns) == 6
     assert "[394 earlier messages are left out.]" in first.parts[0].text
-    assert "question 0\n" not in first.parts[0].text
+    assert ">question 0<" not in first.parts[0].text
+    assert ">question 199<" in first.parts[0].text
 
 
 # safety: the current message decides
@@ -362,3 +363,81 @@ def test_compaction_is_logged_as_counts_not_content(caplog, monkeypatch):
     assert record.getMessage().endswith("results_compacted=1 compactions=1")
     assert "Secret" not in caplog.text
     assert "xxxxx" not in caplog.text
+
+
+# a compacted result is no evidence
+
+BIG_SEARCH = {"output": {"exercises": [{"exercise_id": 5, "notes": "x" * 5_000}], "count": 1}}
+
+
+def plan_then_searches():
+    return FakeTools(
+        result=lambda item: BIG_PLAN if item.name == "get_workout_plan" else BIG_SEARCH
+    )
+
+
+def test_an_answer_from_a_compacted_result_is_rejected_until_the_tool_is_called_again():
+    tools = plan_then_searches()
+    provider = fake_provider(
+        tool_turn(call("get_workout_plan", plan_id=12)),
+        tool_turn(call("search_exercises", difficulty="BEGINNER")),
+        tool_turn(call("search_exercises", difficulty="BEGINNER")),
+        # the plan's data was compacted out of this request: no evidence for it
+        respond_turn("Plan 12 has one exercise.", "WORKOUT_PLAN", "RETRIEVE_THEN_ANSWER"),
+        tool_turn(call("get_workout_plan", plan_id=12)),
+        respond_turn("Plan 12 has one exercise.", "WORKOUT_PLAN", "RETRIEVE_THEN_ANSWER"),
+    )
+
+    state = run(provider, tools, "What is in plan 12?", max_context_chars=budget_for_rounds(2))
+
+    assert results_sent(provider, 3) == [COMPACTED_RESULT, BIG_SEARCH, BIG_SEARCH]
+    (rejected,) = results_sent(provider, 4)[-1:]
+    assert rejected["error"]["code"] == "DECISION_REJECTED"
+    assert "none was returned" in rejected["error"]["message"]
+    # called again, the plan is in the latest round, which is never compacted
+    assert results_sent(provider, 5)[-1] == BIG_PLAN
+    assert state["final_response"] == "Plan 12 has one exercise."
+    assert state["decision"] == CoachDecision(
+        Intent.WORKOUT_PLAN,
+        Decision.RETRIEVE_THEN_ANSWER,
+        ("get_workout_plan", "search_exercises"),
+    )
+    # the call again was an ordinary call: grounded, for the trusted user, counted
+    assert [calls[0].name for calls, _ in tools.runs].count("get_workout_plan") == 2
+    assert {user_id for _, user_id in tools.runs} == {USER}
+    assert state["iteration_count"] == MAX_TOOL_ITERATIONS
+
+
+def test_an_answer_from_a_compacted_result_alone_never_reaches_the_user():
+    tools = plan_then_searches()
+    provider = Mock(spec=GeminiProvider)
+    provider.generate_turn.side_effect = [
+        tool_turn(call("get_workout_plan", plan_id=12)),
+        tool_turn(call("search_exercises", difficulty="BEGINNER")),
+        tool_turn(call("search_exercises", difficulty="BEGINNER")),
+        *[respond_turn("Plan 12 has one exercise.", "WORKOUT_PLAN", "RETRIEVE_THEN_ANSWER")] * 3,
+    ]
+
+    state = run(provider, tools, "What is in plan 12?", max_context_chars=budget_for_rounds(2))
+
+    assert state["final_response"] == CANNOT_ANSWER_REPLY
+    assert state["decision"].decision is Decision.CANNOT_ANSWER
+    # the state still holds the full result: only the evidence changed
+    assert state["messages"][1].result == BIG_PLAN
+
+
+def test_an_uncompacted_result_is_still_evidence():
+    # the same turn within a budget that compacts nothing
+    tools = plan_then_searches()
+    provider = fake_provider(
+        tool_turn(call("get_workout_plan", plan_id=12)),
+        tool_turn(call("search_exercises", difficulty="BEGINNER")),
+        tool_turn(call("search_exercises", difficulty="BEGINNER")),
+        respond_turn("Plan 12 has one exercise.", "WORKOUT_PLAN", "RETRIEVE_THEN_ANSWER"),
+    )
+
+    state = run(provider, tools, "What is in plan 12?")
+
+    assert results_sent(provider, 3)[0] == BIG_PLAN
+    assert state["final_response"] == "Plan 12 has one exercise."
+    assert state["context_compactions"] == 0
