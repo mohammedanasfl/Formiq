@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     # How long a Gemini request may take; a slower one fails like any other
     # provider error.
     gemini_timeout_seconds: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 30.0
+    # Langfuse tracing of the coach (the SDK's own variable names). Off unless
+    # enabled and both keys are set; without it the coach works the same.
+    langfuse_tracing_enabled: bool = False
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    # seconds the background export may wait on Langfuse; requests never do
+    langfuse_timeout: Annotated[int, Field(gt=0)] = 5
 
 
 settings = Settings()

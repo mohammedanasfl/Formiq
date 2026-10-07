@@ -8,3 +8,4 @@ pytest
 httpx
 google-genai>=1.0
 langgraph>=1.0
+langfuse>=4.17,<5

@@ -12,7 +12,11 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-from app.ai.exceptions import AIProviderError, AIProviderNotConfiguredError
+from app.ai.exceptions import (
+    AIModelOutputError,
+    AIProviderError,
+    AIProviderNotConfiguredError,
+)
 from app.ai.tool_calling import CoachMessage, ModelTurn, ToolCall, ToolDeclaration, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -42,7 +46,7 @@ class GeminiProvider:
         if not response.text:
             # for example when the prompt or the reply was blocked
             logger.warning("%s returned no text: %s", self.model, response.prompt_feedback)
-            raise AIProviderError(f"{self.model} returned no text")
+            raise AIModelOutputError(f"{self.model} returned no text")
         return response.text
 
     def generate_turn(
@@ -79,22 +83,25 @@ class GeminiProvider:
         if function_calls:
             if not allow_tool_calls:
                 logger.warning("%s called a tool when only text was allowed", self.model)
-                raise AIProviderError(f"{self.model} returned no text")
+                raise AIModelOutputError(f"{self.model} returned no text")
             return ModelTurn(
                 content=response.candidates[0].content,
                 tool_calls=tuple(
                     ToolCall(name=call.name or "", arguments=dict(call.args or {}), id=call.id)
                     for call in function_calls
                 ),
+                usage=token_usage(response),
             )
         if required_tool_names is not None:
             logger.warning("%s answered without the required tool call", self.model)
-            raise AIProviderError(f"{self.model} returned no tool call")
+            raise AIModelOutputError(f"{self.model} returned no tool call")
         if not response.text:
             # for example when the prompt or the reply was blocked
             logger.warning("%s returned no text: %s", self.model, response.prompt_feedback)
-            raise AIProviderError(f"{self.model} returned no text")
-        return ModelTurn(content=response.candidates[0].content, text=response.text)
+            raise AIModelOutputError(f"{self.model} returned no text")
+        return ModelTurn(
+            content=response.candidates[0].content, text=response.text, usage=token_usage(response)
+        )
 
     def _generate_content(
         self, contents: str | list[types.Content], config: types.GenerateContentConfig
@@ -110,6 +117,21 @@ class GeminiProvider:
             # to the server log only.
             logger.exception("Gemini request to %s failed", self.model)
             raise AIProviderError(f"the {self.model} request failed") from error
+
+
+def token_usage(response: types.GenerateContentResponse) -> dict[str, int] | None:
+    """The token counts Gemini reported for the response, or None when it reported
+    none. Only counts: nothing of the content."""
+    usage = response.usage_metadata
+    if usage is None:
+        return None
+    counts = {
+        "input_tokens": usage.prompt_token_count,
+        "output_tokens": usage.candidates_token_count,
+        "reasoning_tokens": usage.thoughts_token_count,
+        "total_tokens": usage.total_token_count,
+    }
+    return {name: count for name, count in counts.items() if isinstance(count, int)} or None
 
 
 def conversation(

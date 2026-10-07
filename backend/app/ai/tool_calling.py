@@ -42,6 +42,9 @@ class ModelTurn:
     content: Any
     text: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    # the token counts the provider reported for this turn, if it did: for
+    # observability only, never sent back to the model
+    usage: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)

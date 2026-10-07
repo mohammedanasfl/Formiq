@@ -8,3 +8,8 @@ class AIProviderError(Exception):
 
 class AIProviderNotConfiguredError(AIProviderError):
     """No API key is configured, so the model cannot be called."""
+
+
+class AIModelOutputError(AIProviderError):
+    """The model answered, but not as the request required: no text, no tool
+    call, or tool calls the turn does not allow."""

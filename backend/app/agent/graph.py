@@ -43,7 +43,7 @@ context's user only. Nothing is kept after the turn.
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from langgraph.graph import END, START, StateGraph
@@ -75,8 +75,10 @@ from app.agent.policy import (
 )
 from app.agent.safety import SafetyAssessment, assess_safety
 from app.agent.state import CoachState
-from app.agent.trust import reply_problem
+from app.agent.trace_metadata import call_metadata, result_metadata
+from app.agent.trust import REPLY_PROBLEMS, reply_problem
 from app.ai import (
+    AIModelOutputError,
     AIProviderError,
     CoachMessage,
     GeminiProvider,
@@ -85,6 +87,7 @@ from app.ai import (
     ToolDeclaration,
     ToolResult,
 )
+from app.observability import Failure, Observation, RunTrace, no_trace, tool_failure
 
 logger = logging.getLogger(__name__)
 
@@ -250,13 +253,31 @@ class CoachContext:
     max_tool_iterations: int = MAX_TOOL_ITERATIONS
     # the most characters one model request may hold (app.agent.context)
     max_context_chars: int = CONTEXT_MAX_CHARS
+    # The request's trace (app.observability): written to, never read. A run
+    # outside a traced request records nothing.
+    trace: RunTrace = field(default_factory=no_trace)
 
 
 def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, Any]:
     context = runtime.context
+    trace = context.trace
+    iteration = state["iteration_count"]
     assessment = assess_safety(state["user_message"])
     safety = SAFETY_POLICY.get(assessment.category)
-    within_limit = state["iteration_count"] < context.max_tool_iterations
+    within_limit = iteration < context.max_tool_iterations
+    if not state["messages"]:
+        # the turn's first request: the safety check came before anything else
+        with trace.child(
+            "safety_check",
+            "guardrail",
+            safety_flagged=safety is not None,
+            safety_category=assessment.category,
+            safety_rule=assessment.signal,
+            model_call_allowed=True,
+            tool_calls_allowed=safety is None,
+            allowed_decisions=sorted(safety.decisions) if safety else [],
+        ):
+            pass
     if safety is not None:
         logger.info(
             "Safety check: category=%s signal=%s", assessment.category, assessment.signal
@@ -273,41 +294,83 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
                 context.max_tool_iterations,
             )
 
-    fit = fit_messages(state, state["messages"], instructions, context)
-    compactions = state["context_compactions"] + (1 if fit.compacted_results else 0)
-    if not fit.fits or compactions > MAX_CONTEXT_COMPACTIONS:
-        # never send more than the budget: no turn, so the tools node ends the turn
-        logger.warning(
-            "The coach's context is over its budget: size=%d budget=%d compactions=%d; "
-            "the turn ends without the model",
-            fit.size,
-            context.max_context_chars,
-            compactions,
-        )
-        return {"messages": []}
-    if fit.compacted_results:
-        logger.info(
-            "Context compacted: size=%d->%d results_compacted=%d compactions=%d",
-            fit.size_before,
-            fit.size,
-            fit.compacted_results,
-            compactions,
-        )
+    with trace.child(
+        "model_turn", "chain", iteration=iteration, decision_only=not within_limit
+    ) as step:
+        with step.child("context_fit") as fitting:
+            fit = fit_messages(state, state["messages"], instructions, context)
+            compactions = state["context_compactions"] + (1 if fit.compacted_results else 0)
+            fitting.update(
+                messages_before=len(state["messages"]),
+                conversation_turns=len(state["conversation"].turns),
+                conversation_omitted=state["conversation"].omitted,
+                chars_before=fit.size_before,
+                chars_after=fit.size,
+                compaction_occurred=bool(fit.compacted_results),
+                compacted_tool_results=fit.compacted_results,
+                compaction_count=compactions,
+                context_budget=context.max_context_chars,
+                context_fit_success=fit.fits and compactions <= MAX_CONTEXT_COMPACTIONS,
+            )
+        if not fit.fits or compactions > MAX_CONTEXT_COMPACTIONS:
+            # never send more than the budget: no turn, so the tools node ends the turn
+            failure = (
+                Failure.CONTEXT_BUDGET_EXCEEDED
+                if not fit.fits
+                else Failure.COMPACTION_LIMIT_EXCEEDED
+            )
+            step.fail(failure)
+            trace.update(termination=failure)
+            logger.warning(
+                "The coach's context is over its budget: size=%d budget=%d compactions=%d; "
+                "the turn ends without the model",
+                fit.size,
+                context.max_context_chars,
+                compactions,
+            )
+            return {"messages": []}
+        if fit.compacted_results:
+            trace.count("compacted_tool_results", fit.compacted_results)
+            logger.info(
+                "Context compacted: size=%d->%d results_compacted=%d compactions=%d",
+                fit.size_before,
+                fit.size,
+                fit.compacted_results,
+                compactions,
+            )
 
-    try:
-        turn = model_turn(fit.contents, context, declarations, instructions, within_limit, safety)
-    except AIProviderError as error:
-        if safety is None:
-            raise
-        # A flagged request does not need the model to be answered safely: no
-        # turn, so the tools node ends it with Formiq's safe reply.
-        logger.warning(
-            "The model could not answer a request flagged %s (%s); Formiq's safe reply "
-            "ends the turn",
-            assessment.category,
-            error,
-        )
-        return {"messages": []}
+        trace.count("model_requests")
+        try:
+            with step.child(
+                "gemini",
+                "generation",
+                model=getattr(context.provider, "model", None),
+                iteration=iteration,
+                content_count=len(fit.contents),
+                context_chars=fit.size,
+                tool_results_sent=sum(isinstance(m, ToolResult) for m in state["messages"]),
+                offered_tools=[tool.name for tool in declarations],
+            ) as generation:
+                turn = model_turn(
+                    fit.contents, context, declarations, instructions, within_limit, safety
+                )
+                generation.usage(turn.usage)
+                generation.update(
+                    requested_tool_calls=len(turn.tool_calls),
+                    called_respond=any(call.name == RESPOND.name for call in turn.tool_calls),
+                )
+        except AIProviderError as error:
+            if safety is None:
+                raise
+            # A flagged request does not need the model to be answered safely: no
+            # turn, so the tools node ends it with Formiq's safe reply.
+            logger.warning(
+                "The model could not answer a request flagged %s (%s); Formiq's safe reply "
+                "ends the turn",
+                assessment.category,
+                error,
+            )
+            return {"messages": []}
     return {"messages": [turn], "context_compactions": compactions}
 
 
@@ -332,29 +395,31 @@ def model_turn(
     )
     if not turn.tool_calls:
         # the provider should have refused; a turn must end with a decision
-        raise AIProviderError("the model answered without calling respond")
+        raise AIModelOutputError("the model answered without calling respond")
     if safety is None and not within_limit and any(
         call.name != RESPOND.name for call in turn.tool_calls
     ):
         # the provider should have refused; the loop must end regardless
-        raise AIProviderError("the model called a tool after the tool limit")
+        raise AIModelOutputError("the model called a tool after the tool limit")
     if len(turn.tool_calls) > MAX_REQUESTED_TOOL_CALLS_PER_TURN:
         logger.warning(
             "The model requested %d tool calls in one turn; at most %d are accepted",
             len(turn.tool_calls),
             MAX_REQUESTED_TOOL_CALLS_PER_TURN,
         )
-        raise AIProviderError("the model requested too many tool calls in one turn")
+        raise AIModelOutputError("the model requested too many tool calls in one turn")
     return turn
 
 
 def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, Any]:
     context = runtime.context
+    trace = context.trace
+    iteration = state["iteration_count"]
     assessment = assess_safety(state["user_message"])
     turn = latest_turn(state)
     if (safety := SAFETY_POLICY.get(assessment.category)) is not None:
         return end_safely(
-            turn.tool_calls if turn else None, assessment, safety, tool_names(context)
+            turn.tool_calls if turn else None, assessment, safety, tool_names(context), trace
         )
     earlier = [message for message in state["messages"] if isinstance(message, ToolResult)]
     if turn is None:
@@ -367,15 +432,18 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
 
     respond = None
     if len(calls) == 1 and calls[0].name == RESPOND.name:
+        seen = seen_results(state, context)
         respond, rejection = check_respond(
-            calls[0], seen_results(state, context), assessment, COACH_INSTRUCTIONS,
-            tool_names(context),
+            calls[0], seen, assessment, COACH_INSTRUCTIONS, tool_names(context), trace,
+            iteration=iteration, compacted_excluded=len(earlier) - len(seen),
         )
         if rejection is None:
+            trace.update(termination="decision_accepted")
             return accept(respond, earlier, assessment)
         results = [error_result(DECISION_REJECTED, rejection)]
     else:
-        results = run_calls(calls, state["user_message"], earlier, context)
+        with trace.child("tool_calls", iteration=iteration, requested=len(calls)) as batch:
+            results = run_calls(calls, state["user_message"], earlier, context, batch, iteration)
 
     update: dict[str, Any] = {
         "messages": [
@@ -387,6 +455,7 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
     if state["iteration_count"] >= context.max_tool_iterations:
         # past the limit only a decision could end the turn, and none was accepted
         logger.warning("The coach reached no acceptable decision: %s", results[0])
+        trace.update(termination="retry_limit_reached")
         update["final_response"] = CANNOT_ANSWER_REPLY
         update["decision"] = CoachDecision(
             respond.intent if respond else Intent.AMBIGUOUS,
@@ -433,17 +502,26 @@ def end_safely(
     assessment: SafetyAssessment,
     safety: SafetyPolicy,
     names: Sequence[str],
+    trace: RunTrace,
 ) -> dict[str, Any]:
     """End the turn of a request the safety backstop flagged, without running any
     tool: with the model's decision if the safety policy accepts it, or else
     with Formiq's own safe reply. calls is None when the model gave no turn."""
     rejection = "the model gave no turn" if calls is None else "no tool may run"
+    reason = "no_model_turn" if calls is None else "tools_requested"
     if calls is not None and len(calls) == 1 and calls[0].name == RESPOND.name:
         respond, rejection = check_respond(
-            calls[0], (), assessment, safety_instructions(safety), names
+            calls[0], (), assessment, safety_instructions(safety), names, trace, iteration=0
         )
         if rejection is None:
+            trace.update(termination="decision_accepted", safety_path="model")
             return accept(respond, (), assessment)
+        reason = "decision_rejected"
+    trace.update(
+        termination="safety_fallback",
+        safety_path="fixed_safe_response",
+        safety_fallback_reason=reason,
+    )
     logger.warning(
         "The coach's decision broke the safety policy for %s: %s", assessment.category, rejection
     )
@@ -478,9 +556,13 @@ def run_calls(
     user_message: str,
     earlier: Sequence[ToolResult],
     context: CoachContext,
+    batch: Observation,
+    iteration: int,
 ) -> list[dict[str, Any]]:
     """One result per call: the tools' results for the calls they may run, and an
-    error for a respond call among other calls or an id nobody gave."""
+    error for a respond call among other calls or an id nobody gave. Each call is
+    a tool observation under the batch; the tools run all of a turn's calls at
+    once (their per-turn limit spans them), so each spans that run."""
     results: dict[int, dict[str, Any]] = {}
     known = known_ids(user_message, earlier)
     runnable = []
@@ -497,11 +579,38 @@ def run_calls(
             )
         else:
             runnable.append(index)
-    if runnable:
-        # the trusted user of the request, whatever the calls' arguments say
-        ran = context.tools.run([calls[index] for index in runnable], user_id=context.user_id)
-        results.update(zip(runnable, ran, strict=True))
+    observed = [
+        batch.start(call.name, "tool", iteration=iteration, **call_metadata(call))
+        for call in calls
+    ]
+    try:
+        if runnable:
+            # the trusted user of the request, whatever the calls' arguments say
+            ran = context.tools.run([calls[index] for index in runnable], user_id=context.user_id)
+            results.update(zip(runnable, ran, strict=True))
+    finally:
+        record_tool_results(context.trace, calls, results, runnable, observed)
     return [results[index] for index in range(len(calls))]
+
+
+def record_tool_results(
+    trace: RunTrace,
+    calls: Sequence[ToolCall],
+    results: dict[int, dict[str, Any]],
+    runnable: Sequence[int],
+    observed: Sequence[Observation],
+) -> None:
+    """Each call's outcome, in its tool observation, and the trace's counts."""
+    trace.count("tool_calls_requested", sum(call.name != RESPOND.name for call in calls))
+    trace.count("tool_calls_executed", len(runnable))
+    for index, observation in enumerate(observed):
+        if (result := results.get(index)) is not None:
+            observation.update(executed=index in runnable, **result_metadata(result))
+            if "error" in result:
+                failure = tool_failure(result["error"].get("code"))
+                observation.fail(failure)
+                trace.count(f"tool_{failure}")
+        observation.end()
 
 
 def check_respond(
@@ -510,23 +619,53 @@ def check_respond(
     assessment: SafetyAssessment,
     instructions: str,
     names: Sequence[str],
+    trace: RunTrace,
+    *,
+    iteration: int,
+    compacted_excluded: int = 0,
 ) -> tuple[Respond | None, str | None]:
     """The respond call's arguments, and why its decision cannot end the turn
     (None when it can): the decision policy, the safety policy, then the reply
-    itself (app.agent.trust), whatever text led the model to it."""
-    try:
-        respond = Respond.model_validate(call.arguments)
-    except ValidationError as error:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in item['loc']) or 'arguments'}: {item['msg']}"
-            for item in error.errors()
+    itself (app.agent.trust), whatever text led the model to it. Each check is
+    a guardrail observation in the trace."""
+    with trace.child(
+        "decision_validation",
+        "guardrail",
+        iteration=iteration,
+        evidence_results=len(results),
+        compacted_results_excluded=compacted_excluded,
+    ) as check:
+        try:
+            respond = Respond.model_validate(call.arguments)
+        except ValidationError as error:
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in item['loc']) or 'arguments'}: {item['msg']}"
+                for item in error.errors()
+            )
+            trace.count("decision_rejections")
+            check.warn(Failure.DECISION_REJECTED, accepted=False, rejected_by="invalid_call")
+            return None, f"invalid respond call: {problems}"
+        check.update(intent=respond.intent, decision=respond.decision)
+        policy = check_decision(respond.intent, respond.decision, results)
+        rejection = policy or check_safety(
+            assessment, respond.intent, respond.decision, respond.reply
         )
-        return None, f"invalid respond call: {problems}"
-    return respond, (
-        check_decision(respond.intent, respond.decision, results)
-        or check_safety(assessment, respond.intent, respond.decision, respond.reply)
-        or reply_problem(respond.reply, instructions, names)
-    )
+        if rejection is not None:
+            trace.count("decision_rejections")
+            check.warn(
+                Failure.DECISION_REJECTED,
+                accepted=False,
+                rejected_by="decision_policy" if policy else "safety_policy",
+            )
+            return respond, rejection
+        check.update(accepted=True)
+    with trace.child("reply_validation", "guardrail", iteration=iteration) as reply_check:
+        rejection = reply_problem(respond.reply, instructions, names)
+        reply_check.update(reply_chars=len(respond.reply), accepted=rejection is None)
+        if rejection is not None:
+            trace.count("reply_rejections")
+            reply_check.warn(Failure.REPLY_REJECTED, reason=REPLY_PROBLEMS.get(rejection))
+    return respond, rejection
 
 
 def tool_names(context: CoachContext) -> list[str]:
