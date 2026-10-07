@@ -21,6 +21,7 @@ from app.agent import (
     coach_graph,
     initial_state,
 )
+from app.agent.context import NO_CONVERSATION
 from app.agent.graph import safety_instructions
 from app.agent.policy import INTERNAL_LABELS
 from app.agent.safety import _RULES, SAFE_REPLIES
@@ -373,8 +374,10 @@ def test_a_flagged_turns_state_holds_only_the_turn():
     assert set(state) == set(CoachState.__annotations__)
     assert state == {
         "user_message": KNEE,
+        "conversation": NO_CONVERSATION,
         "messages": [turn],
         "iteration_count": 0,
+        "context_compactions": 0,
         "final_response": REDIRECT,
         "decision": CoachDecision(Intent.SAFETY_SENSITIVE, Decision.SAFE_REDIRECT, (), PAIN),
     }

@@ -451,8 +451,10 @@ def test_only_the_reply_reaches_the_user_never_the_models_thoughts():
     assert "fat loss" not in repr(state["decision"])
     assert set(state) == {
         "user_message",
+        "conversation",
         "messages",
         "iteration_count",
+        "context_compactions",
         "final_response",
         "decision",
     }

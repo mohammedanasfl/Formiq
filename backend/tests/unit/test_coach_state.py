@@ -19,6 +19,7 @@ from app.agent import (
     coach_graph,
     initial_state,
 )
+from app.agent.context import NO_CONVERSATION, ConversationContext, ConversationTurn
 from app.ai import (
     AIProviderError,
     GeminiProvider,
@@ -55,7 +56,11 @@ def as_json(value):
     session or the provider, fails."""
 
     def plain(item):
-        if isinstance(item, ModelTurn | ToolResult | ToolCall | CoachDecision):
+        if isinstance(
+            item,
+            ModelTurn | ToolResult | ToolCall | CoachDecision | ConversationContext
+            | ConversationTurn,
+        ):
             return {"type": type(item).__name__, **plain(dataclasses.asdict(item))}
         if isinstance(item, types.Content):
             return item.model_dump(mode="json", exclude_none=True)
@@ -88,12 +93,14 @@ def test_a_turns_state_is_the_request_and_what_followed():
 
     assert state == {
         "user_message": "What is my current goal?",
+        "conversation": NO_CONVERSATION,
         "messages": [
             asking,
             ToolResult(call=asking.tool_calls[0], result={"output": {"tool": "get_user_profile"}}),
             answer,
         ],
         "iteration_count": 1,
+        "context_compactions": 0,
         "final_response": "Your goal is muscle gain.",
         "decision": CoachDecision(
             Intent.PROFILE, Decision.RETRIEVE_THEN_ANSWER, ("get_user_profile",)
@@ -127,8 +134,10 @@ def test_nothing_about_the_user_is_loaded_ahead_of_the_model():
     assert tools.runs == []
     assert state == {
         "user_message": "What is overload?",
+        "conversation": NO_CONVERSATION,
         "messages": [answer],
         "iteration_count": 0,
+        "context_compactions": 0,
         "final_response": "Lift a bit more over time.",
         "decision": CoachDecision(Intent.GENERAL_FITNESS, Decision.ANSWER, ()),
     }
@@ -327,8 +336,10 @@ def test_a_turn_starts_from_a_complete_state():
 
     assert state == {
         "user_message": "What is my goal?",
+        "conversation": NO_CONVERSATION,
         "messages": [],
         "iteration_count": 0,
+        "context_compactions": 0,
         "final_response": None,
         "decision": None,
     }
@@ -343,8 +354,10 @@ def test_every_turn_ends_with_the_same_complete_shape(tool_rounds):
 
     assert set(state) == {
         "user_message",
+        "conversation",
         "messages",
         "iteration_count",
+        "context_compactions",
         "final_response",
         "decision",
     }

@@ -1,6 +1,8 @@
+from collections.abc import Sequence
+
 from sqlalchemy.orm import Session
 
-from app.agent import CoachContext, coach_graph, initial_state
+from app.agent import CoachContext, ConversationTurn, coach_graph, initial_state
 from app.ai import GeminiProvider
 from app.repositories import UserRepository
 from app.services.exceptions import UserNotFoundError
@@ -18,8 +20,12 @@ class CoachService:
         self.users = UserRepository(session)
         self.provider = provider
 
-    def reply(self, user_id: int, message: str) -> str:
-        """The coach's reply to the user's message, from the coach graph.
+    def reply(
+        self, user_id: int, message: str, history: Sequence[ConversationTurn] = ()
+    ) -> str:
+        """The coach's reply to the user's message, from the coach graph. history
+        is the earlier conversation the client sent, oldest first: the graph
+        sees it compacted to its bound, and it is stored nowhere.
 
         Raises AIProviderNotConfiguredError when no API key is set, and
         AIProviderError when the model cannot answer.
@@ -34,7 +40,7 @@ class CoachService:
         # The user goes into the run's context, never into the state: the model
         # cannot choose or change whose data the tools read.
         state = coach_graph.invoke(
-            initial_state(message),
+            initial_state(message, history),
             context=CoachContext(user_id=user_id, provider=self.provider, tools=self._tools()),
         )
         return state["final_response"]

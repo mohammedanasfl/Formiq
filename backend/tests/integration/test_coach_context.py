@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agent import coach_graph
+from app.agent.context import NO_CONVERSATION
 from app.db.base import Base
 from app.schemas import UserCreate, UserProfileCreate, WorkoutSessionCreate
 from app.services import CoachService, UserProfileService, UserService, WorkoutSessionService
@@ -179,8 +180,10 @@ def test_each_turn_starts_from_the_complete_initial_state(service_session, user)
     (given,), kwargs = graph.invoke.call_args
     assert given == {
         "user_message": "What is overload?",
+        "conversation": NO_CONVERSATION,
         "messages": [],
         "iteration_count": 0,
+        "context_compactions": 0,
         "final_response": None,
         "decision": None,
     }

@@ -1,6 +1,6 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.schemas.workout_plan import PositiveInteger
 
@@ -11,9 +11,33 @@ CoachMessageText = Annotated[
 ]
 
 
+# Earlier turns one request may carry: the coach keeps only the most recent
+# (app.agent.context), so more would only make the request larger.
+MAX_HISTORY_TURNS = 50
+# as long as a coach reply may be (app.agent.policy.MAX_REPLY_LENGTH); the coach
+# shortens long turns
+MAX_HISTORY_TEXT_LENGTH = 8000
+
+
+class CoachHistoryTurn(BaseModel):
+    """An earlier turn of the conversation: what the user wrote, or the coach's
+    reply. Formiq stores no conversation, so the client sends the turns it
+    wants the coach to see; they are context, not Formiq data."""
+
+    role: Literal["user", "coach"]
+    text: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True, min_length=1, max_length=MAX_HISTORY_TEXT_LENGTH
+        ),
+    ]
+
+
 class CoachMessageRequest(BaseModel):
     user_id: PositiveInteger
     message: CoachMessageText
+    # earlier turns, oldest first; the coach keeps the most recent ones
+    history: list[CoachHistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
 
 
 class CoachMessageResponse(BaseModel):

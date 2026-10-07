@@ -112,15 +112,18 @@ class GeminiProvider:
             raise AIProviderError(f"the {self.model} request failed") from error
 
 
-def conversation(user_message: str, messages: Sequence[CoachMessage]) -> list[types.Content]:
+def conversation(
+    user_message: str, messages: Sequence[CoachMessage], context: str | None = None
+) -> list[types.Content]:
     """The turn's conversation as Gemini contents, for generate_turn.
 
-    The model's turns are sent back as the exact contents Gemini returned, so
-    their tool calls and thought signatures stay as they were. The results that
-    answer one turn's tool calls go together in one content, as function
-    responses: data for the model, not text from the user.
+    The earlier conversation, if any, comes first as its own text, ahead of the
+    user's message. The model's turns are sent back as the exact contents Gemini
+    returned, so their tool calls and thought signatures stay as they were. The
+    results that answer one turn's tool calls go together in one content, as
+    function responses: data for the model, not text from the user.
     """
-    contents = [user_content(user_message)]
+    contents = [user_content(user_message, context)]
     results: list[ToolResult] = []
     for message in messages:
         if isinstance(message, ToolResult):
@@ -135,9 +138,12 @@ def conversation(user_message: str, messages: Sequence[CoachMessage]) -> list[ty
     return contents
 
 
-def user_content(message: str) -> types.Content:
-    """The user's message, as the first content of a conversation."""
-    return types.Content(role="user", parts=[types.Part(text=message)])
+def user_content(message: str, context: str | None = None) -> types.Content:
+    """The user's message, as the first content of a conversation, after the
+    earlier conversation when there is one: two parts, so the message stays as
+    the user wrote it."""
+    parts = [types.Part(text=context)] if context else []
+    return types.Content(role="user", parts=[*parts, types.Part(text=message)])
 
 
 def tool_results_content(results: Iterable[tuple[ToolCall, dict[str, Any]]]) -> types.Content:

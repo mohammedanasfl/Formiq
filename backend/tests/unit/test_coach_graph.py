@@ -83,8 +83,10 @@ def test_state_holds_only_the_turn_and_its_tool_loop():
     # no profile, workout history or other Formiq data: the tools read those
     assert set(CoachState.__annotations__) == {
         "user_message",
+        "conversation",
         "messages",
         "iteration_count",
+        "context_compactions",
         "final_response",
         "decision",
     }

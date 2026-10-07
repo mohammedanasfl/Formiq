@@ -1,3 +1,9 @@
+from app.agent.context import (
+    CONTEXT_MAX_CHARS,
+    NO_CONVERSATION,
+    ConversationContext,
+    ConversationTurn,
+)
 from app.agent.graph import (
     CANNOT_ANSWER_REPLY,
     COACH_INSTRUCTIONS,
@@ -23,9 +29,11 @@ from app.agent.state import CoachState, initial_state
 __all__ = [
     "CANNOT_ANSWER_REPLY",
     "COACH_INSTRUCTIONS",
+    "CONTEXT_MAX_CHARS",
     "MAX_GRAPH_STEPS",
     "MAX_REQUESTED_TOOL_CALLS_PER_TURN",
     "MAX_TOOL_ITERATIONS",
+    "NO_CONVERSATION",
     "POLICY",
     "RESPOND",
     "SAFETY_POLICY",
@@ -33,6 +41,8 @@ __all__ = [
     "CoachDecision",
     "CoachState",
     "CoachTools",
+    "ConversationContext",
+    "ConversationTurn",
     "Decision",
     "Intent",
     "SafetyAssessment",
