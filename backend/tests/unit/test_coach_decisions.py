@@ -264,7 +264,9 @@ def test_a_safety_sensitive_request_is_only_redirected(decision):
         respond_turn("Please see a physiotherapist.", "SAFETY_SENSITIVE", "SAFE_REDIRECT"),
     )
 
-    state = run(provider, FakeTools(), "Can I train through sharp knee pain?")
+    # a risk only the model recognizes: the safety backstop finds no obvious signal,
+    # so the decision policy alone keeps the request to a redirect
+    state = run(provider, FakeTools(), "Can I do box jumps on my bad knee?")
 
     assert rejected(last_results(provider, 1)[0])
     assert state["final_response"] == "Please see a physiotherapist."

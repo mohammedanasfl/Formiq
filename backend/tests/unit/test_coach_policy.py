@@ -330,6 +330,7 @@ def test_the_decision_record_holds_no_reasoning():
         "intent",
         "decision",
         "tools_used",
+        "safety",
     ]
 
 

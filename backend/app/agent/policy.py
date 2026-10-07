@@ -3,9 +3,11 @@ data its answer needs, and which decisions may end the turn.
 
 The model ends every turn with a respond call that names the request's intent,
 its decision and the reply. This module checks that decision against what the
-turn actually retrieved. It is pure and deterministic: it sees the declared
-intent and decision and the tool results, never the model's reasoning, and
-stores nothing.
+turn actually retrieved, and against the safety backstop (app.agent.safety):
+for a request the backstop flags, only the safe decisions in SAFETY_POLICY can
+end the turn, whatever the model classified it as. It is pure and
+deterministic: it sees the declared intent and decision, the reply and the tool
+results, never the model's reasoning, and stores nothing.
 """
 
 import re
@@ -16,6 +18,12 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
+from app.agent.safety import (
+    SAFE_REPLIES,
+    SafetyAssessment,
+    SafetyCategory,
+    unsafe_reply,
+)
 from app.ai import ToolCall, ToolDeclaration, ToolResult
 
 
@@ -127,35 +135,43 @@ MISSING_ERROR_CODES = frozenset({"USER_NOT_FOUND", "PROFILE_NOT_FOUND", "RESOURC
 # the model's reply to the user; longer replies are rejected
 MAX_REPLY_LENGTH = 8000
 
-RESPOND = ToolDeclaration(
-    name="respond",
-    description=(
-        "End your turn: give the request's intent, your decision and the reply the user "
-        "will see. Call it alone, after any data you need has been returned. Formiq "
-        "checks the decision against the data retrieved in this turn and tells you if "
-        "it cannot be used."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "intent": {
-                "type": "string",
-                "enum": [intent.value for intent in Intent],
-                "description": "What kind of request the user made.",
+
+def respond_declaration(
+    intents: Iterable[Intent] = Intent, decisions: Iterable[Decision] = Decision
+) -> ToolDeclaration:
+    """The respond tool, offering these intents and decisions."""
+    return ToolDeclaration(
+        name="respond",
+        description=(
+            "End your turn: give the request's intent, your decision and the reply the "
+            "user will see. Call it alone, after any data you need has been returned. "
+            "Formiq checks the decision against the data retrieved in this turn and tells "
+            "you if it cannot be used."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": [intent.value for intent in intents],
+                    "description": "What kind of request the user made.",
+                },
+                "decision": {
+                    "type": "string",
+                    "enum": [decision.value for decision in decisions],
+                    "description": "How you answer it.",
+                },
+                "reply": {
+                    "type": "string",
+                    "description": "Your reply to the user, and nothing else.",
+                },
             },
-            "decision": {
-                "type": "string",
-                "enum": [decision.value for decision in Decision],
-                "description": "How you answer it.",
-            },
-            "reply": {
-                "type": "string",
-                "description": "Your reply to the user, and nothing else.",
-            },
+            "required": ["intent", "decision", "reply"],
         },
-        "required": ["intent", "decision", "reply"],
-    },
-)
+    )
+
+
+RESPOND = respond_declaration()
 
 
 class Respond(BaseModel):
@@ -178,6 +194,80 @@ class CoachDecision:
     decision: Decision
     # the Formiq tools that returned data in this turn, in the order first used
     tools_used: tuple[str, ...]
+    # what the safety backstop found in the request; anything but SAFE means the
+    # decision was one that SAFETY_POLICY allows
+    safety: SafetyCategory = SafetyCategory.SAFE
+
+
+@dataclass(frozen=True)
+class SafetyPolicy:
+    """How a turn ends when the safety backstop flags its request."""
+
+    # the risk, for the model; never shown to the user as a label
+    description: str
+    # the only intents and decisions that can end the turn
+    intents: frozenset[Intent]
+    decisions: frozenset[Decision]
+    # the turn's outcome when the model's cannot be used: Formiq's own reply
+    fallback_intent: Intent
+    fallback_decision: Decision
+    fallback_reply: str
+
+    @property
+    def respond(self) -> ToolDeclaration:
+        """The respond tool, offering only this policy's intents and decisions."""
+        return respond_declaration(sorted(self.intents), sorted(self.decisions))
+
+
+def _redirect(category: SafetyCategory, description: str) -> SafetyPolicy:
+    return SafetyPolicy(
+        description,
+        frozenset({Intent.SAFETY_SENSITIVE}),
+        frozenset({Decision.SAFE_REDIRECT}),
+        Intent.SAFETY_SENSITIVE,
+        Decision.SAFE_REDIRECT,
+        SAFE_REPLIES[category],
+    )
+
+
+# The categories the backstop can flag. A flagged request ends with a safe
+# redirect (or, when only the details are missing, a question): never ANSWER or
+# RETRIEVE_THEN_ANSWER, and with no tools.
+SAFETY_POLICY: dict[SafetyCategory, SafetyPolicy] = {
+    SafetyCategory.PAIN_OR_INJURY: _redirect(
+        SafetyCategory.PAIN_OR_INJURY,
+        "pain beyond ordinary soreness, an injury, or a warning symptom such as chest "
+        "pain, trouble breathing, dizziness or fainting",
+    ),
+    SafetyCategory.MEDICAL: _redirect(
+        SafetyCategory.MEDICAL,
+        "a medical question: a diagnosis, a medical condition, medication or treatment",
+    ),
+    SafetyCategory.DANGEROUS_EXERCISE: _redirect(
+        SafetyCategory.DANGEROUS_EXERCISE,
+        "exercising through pain or symptoms, or in a way that risks harm",
+    ),
+    SafetyCategory.EXTREME_WEIGHT_LOSS: _redirect(
+        SafetyCategory.EXTREME_WEIGHT_LOSS,
+        "weight loss much faster than is safe, or a crash diet",
+    ),
+    SafetyCategory.EXTREME_DIETING: _redirect(
+        SafetyCategory.EXTREME_DIETING,
+        "starvation, a very low calorie intake, a long fast or purging",
+    ),
+    SafetyCategory.INSUFFICIENT_SAFETY_CONTEXT: SafetyPolicy(
+        "pain or discomfort whose kind and severity are unclear: it may be ordinary "
+        "soreness, or something to have checked",
+        frozenset({Intent.AMBIGUOUS, Intent.SAFETY_SENSITIVE}),
+        frozenset({Decision.ASK_CLARIFICATION, Decision.SAFE_REDIRECT}),
+        Intent.AMBIGUOUS,
+        Decision.ASK_CLARIFICATION,
+        SAFE_REPLIES[SafetyCategory.INSUFFICIENT_SAFETY_CONTEXT],
+    ),
+}
+
+# Formiq's own labels: a safety reply showing one is not shown to the user.
+INTERNAL_LABELS = frozenset({*Intent, *Decision, *SafetyCategory, *DataStatus})
 
 
 def data_status(result: dict[str, Any]) -> DataStatus:
@@ -217,6 +307,27 @@ def check_decision(
             "was returned: call the tool you need, or use ASK_CLARIFICATION or "
             "CANNOT_ANSWER"
         )
+    return None
+
+
+def check_safety(
+    assessment: SafetyAssessment, intent: Intent, decision: Decision, reply: str
+) -> str | None:
+    """Why the decision or its reply cannot end the turn, given what the safety
+    backstop found in the request; None when it can.
+
+    A flagged request allows only its SAFETY_POLICY decisions. Every redirect, and
+    every reply to a flagged request, must also pass the reply check.
+    """
+    policy = SAFETY_POLICY.get(assessment.category)
+    if policy is not None and (intent not in policy.intents or decision not in policy.decisions):
+        allowed = ", ".join(sorted(policy.decisions))
+        return (
+            f"Formiq's safety check found {policy.description} in this request; use "
+            f"intent {', '.join(sorted(policy.intents))} with one of: {allowed}"
+        )
+    if policy is not None or decision is Decision.SAFE_REDIRECT:
+        return unsafe_reply(reply, INTERNAL_LABELS)
     return None
 
 
