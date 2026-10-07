@@ -25,6 +25,19 @@ from app.schemas.workout_plan import (
     WorkoutPlanStatus,
     WorkoutPlanUpdate,
 )
+from app.schemas.workout_session import (
+    WorkoutSessionCreate,
+    WorkoutSessionExerciseCreate,
+    WorkoutSessionExerciseResponse,
+    WorkoutSessionExerciseUpdate,
+    WorkoutSessionFilters,
+    WorkoutSessionResponse,
+    WorkoutSessionStatus,
+    WorkoutSessionUpdate,
+    WorkoutSetCreate,
+    WorkoutSetResponse,
+    WorkoutSetUpdate,
+)
 
 __all__ = [
     "UserCreate",
@@ -49,4 +62,15 @@ __all__ = [
     "WorkoutPlanExerciseCreate",
     "WorkoutPlanExerciseUpdate",
     "WorkoutPlanExerciseResponse",
+    "WorkoutSessionStatus",
+    "WorkoutSessionCreate",
+    "WorkoutSessionUpdate",
+    "WorkoutSessionResponse",
+    "WorkoutSessionFilters",
+    "WorkoutSessionExerciseCreate",
+    "WorkoutSessionExerciseUpdate",
+    "WorkoutSessionExerciseResponse",
+    "WorkoutSetCreate",
+    "WorkoutSetUpdate",
+    "WorkoutSetResponse",
 ]

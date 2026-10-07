@@ -11,7 +11,15 @@ from app.core.config import settings
 from app.db import database
 from app.db.database import get_db
 from app.main import app
-from app.models import Exercise, User, UserProfile, WorkoutPlan, WorkoutPlanExercise
+from app.models import (
+    Exercise,
+    User,
+    UserProfile,
+    WorkoutPlan,
+    WorkoutPlanExercise,
+    WorkoutSession,
+    WorkoutSessionExercise,
+)
 from tests.integration.database import check_test_database_url
 
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
@@ -49,8 +57,9 @@ def db_session(test_engine):
 
 def delete_user_rows(engine):
     with Session(engine) as session:
-        # workout plans first: a user with plans cannot be deleted (RESTRICT);
-        # their exercises are deleted with them (CASCADE)
+        # workout sessions and plans first: a user with sessions or plans cannot be
+        # deleted (RESTRICT); their exercises and sets are deleted with them (CASCADE)
+        session.execute(delete(WorkoutSession))
         session.execute(delete(WorkoutPlan))
         session.execute(delete(UserProfile))
         session.execute(delete(User))
@@ -171,8 +180,8 @@ def catalog_exercise_ids(test_engine):
 def retirable_exercise_id(test_engine):
     """A committed, active catalog exercise that the test may retire.
 
-    It is deleted afterwards, with the plan exercises that use it, because the
-    catalog tests expect the catalog to hold only the seed.
+    It is deleted afterwards, with the plan and session exercises that use it,
+    because the catalog tests expect the catalog to hold only the seed.
     """
     with Session(test_engine) as session:
         exercise = Exercise(
@@ -185,6 +194,11 @@ def retirable_exercise_id(test_engine):
         yield exercise_id
     finally:
         with Session(test_engine) as session:
+            session.execute(
+                delete(WorkoutSessionExercise).where(
+                    WorkoutSessionExercise.exercise_id == exercise_id
+                )
+            )
             session.execute(
                 delete(WorkoutPlanExercise).where(WorkoutPlanExercise.exercise_id == exercise_id)
             )
