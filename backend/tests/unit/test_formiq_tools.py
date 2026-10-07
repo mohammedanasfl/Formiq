@@ -23,7 +23,12 @@ from app.services import (
 )
 from app.tools import TOOL_DECLARATIONS, FormiqTools, ToolErrorCode
 from app.tools.formiq_tools import clip
-from app.tools.limits import MAX_CALLS_PER_TURN, MAX_EXERCISES, MAX_SETS, MAX_TEXT_LENGTH
+from app.tools.limits import (
+    MAX_EXECUTED_TOOL_CALLS_PER_TURN,
+    MAX_EXERCISES,
+    MAX_SETS,
+    MAX_TEXT_LENGTH,
+)
 from app.tools.schemas import (
     GetExerciseInput,
     GetUserProfileInput,
@@ -239,19 +244,20 @@ def test_only_the_first_calls_of_a_turn_run(tools, services):
     services.catalog.get_exercise_by_id.side_effect = lambda exercise_id: exercise(exercise_id)
     calls = [
         ToolCall(name="get_exercise", arguments={"exercise_id": n})
-        for n in range(1, MAX_CALLS_PER_TURN + 3)
+        for n in range(1, MAX_EXECUTED_TOOL_CALLS_PER_TURN + 3)
     ]
 
     results = tools.run(calls, user_id=7)
 
     assert len(results) == len(calls)
-    assert [result["output"]["exercise_id"] for result in results[:MAX_CALLS_PER_TURN]] == list(
-        range(1, MAX_CALLS_PER_TURN + 1)
+    executed = results[:MAX_EXECUTED_TOOL_CALLS_PER_TURN]
+    assert [result["output"]["exercise_id"] for result in executed] == list(
+        range(1, MAX_EXECUTED_TOOL_CALLS_PER_TURN + 1)
     )
-    assert {error_code(result) for result in results[MAX_CALLS_PER_TURN:]} == {
+    assert {error_code(result) for result in results[MAX_EXECUTED_TOOL_CALLS_PER_TURN:]} == {
         "TOOL_LIMIT_REACHED"
     }
-    assert services.catalog.get_exercise_by_id.call_count == MAX_CALLS_PER_TURN
+    assert services.catalog.get_exercise_by_id.call_count == MAX_EXECUTED_TOOL_CALLS_PER_TURN
 
 
 def test_tool_errors_carry_their_code(tools, services):

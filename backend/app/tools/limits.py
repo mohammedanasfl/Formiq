@@ -8,5 +8,6 @@ MAX_EXERCISES = 30
 MAX_SETS = 15
 # characters of free text (notes, descriptions); longer text is cut
 MAX_TEXT_LENGTH = 500
-# tool calls run from one model turn; the rest are answered with an error
-MAX_CALLS_PER_TURN = 5
+# tool calls run from one model turn; the rest are answered with an error (the
+# coach graph rejects a turn that requests more than 20 calls)
+MAX_EXECUTED_TOOL_CALLS_PER_TURN = 5

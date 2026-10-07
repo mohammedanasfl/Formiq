@@ -13,7 +13,7 @@ from google import genai
 from google.genai import types
 
 from app.ai.exceptions import AIProviderError, AIProviderNotConfiguredError
-from app.ai.tool_calling import ModelTurn, ToolCall, ToolDeclaration
+from app.ai.tool_calling import CoachMessage, ModelTurn, ToolCall, ToolDeclaration, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,29 @@ class GeminiProvider:
             # to the server log only.
             logger.exception("Gemini request to %s failed", self.model)
             raise AIProviderError(f"the {self.model} request failed") from error
+
+
+def conversation(user_message: str, messages: Sequence[CoachMessage]) -> list[types.Content]:
+    """The turn's conversation as Gemini contents, for generate_turn.
+
+    The model's turns are sent back as the exact contents Gemini returned, so
+    their tool calls and thought signatures stay as they were. The results that
+    answer one turn's tool calls go together in one content, as function
+    responses: data for the model, not text from the user.
+    """
+    contents = [user_content(user_message)]
+    results: list[ToolResult] = []
+    for message in messages:
+        if isinstance(message, ToolResult):
+            results.append(message)
+            continue
+        if results:
+            contents.append(tool_results_content((item.call, item.result) for item in results))
+            results = []
+        contents.append(message.content)
+    if results:
+        contents.append(tool_results_content((item.call, item.result) for item in results))
+    return contents
 
 
 def user_content(message: str) -> types.Content:

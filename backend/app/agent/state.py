@@ -1,24 +1,40 @@
-from typing import Any, NotRequired, TypedDict
+import operator
+from typing import Annotated, TypedDict
 
-from app.ai import ToolCall
+from app.ai import CoachMessage
 
 
 class CoachState(TypedDict):
-    """One turn of the coach graph: the user's message in, the reply out.
+    """The execution state of one coach turn: plain data, nothing else.
 
-    The user's profile, workouts and other Formiq data are not copied in: the
-    model reads what it needs with tools, which go through Formiq's services,
-    scoped to user_id.
+    A turn starts from initial_state(), which sets every field. The state holds
+    no runtime dependencies (sessions, services, the provider) and no trusted
+    identity: those are in CoachContext, which no node can change.
+
+    It is not memory. Each request starts a new state that is dropped after the
+    reply, and Formiq data is not copied in ahead of time: the model reads what
+    it needs with tools, and their results, bounded by the tools' limits, are
+    the only Formiq data in it.
     """
 
-    user_id: int
-    message: str
-    # The turn's conversation with the model, as the provider records it: the
-    # user's message, the model's turns and the tool results.
-    contents: NotRequired[list[Any]]
-    # the tool calls of the model's latest turn, which the tools node runs next
-    tool_calls: NotRequired[list[ToolCall]]
-    # rounds of tool calls run so far in this turn
-    tool_iterations: NotRequired[int]
-    # set by the coach node when the model answers with text
-    reply: NotRequired[str]
+    # the user's request, unchanged during the turn
+    user_message: str
+    # What followed it, in order: the model's turns and the tool results. Nodes
+    # only append. Bounded by the tool loop: at most max_tool_iterations + 1
+    # model turns, each followed by one result per tool call, and a turn with
+    # more than MAX_REQUESTED_TOOL_CALLS_PER_TURN calls is rejected.
+    messages: Annotated[list[CoachMessage], operator.add]
+    # rounds of tool calls run so far
+    iteration_count: int
+    # the model's text reply, which ends the turn; None until then
+    final_response: str | None
+
+
+def initial_state(user_message: str) -> CoachState:
+    """The state a turn starts from: the user's message, and nothing else yet."""
+    return {
+        "user_message": user_message,
+        "messages": [],
+        "iteration_count": 0,
+        "final_response": None,
+    }

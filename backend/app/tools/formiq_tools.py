@@ -16,7 +16,7 @@ from app.schemas.exercise import ExerciseFilters
 from app.tools.declarations import TOOL_DECLARATIONS
 from app.tools.errors import ToolError, ToolErrorCode
 from app.tools.limits import (
-    MAX_CALLS_PER_TURN,
+    MAX_EXECUTED_TOOL_CALLS_PER_TURN,
     MAX_EXERCISES,
     MAX_SEARCH_RESULTS,
     MAX_SETS,
@@ -104,14 +104,15 @@ class FormiqTools:
 
     def run(self, calls: Sequence[ToolCall], *, user_id: int) -> list[dict[str, Any]]:
         """One result per call, in order: {"output": ...} or {"error": {"code",
-        "message"}}. Only the first MAX_CALLS_PER_TURN calls are run."""
+        "message"}}. Only the first MAX_EXECUTED_TOOL_CALLS_PER_TURN calls are run."""
         try:
             return [
                 self._run_call(call, user_id)
-                if index < MAX_CALLS_PER_TURN
+                if index < MAX_EXECUTED_TOOL_CALLS_PER_TURN
                 else error_result(
                     ToolErrorCode.TOOL_LIMIT_REACHED,
-                    f"only {MAX_CALLS_PER_TURN} tool calls are run per turn; this one was not",
+                    f"only {MAX_EXECUTED_TOOL_CALLS_PER_TURN} tool calls are run per turn; "
+                    "this one was not",
                 )
                 for index, call in enumerate(calls)
             ]

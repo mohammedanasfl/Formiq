@@ -178,3 +178,42 @@ def test_the_coach_answers_after_a_tool_call(client, user_id, use_provider):
     # the user has no profile: the model got the tool's error, the client only the reply
     tool_result = generate_content.call_args.kwargs["contents"][-1].parts[0].function_response
     assert tool_result.response["error"]["code"] == "PROFILE_NOT_FOUND"
+
+
+@pytest.mark.parametrize(("requested", "status"), [(20, 200), (21, 502)])
+def test_a_turn_requesting_too_many_tool_calls_is_a_controlled_502(
+    client, user_id, use_provider, requested, status
+):
+    calls = types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                name="get_exercise", args={"exercise_id": 1}
+                            )
+                        )
+                    ]
+                    * requested,
+                )
+            )
+        ]
+    )
+    answers = types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(content=types.Content(role="model", parts=[types.Part(text="Done.")]))
+        ]
+    )
+    with patch("app.ai.gemini.genai.Client") as client_class:
+        generate_content = client_class.return_value.models.generate_content
+        generate_content.side_effect = [calls, answers]
+        use_provider(GeminiProvider(API_KEY, "gemini-3.8-flash", timeout_seconds=30))
+
+        response = client.post(URL, json={"user_id": user_id, "message": "Many exercises?"})
+
+    assert response.status_code == status
+    if status == 502:
+        assert response.json() == {"detail": "the AI coach could not answer; try again later"}
+        assert generate_content.call_count == 1

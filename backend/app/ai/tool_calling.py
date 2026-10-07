@@ -1,7 +1,12 @@
 """Tool calling between the model and the coach graph.
 
-These types hold no Formiq data: the graph passes tool calls to the tools and
-their results back to the model.
+A turn's conversation is the user's message, then CoachMessages:
+
+    user message -> ModelTurn(tool calls) -> ToolResult, ToolResult, ...
+                 -> ModelTurn(tool calls) -> ToolResult ... -> ModelTurn(text)
+
+The declarations and calls hold no Formiq data; a ToolResult holds the data a
+tool returned for the call.
 """
 
 from dataclasses import dataclass
@@ -37,3 +42,21 @@ class ModelTurn:
     content: Any
     text: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """A tool's answer to one call of the model.
+
+    It goes back to the model as data, the function response of that call, never
+    as text from the user.
+    """
+
+    call: ToolCall
+    # {"output": ...} or {"error": {"code": ..., "message": ...}}
+    result: dict[str, Any]
+
+
+# The messages of a turn that follow the user's message, in order: the model's
+# turns, and after a turn with tool calls, one result per call.
+CoachMessage = ModelTurn | ToolResult

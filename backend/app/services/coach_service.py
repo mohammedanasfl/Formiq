@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 
-from app.agent import CoachContext, coach_graph
+from app.agent import CoachContext, coach_graph, initial_state
 from app.ai import GeminiProvider
 from app.repositories import UserRepository
 from app.services.exceptions import UserNotFoundError
@@ -31,11 +31,13 @@ class CoachService:
         # the same way.
         self.session.rollback()
 
+        # The user goes into the run's context, never into the state: the model
+        # cannot choose or change whose data the tools read.
         state = coach_graph.invoke(
-            {"user_id": user_id, "message": message},
-            context=CoachContext(provider=self.provider, tools=self._tools()),
+            initial_state(message),
+            context=CoachContext(user_id=user_id, provider=self.provider, tools=self._tools()),
         )
-        return state["reply"]
+        return state["final_response"]
 
     def _tools(self) -> FormiqTools:
         """The coach's read-only tools, reading through the services on this session."""

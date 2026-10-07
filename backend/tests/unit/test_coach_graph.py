@@ -17,6 +17,7 @@ from app.agent import (
     CoachState,
     build_coach_graph,
     coach_graph,
+    initial_state,
 )
 from app.ai import AIProviderError, GeminiProvider, tool_results_content, user_content
 from tests.coach import (
@@ -49,8 +50,8 @@ def tools():
 
 def run(provider, tools, *, user_id=7, message="How should I start?", **context):
     return coach_graph.invoke(
-        {"user_id": user_id, "message": message},
-        context=CoachContext(provider=provider, tools=tools, **context),
+        initial_state(message),
+        context=CoachContext(user_id=user_id, provider=provider, tools=tools, **context),
     )
 
 
@@ -80,12 +81,10 @@ def test_graph_runs_the_tools_in_a_loop_through_the_coach():
 def test_state_holds_only_the_turn_and_its_tool_loop():
     # no profile, workout history or other Formiq data: the tools read those
     assert set(CoachState.__annotations__) == {
-        "user_id",
-        "message",
-        "contents",
-        "tool_calls",
-        "tool_iterations",
-        "reply",
+        "user_message",
+        "messages",
+        "iteration_count",
+        "final_response",
     }
 
 
@@ -94,7 +93,7 @@ def test_a_text_reply_ends_the_turn_without_tools(tools):
 
     state = run(provider, tools, message="What is progressive overload?")
 
-    assert state["reply"] == "Start with three sets of eight."
+    assert state["final_response"] == "Start with three sets of eight."
     assert tools.runs == []
     provider.generate_turn.assert_called_once_with(
         [user_content("What is progressive overload?")],
@@ -111,7 +110,7 @@ def test_a_tool_result_goes_back_to_the_model_which_then_answers(tools):
 
     state = run(provider, tools, message="What is my current goal?")
 
-    assert state["reply"] == "Your goal is muscle gain."
+    assert state["final_response"] == "Your goal is muscle gain."
     assert tools.runs == [([profile_call], 7)]
     # the second request holds the whole conversation, the model's turn unchanged
     assert sent_contents(provider, 1) == [
@@ -119,7 +118,7 @@ def test_a_tool_result_goes_back_to_the_model_which_then_answers(tools):
         asking.content,
         tool_results_content([(profile_call, {"output": {"tool": "get_user_profile"}})]),
     ]
-    assert state["tool_iterations"] == 1
+    assert state["iteration_count"] == 1
 
 
 def test_several_tool_calls_of_one_turn_run_together_in_order(tools):
@@ -139,11 +138,11 @@ def test_several_rounds_of_tool_calls(tools):
 
     state = run(provider, tools)
 
-    assert state["reply"] == "Try a lighter press."
+    assert state["final_response"] == "Try a lighter press."
     assert tools.runs == [([first], 7), ([second], 7)]
     assert provider.generate_turn.call_count == 3
     assert len(sent_contents(provider, 2)) == 5  # message, then a turn and results per round
-    assert state["tool_iterations"] == 2
+    assert state["iteration_count"] == 2
 
 
 def test_a_tool_error_goes_back_to_the_model_which_still_answers():
@@ -154,7 +153,7 @@ def test_a_tool_error_goes_back_to_the_model_which_still_answers():
 
     state = run(provider, tools)
 
-    assert state["reply"] == "I could not find that plan."
+    assert state["final_response"] == "I could not find that plan."
     (response,) = tool_responses(sent_contents(provider, 1)[-1])
     assert response.response == error
 
@@ -178,7 +177,7 @@ def test_after_the_limit_the_model_must_answer_with_text(tools):
 
     state = run(provider, tools, max_tool_iterations=2)
 
-    assert state["reply"] == "Here is what I found."
+    assert state["final_response"] == "Here is what I found."
     assert len(tools.runs) == 2
     assert [
         request.kwargs["allow_tool_calls"] for request in provider.generate_turn.call_args_list
@@ -211,7 +210,10 @@ def test_each_run_uses_the_provider_of_its_context(tools):
     first = run(fake_provider(text_turn("Start with three sets of eight.")), tools)
     second = run(fake_provider(text_turn("Rest today.")), tools)
 
-    assert (first["reply"], second["reply"]) == ("Start with three sets of eight.", "Rest today.")
+    assert [first["final_response"], second["final_response"]] == [
+        "Start with three sets of eight.",
+        "Rest today.",
+    ]
 
 
 @pytest.mark.parametrize("tool_rounds", [0, 1], ids=["first request", "after a tool"])
