@@ -14,10 +14,31 @@ from google.genai import errors, types
 from app.ai import GeminiProvider, user_content
 from app.api.dependencies import get_ai_provider
 from app.main import app
-from tests.coach import fake_provider, text_turn
+from tests.coach import fake_provider, respond_turn
 
 API_KEY = "test-secret-key"
 URL = "/coach/message"
+
+
+def respond_response(reply, intent, decision):
+    """Gemini's response with the respond call that ends the coach's turn."""
+    return types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                name="respond",
+                                args={"intent": intent, "decision": decision, "reply": reply},
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
 
 
 @pytest.fixture
@@ -41,7 +62,7 @@ def use_provider(client):
 
 @pytest.fixture
 def provider(use_provider):
-    return use_provider(fake_provider(text_turn("Start with three sets of eight.")))
+    return use_provider(fake_provider(respond_turn("Start with three sets of eight.")))
 
 
 def test_message_returns_200_and_the_reply(client, user_id, provider):
@@ -159,13 +180,7 @@ def test_the_coach_answers_after_a_tool_call(client, user_id, use_provider):
             )
         ]
     )
-    answers = types.GenerateContentResponse(
-        candidates=[
-            types.Candidate(
-                content=types.Content(role="model", parts=[types.Part(text="Set up a profile.")])
-            )
-        ]
-    )
+    answers = respond_response("Set up a profile.", "PROFILE", "CANNOT_ANSWER")
     with patch("app.ai.gemini.genai.Client") as client_class:
         generate_content = client_class.return_value.models.generate_content
         generate_content.side_effect = [calls_profile, answers]
@@ -201,17 +216,13 @@ def test_a_turn_requesting_too_many_tool_calls_is_a_controlled_502(
             )
         ]
     )
-    answers = types.GenerateContentResponse(
-        candidates=[
-            types.Candidate(content=types.Content(role="model", parts=[types.Part(text="Done.")]))
-        ]
-    )
+    answers = respond_response("Done.", "EXERCISE", "RETRIEVE_THEN_ANSWER")
     with patch("app.ai.gemini.genai.Client") as client_class:
         generate_content = client_class.return_value.models.generate_content
         generate_content.side_effect = [calls, answers]
         use_provider(GeminiProvider(API_KEY, "gemini-3.8-flash", timeout_seconds=30))
 
-        response = client.post(URL, json={"user_id": user_id, "message": "Many exercises?"})
+        response = client.post(URL, json={"user_id": user_id, "message": "Exercise 1, often?"})
 
     assert response.status_code == status
     if status == 502:

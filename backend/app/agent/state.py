@@ -1,6 +1,7 @@
 import operator
 from typing import Annotated, TypedDict
 
+from app.agent.policy import CoachDecision
 from app.ai import CoachMessage
 
 
@@ -21,13 +22,17 @@ class CoachState(TypedDict):
     user_message: str
     # What followed it, in order: the model's turns and the tool results. Nodes
     # only append. Bounded by the tool loop: at most max_tool_iterations + 1
-    # model turns, each followed by one result per tool call, and a turn with
-    # more than MAX_REQUESTED_TOOL_CALLS_PER_TURN calls is rejected.
+    # model turns, each followed by one result per tool call (except the
+    # accepted respond call that ends the turn), and a turn with more than
+    # MAX_REQUESTED_TOOL_CALLS_PER_TURN calls is rejected.
     messages: Annotated[list[CoachMessage], operator.add]
     # rounds of tool calls run so far
     iteration_count: int
-    # the model's text reply, which ends the turn; None until then
+    # the reply to the user, which ends the turn; None until then
     final_response: str | None
+    # the intent and decision the turn ended with, checked against the policy
+    # (app.agent.policy); None until then. Never the model's reasoning.
+    decision: CoachDecision | None
 
 
 def initial_state(user_message: str) -> CoachState:
@@ -37,4 +42,5 @@ def initial_state(user_message: str) -> CoachState:
         "messages": [],
         "iteration_count": 0,
         "final_response": None,
+        "decision": None,
     }

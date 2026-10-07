@@ -52,12 +52,14 @@ class GeminiProvider:
         instructions: str,
         tools: Sequence[ToolDeclaration],
         allow_tool_calls: bool = True,
+        required_tool_names: Sequence[str] | None = None,
     ) -> ModelTurn:
         """The model's next turn in the conversation: a text reply, or the tool
         calls it wants run first.
 
         With allow_tool_calls false, the model is told to answer with text, and
-        a tool call is a provider error.
+        a tool call is a provider error. With required_tool_names, the model must
+        call one or more of those tools, and a text reply is a provider error.
         """
         config = types.GenerateContentConfig(
             system_instruction=instructions,
@@ -66,15 +68,7 @@ class GeminiProvider:
                 if tools
                 else None
             ),
-            tool_config=(
-                None
-                if allow_tool_calls or not tools
-                else types.ToolConfig(
-                    function_calling_config=types.FunctionCallingConfig(
-                        mode=types.FunctionCallingConfigMode.NONE
-                    )
-                )
-            ),
+            tool_config=_tool_config(tools, allow_tool_calls, required_tool_names),
             # The coach graph runs the tools and limits the rounds; the SDK must
             # not run a loop of its own.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -93,6 +87,9 @@ class GeminiProvider:
                     for call in function_calls
                 ),
             )
+        if required_tool_names is not None:
+            logger.warning("%s answered without the required tool call", self.model)
+            raise AIProviderError(f"{self.model} returned no tool call")
         if not response.text:
             # for example when the prompt or the reply was blocked
             logger.warning("%s returned no text: %s", self.model, response.prompt_feedback)
@@ -157,6 +154,29 @@ def tool_results_content(results: Iterable[tuple[ToolCall, dict[str, Any]]]) -> 
             for call, result in results
         ],
     )
+
+
+def _tool_config(
+    tools: Sequence[ToolDeclaration],
+    allow_tool_calls: bool,
+    required_tool_names: Sequence[str] | None,
+) -> types.ToolConfig | None:
+    if not tools:
+        return None
+    if required_tool_names is not None:
+        return types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode=types.FunctionCallingConfigMode.ANY,
+                allowed_function_names=list(required_tool_names),
+            )
+        )
+    if not allow_tool_calls:
+        return types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode=types.FunctionCallingConfigMode.NONE
+            )
+        )
+    return None
 
 
 def _function_declaration(tool: ToolDeclaration) -> types.FunctionDeclaration:

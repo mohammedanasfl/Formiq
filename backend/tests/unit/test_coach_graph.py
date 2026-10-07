@@ -13,6 +13,7 @@ from langsmith.utils import tracing_is_enabled
 from app.agent import (
     COACH_INSTRUCTIONS,
     MAX_TOOL_ITERATIONS,
+    RESPOND,
     CoachContext,
     CoachState,
     build_coach_graph,
@@ -24,8 +25,8 @@ from tests.coach import (
     FakeTools,
     call,
     fake_provider,
+    respond_turn,
     sent_contents,
-    text_turn,
     tool_responses,
     tool_turn,
 )
@@ -73,8 +74,8 @@ def test_graph_runs_the_tools_in_a_loop_through_the_coach():
     assert {(edge.source, edge.target) for edge in drawn.edges} == {
         ("__start__", "coach"),
         ("coach", "tools"),
-        ("coach", "__end__"),
         ("tools", "coach"),
+        ("tools", "__end__"),
     }
 
 
@@ -85,11 +86,12 @@ def test_state_holds_only_the_turn_and_its_tool_loop():
         "messages",
         "iteration_count",
         "final_response",
+        "decision",
     }
 
 
-def test_a_text_reply_ends_the_turn_without_tools(tools):
-    provider = fake_provider(text_turn("Start with three sets of eight."))
+def test_a_decision_ends_the_turn_without_tools(tools):
+    provider = fake_provider(respond_turn("Start with three sets of eight."))
 
     state = run(provider, tools, message="What is progressive overload?")
 
@@ -98,15 +100,17 @@ def test_a_text_reply_ends_the_turn_without_tools(tools):
     provider.generate_turn.assert_called_once_with(
         [user_content("What is progressive overload?")],
         instructions=COACH_INSTRUCTIONS,
-        tools=tools.declarations,
-        allow_tool_calls=True,
+        tools=[*tools.declarations, RESPOND],
+        required_tool_names=["get_user_profile", "respond"],
     )
 
 
 def test_a_tool_result_goes_back_to_the_model_which_then_answers(tools):
     profile_call = call("get_user_profile")
     asking = tool_turn(profile_call)
-    provider = fake_provider(asking, text_turn("Your goal is muscle gain."))
+    provider = fake_provider(
+        asking, respond_turn("Your goal is muscle gain.", "PROFILE", "RETRIEVE_THEN_ANSWER")
+    )
 
     state = run(provider, tools, message="What is my current goal?")
 
@@ -123,9 +127,9 @@ def test_a_tool_result_goes_back_to_the_model_which_then_answers(tools):
 
 def test_several_tool_calls_of_one_turn_run_together_in_order(tools):
     calls = [call("get_workout_plan", plan_id=12), call("get_workout_session", session_id=45)]
-    provider = fake_provider(tool_turn(*calls), text_turn("You did all of it."))
+    provider = fake_provider(tool_turn(*calls), respond_turn("You did all of it."))
 
-    run(provider, tools)
+    run(provider, tools, message="Compare plan 12 with session 45")
 
     assert tools.runs == [(calls, 7)]
     responses = tool_responses(sent_contents(provider, 1)[-1])
@@ -134,9 +138,11 @@ def test_several_tool_calls_of_one_turn_run_together_in_order(tools):
 
 def test_several_rounds_of_tool_calls(tools):
     first, second = call("get_workout_session", session_id=45), call("get_exercise", exercise_id=3)
-    provider = fake_provider(tool_turn(first), tool_turn(second), text_turn("Try a lighter press."))
+    provider = fake_provider(
+        tool_turn(first), tool_turn(second), respond_turn("Try a lighter press.")
+    )
 
-    state = run(provider, tools)
+    state = run(provider, tools, message="Session 45, and exercise 3?")
 
     assert state["final_response"] == "Try a lighter press."
     assert tools.runs == [([first], 7), ([second], 7)]
@@ -149,9 +155,12 @@ def test_a_tool_error_goes_back_to_the_model_which_still_answers():
     error = {"error": {"code": "RESOURCE_NOT_FOUND", "message": "the user has no workout plan 9"}}
     tools = FakeTools(result=lambda item: error)
     plan_call = call("get_workout_plan", plan_id=9)
-    provider = fake_provider(tool_turn(plan_call), text_turn("I could not find that plan."))
+    provider = fake_provider(
+        tool_turn(plan_call),
+        respond_turn("I could not find that plan.", "WORKOUT_PLAN", "CANNOT_ANSWER"),
+    )
 
-    state = run(provider, tools)
+    state = run(provider, tools, message="What is in plan 9?")
 
     assert state["final_response"] == "I could not find that plan."
     (response,) = tool_responses(sent_contents(provider, 1)[-1])
@@ -160,7 +169,7 @@ def test_a_tool_error_goes_back_to_the_model_which_still_answers():
 
 def test_tools_run_for_the_user_of_the_request_whatever_the_model_asks(tools):
     # the tools reject a user_id from the model; the graph never passes it on as the user
-    provider = fake_provider(tool_turn(call("get_user_profile", user_id=5)), text_turn("Done."))
+    provider = fake_provider(tool_turn(call("get_user_profile", user_id=5)), respond_turn("Done."))
 
     run(provider, tools, user_id=7)
 
@@ -168,20 +177,22 @@ def test_tools_run_for_the_user_of_the_request_whatever_the_model_asks(tools):
     assert user_id == 7
 
 
-def test_after_the_limit_the_model_must_answer_with_text(tools):
+def test_after_the_limit_the_model_may_only_decide(tools):
     provider = fake_provider(
         tool_turn(call("get_user_profile")),
         tool_turn(call("get_user_profile")),
-        text_turn("Here is what I found."),
+        respond_turn("Here is what I found.", "PROFILE", "RETRIEVE_THEN_ANSWER"),
     )
 
     state = run(provider, tools, max_tool_iterations=2)
 
     assert state["final_response"] == "Here is what I found."
     assert len(tools.runs) == 2
+    every_tool = ["get_user_profile", "respond"]
     assert [
-        request.kwargs["allow_tool_calls"] for request in provider.generate_turn.call_args_list
-    ] == [True, True, False]
+        request.kwargs["required_tool_names"]
+        for request in provider.generate_turn.call_args_list
+    ] == [every_tool, every_tool, ["respond"]]
 
 
 @pytest.mark.parametrize("limit", [1, 3])
@@ -207,8 +218,8 @@ def test_default_limit_bounds_a_turn(tools):
 
 
 def test_each_run_uses_the_provider_of_its_context(tools):
-    first = run(fake_provider(text_turn("Start with three sets of eight.")), tools)
-    second = run(fake_provider(text_turn("Rest today.")), tools)
+    first = run(fake_provider(respond_turn("Start with three sets of eight.")), tools)
+    second = run(fake_provider(respond_turn("Rest today.")), tools)
 
     assert [first["final_response"], second["final_response"]] == [
         "Start with three sets of eight.",
@@ -275,7 +286,7 @@ def test_running_the_graph_leaves_langsmith_tracing_off(monkeypatch, tools):
     for name in LANGSMITH_TRACING_VARIABLES:
         monkeypatch.delenv(name, raising=False)
 
-    run(fake_provider(tool_turn(call("get_user_profile")), text_turn("Hi")), tools)
+    run(fake_provider(tool_turn(call("get_user_profile")), respond_turn("Hi")), tools)
 
     # without one of those variables set to "true", nothing is traced or sent
     assert not tracing_is_enabled()

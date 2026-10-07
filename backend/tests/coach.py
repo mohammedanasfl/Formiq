@@ -37,6 +37,13 @@ def tool_turn(*calls: ToolCall) -> ModelTurn:
     )
 
 
+def respond_turn(
+    reply: str, intent: str = "GENERAL_FITNESS", decision: str = "ANSWER"
+) -> ModelTurn:
+    """The model's last turn: the respond call with its intent, decision and reply."""
+    return tool_turn(call("respond", intent=intent, decision=decision, reply=reply))
+
+
 def fake_provider(*turns: ModelTurn) -> Mock:
     """A model that gives these turns, in order."""
     provider = Mock(spec=GeminiProvider)

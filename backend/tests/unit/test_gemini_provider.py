@@ -459,3 +459,67 @@ def test_tool_loop_on_the_wire_sends_the_models_turn_back_unchanged(sdk_with_tra
         "name": "get_exercise",
         "response": {"output": {"name": "Push-Up"}},
     }
+
+
+# generate_turn with required tool calls: the coach's decision protocol
+
+
+def test_required_tools_make_the_model_call_one_of_them(provider, client):
+    client.models.generate_content.return_value = response_with_calls(
+        types.FunctionCall(name="get_user_profile")
+    )
+
+    turn = provider.generate_turn(
+        CONVERSATION,
+        instructions="Be a coach",
+        tools=TOOLS,
+        required_tool_names=["get_user_profile", "get_exercise"],
+    )
+
+    assert turn.tool_calls == (ToolCall(name="get_user_profile", arguments={}),)
+    assert client.models.generate_content.call_args.kwargs["config"] == expected_config(
+        tool_config=types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode="ANY", allowed_function_names=["get_user_profile", "get_exercise"]
+            )
+        )
+    )
+
+
+def test_a_text_reply_when_a_tool_call_is_required_is_a_provider_error(provider, client):
+    client.models.generate_content.return_value = response_with_text("Your goal is fat loss.")
+
+    with pytest.raises(AIProviderError, match="returned no tool call"):
+        provider.generate_turn(
+            CONVERSATION, instructions="Be a coach", tools=TOOLS, required_tool_names=["respond"]
+        )
+
+
+def test_required_tools_on_the_wire(sdk_with_transport):
+    bodies = []
+
+    def reply(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [{"functionCall": {"name": "get_user_profile", "args": {}}}],
+                        }
+                    }
+                ]
+            },
+        )
+
+    with sdk_with_transport(reply):
+        provider = GeminiProvider(API_KEY, MODEL, timeout_seconds=TIMEOUT_SECONDS)
+        provider.generate_turn(
+            CONVERSATION, instructions="Be a coach", tools=TOOLS, required_tool_names=["respond"]
+        )
+
+    assert bodies[0]["toolConfig"] == {
+        "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["respond"]}
+    }
