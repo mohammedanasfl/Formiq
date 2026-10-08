@@ -1,8 +1,6 @@
-from typing import Annotated
+from fastapi import APIRouter, HTTPException, status
 
-from fastapi import APIRouter, HTTPException, Path, status
-
-from app.api.dependencies import DbSession
+from app.api.dependencies import DbSession, PathUserIsCurrentUser, UserId
 from app.schemas import (
     UserCreate,
     UserProfileCreate,
@@ -22,9 +20,9 @@ from app.services.exceptions import (
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-# users.id is a PostgreSQL integer column: IDs outside its range would fail in the
-# database, and IDs below 1 are never assigned, so both are rejected with 422.
-UserId = Annotated[int, Path(ge=1, le=2_147_483_647)]
+# Every route with a user_id is the signed-in user's own: any other id is not
+# found. Creating a user needs no sign-in, and gives no way to sign in.
+OWN = [PathUserIsCurrentUser]
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -37,7 +35,7 @@ def create_user(user_data: UserCreate, db: DbSession):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
 
-@router.get("/{user_id}", response_model=UserResponse)
+@router.get("/{user_id}", response_model=UserResponse, dependencies=OWN)
 def get_user(user_id: UserId, db: DbSession):
     user = UserService(db).get_user_by_id(user_id)
     if user is None:
@@ -51,6 +49,7 @@ def get_user(user_id: UserId, db: DbSession):
     "/{user_id}/profile",
     response_model=UserProfileResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=OWN,
 )
 def create_profile(user_id: UserId, profile_data: UserProfileCreate, db: DbSession):
     try:
@@ -61,7 +60,7 @@ def create_profile(user_id: UserId, profile_data: UserProfileCreate, db: DbSessi
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
 
-@router.get("/{user_id}/profile", response_model=UserProfileResponse)
+@router.get("/{user_id}/profile", response_model=UserProfileResponse, dependencies=OWN)
 def get_profile(user_id: UserId, db: DbSession):
     profile = UserProfileService(db).get_profile_by_user_id(user_id)
     if profile is None:
@@ -71,7 +70,7 @@ def get_profile(user_id: UserId, db: DbSession):
     return profile
 
 
-@router.patch("/{user_id}/profile", response_model=UserProfileResponse)
+@router.patch("/{user_id}/profile", response_model=UserProfileResponse, dependencies=OWN)
 def update_profile(user_id: UserId, profile_data: UserProfileUpdate, db: DbSession):
     try:
         return UserProfileService(db).update_profile(user_id, profile_data)

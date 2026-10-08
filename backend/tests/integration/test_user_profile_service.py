@@ -5,10 +5,11 @@ Services commit, so the service_session fixture empties the user tables before
 and after each test.
 """
 
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
 
@@ -85,6 +86,25 @@ def test_create_profile_rejects_second_profile(service, user, profile_data, test
     assert stored_profile(test_engine, user.id)["first_name"] == profile_data.first_name
 
 
+def test_failed_create_profile_rolls_back(
+    service, service_session, user, profile_data, test_engine
+):
+    # longer than the first_name column: model_copy skips the schema check, so the
+    # database rejects the insert when the repository flushes the profile
+    too_long = profile_data.model_copy(update={"first_name": "x" * 101})
+
+    with patch.object(service_session, "rollback", wraps=service_session.rollback) as rollback:
+        with pytest.raises(DataError):
+            service.create_profile(user.id, too_long)
+
+    rollback.assert_called_once()
+    assert not service_session.in_transaction()
+    assert count_profiles(test_engine) == 0
+    # the session is usable again after the rollback
+    profile = service.create_profile(user.id, profile_data)
+    assert stored_profile(test_engine, user.id)["id"] == profile.id
+
+
 def test_get_profile_by_user_id_returns_the_profile(service, user, profile_data):
     profile_id = service.create_profile(user.id, profile_data).id
 
@@ -116,6 +136,29 @@ def test_update_profile_sets_nullable_fields_to_null(service, user, profile_data
     after = stored_profile(test_engine, user.id)
     assert {field: after[field] for field in nullable} == {field: None for field in nullable}
     assert after["first_name"] == profile_data.first_name
+
+
+def test_update_profile_refreshes_updated_at(service, user, profile_data, test_engine):
+    service.create_profile(user.id, profile_data)
+    # move both timestamps into the past, so the update's new updated_at is later
+    # without waiting for the clock to advance
+    past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        session.execute(
+            update(UserProfile)
+            .where(UserProfile.user_id == user.id)
+            .values(created_at=past, updated_at=past)
+        )
+        session.commit()
+    before = stored_profile(test_engine, user.id)
+
+    profile = service.update_profile(user.id, UserProfileUpdate(weight_kg=68.0))
+
+    after = stored_profile(test_engine, user.id)
+    assert after["weight_kg"] == 68.0
+    assert after["updated_at"] > before["updated_at"]
+    assert after["created_at"] == before["created_at"]
+    assert (profile.created_at, profile.updated_at) == (after["created_at"], after["updated_at"])
 
 
 @pytest.mark.parametrize("field", sorted(REQUIRED_PROFILE_FIELDS))

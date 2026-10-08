@@ -5,11 +5,14 @@ sends every request to the test database and empties the user tables before
 and after each test.
 """
 
+from datetime import datetime
+
 import pytest
 from sqlalchemy.orm import Session
 
 from app.models import User, UserProfile
 from app.schemas import UserProfileResponse, UserResponse
+from tests.auth import bearer
 
 EMAIL = "api-user@example.com"
 PHONE = "+910000000020"
@@ -90,6 +93,25 @@ def test_create_user_with_duplicate_phone_returns_409(client):
     assert response.json() == {"detail": "a user with this phone already exists"}
 
 
+def test_users_without_email_or_phone_can_coexist(client):
+    bodies = [
+        {"phone": PHONE},
+        {"phone": "+910000000021"},
+        {"email": EMAIL},
+        {"email": f"second-{EMAIL}"},
+    ]
+
+    responses = [client.post("/users", json=body) for body in bodies]
+
+    assert [response.status_code for response in responses] == [201, 201, 201, 201]
+    duplicate_phone = client.post("/users", json={"phone": PHONE})
+    assert duplicate_phone.status_code == 409
+    assert duplicate_phone.json() == {"detail": "a user with this phone already exists"}
+    duplicate_email = client.post("/users", json={"email": EMAIL})
+    assert duplicate_email.status_code == 409
+    assert duplicate_email.json() == {"detail": "a user with this email already exists"}
+
+
 # GET /users/{user_id}
 
 
@@ -101,15 +123,19 @@ def test_get_user_returns_200_and_the_user(client, user_id):
     assert response.json()["email"] == EMAIL
 
 
-def test_get_missing_user_returns_404(client):
-    response = client.get("/users/999999")
+def test_get_another_or_a_missing_user_returns_404(client, user_id):
+    other_user_id = client.post("/users", json={"phone": PHONE}).json()["id"]
 
-    assert response.status_code == 404
-    assert response.json() == {"detail": "user 999999 does not exist"}
+    # the same answer whether or not the other user exists
+    for other in (other_user_id, 999999):
+        response = client.get(f"/users/{other}", headers=bearer(user_id))
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": "not found"}
 
 
-def test_get_user_with_invalid_id_returns_422(client):
-    assert client.get("/users/abc").status_code == 422
+def test_get_user_with_invalid_id_returns_422(client, user_id):
+    assert client.get("/users/abc", headers=bearer(user_id)).status_code == 422
 
 
 @pytest.mark.parametrize("user_id", ["0", "-1", "2147483648"])
@@ -126,14 +152,15 @@ def test_user_id_outside_the_integer_column_range_returns_422(
     client, profile_body, method, path, body, user_id
 ):
     json = profile_body if body == "profile" else body
+    signed_in = client.post("/users", json={"phone": PHONE}).json()["id"]
 
-    response = client.request(method, path.format(user_id), json=json)
+    response = client.request(method, path.format(user_id), json=json, headers=bearer(signed_in))
 
     assert response.status_code == 422
 
 
-def test_largest_integer_user_id_returns_404(client):
-    assert client.get("/users/2147483647").status_code == 404
+def test_largest_integer_user_id_returns_404(client, user_id):
+    assert client.get("/users/2147483647", headers=bearer(user_id)).status_code == 404
 
 
 # POST /users/{user_id}/profile
@@ -152,11 +179,11 @@ def test_create_profile_returns_201_and_the_profile(client, user_id, profile_bod
         assert session.get(UserProfile, profile["id"]).user_id == user_id
 
 
-def test_create_profile_for_missing_user_returns_404(client, profile_body):
-    response = client.post("/users/999999/profile", json=profile_body)
+def test_create_profile_for_another_or_a_missing_user_returns_404(client, user_id, profile_body):
+    response = client.post("/users/999999/profile", json=profile_body, headers=bearer(user_id))
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "user 999999 does not exist"}
+    assert response.json() == {"detail": "not found"}
 
 
 def test_create_second_profile_returns_409(client, user_id, profile, profile_body):
@@ -182,6 +209,22 @@ def test_create_profile_without_required_field_returns_422(client, user_id, prof
     assert client.post(f"/users/{user_id}/profile", json=profile_body).status_code == 422
 
 
+def test_create_profile_ignores_user_id_in_body(client, user_id, profile_body, test_engine):
+    # UserProfileCreate does not declare user_id, so it is ignored, not rejected:
+    # the profile belongs to the user in the path
+    other_user_id = client.post("/users", json={"phone": PHONE}).json()["id"]
+
+    response = client.post(
+        f"/users/{user_id}/profile", json={**profile_body, "user_id": other_user_id}
+    )
+
+    assert response.status_code == 201
+    assert response.json()["user_id"] == user_id
+    with Session(test_engine) as session:
+        assert session.get(UserProfile, response.json()["id"]).user_id == user_id
+    assert client.get(f"/users/{other_user_id}/profile").status_code == 404
+
+
 # GET /users/{user_id}/profile
 
 
@@ -199,8 +242,8 @@ def test_get_profile_of_user_without_profile_returns_404(client, user_id):
     assert response.json() == {"detail": f"no profile found for user {user_id}"}
 
 
-def test_get_profile_of_missing_user_returns_404(client):
-    assert client.get("/users/999999/profile").status_code == 404
+def test_get_profile_of_missing_user_returns_404(client, user_id):
+    assert client.get("/users/999999/profile", headers=bearer(user_id)).status_code == 404
 
 
 # PATCH /users/{user_id}/profile
@@ -227,6 +270,31 @@ def test_patch_profile_sets_nullable_field_to_null(client, user_id, profile):
     assert client.get(f"/users/{user_id}/profile").json()["target_weight_kg"] is None
 
 
+def test_patch_profile_ignores_identity_and_timestamp_fields(client, user_id, profile):
+    # UserProfileUpdate does not declare these fields, so they are ignored, not
+    # rejected: only weight_kg changes
+    other_user_id = client.post("/users", json={"phone": PHONE}).json()["id"]
+    protected = {
+        "id": profile["id"] + 1,
+        "user_id": other_user_id,
+        "created_at": "2000-01-01T00:00:00Z",
+        "updated_at": "2000-01-01T00:00:00Z",
+    }
+
+    response = client.patch(f"/users/{user_id}/profile", json={**protected, "weight_kg": 68.0})
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["weight_kg"] == 68.0
+    unchanged = set(profile) - {"weight_kg", "updated_at"}
+    assert {key: updated[key] for key in unchanged} == {key: profile[key] for key in unchanged}
+    # updated_at is set by the database on update, not taken from the request
+    updated_at = datetime.fromisoformat(updated["updated_at"])
+    assert updated_at >= datetime.fromisoformat(profile["updated_at"])
+    assert client.get(f"/users/{user_id}/profile").json() == updated
+    assert client.get(f"/users/{other_user_id}/profile").status_code == 404
+
+
 def test_patch_profile_with_null_required_field_returns_400(client, user_id, profile):
     response = client.patch(
         f"/users/{user_id}/profile", json={"weight_kg": 80.0, "first_name": None}
@@ -244,8 +312,12 @@ def test_patch_profile_of_user_without_profile_returns_404(client, user_id):
     assert response.json() == {"detail": f"user {user_id} has no profile"}
 
 
-def test_patch_profile_of_missing_user_returns_404(client):
-    assert client.patch("/users/999999/profile", json={"weight_kg": 70.0}).status_code == 404
+def test_patch_profile_of_missing_user_returns_404(client, user_id):
+    response = client.patch(
+        "/users/999999/profile", json={"weight_kg": 70.0}, headers=bearer(user_id)
+    )
+
+    assert response.status_code == 404
 
 
 @pytest.mark.parametrize("body", [{"age": 0}, {"age": "abc"}, {"sleep_hours": -1}])

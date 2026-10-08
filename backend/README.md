@@ -8,10 +8,13 @@ The Formiq backend is written in Python and uses [FastAPI](https://fastapi.tiang
 
 ## Status
 
-Phase 2.5: a FastAPI application with a health check and an API for creating users and their
-onboarding profiles, stored in PostgreSQL through SQLAlchemy, with Alembic migrations and unit and
-integration tests (integration tests use a dedicated test database). Authentication, AI coaching,
-and other features are planned for later phases.
+Phase 4 complete: a FastAPI application with users and onboarding profiles, the exercise catalog,
+workout plans and workout sessions, email and password authentication with JWT access tokens, and
+a read-only AI coach (`POST /coach/message`: Gemini through LangGraph, with optional Langfuse
+tracing). Data is stored in PostgreSQL through SQLAlchemy, with Alembic migrations and unit and
+integration tests (integration tests use a dedicated test database). The coach's guarantees are in
+[the agent production contract](../docs/agent-production-contract.md). Phase 5 adds Formiq's
+fitness capabilities.
 
 ## Architecture
 
@@ -31,12 +34,19 @@ API route (app/api) → service (app/services) → repository (app/repositories)
 - `app/core/config.py`: application settings, read from environment variables and `.env`
 - `app/db/database.py`: SQLAlchemy engine, session factory, and the `get_db()` dependency
 - `app/db/base.py`: declarative base for the database models
-- `app/models/`: SQLAlchemy models (`User`, `UserProfile`)
+- `app/models/`: SQLAlchemy models
 - `app/schemas/`: Pydantic request and response schemas
-- `app/repositories/`: database access for users and profiles
+- `app/repositories/`: database access
 - `app/services/`: business logic and service-level errors
-- `app/api/dependencies.py`: the database session dependency for routes
-- `app/api/routes/`: `GET /health` and the `/users` endpoints
+- `app/api/dependencies.py`: route dependencies: the database session, the signed-in user, the
+  coach's model provider and tracer
+- `app/api/routes/`: the API's routes
+- `app/core/security.py`: password hashing and access tokens
+- `app/agent/`, `app/ai/`, `app/tools/`: the AI coach: its graph and policies, the Gemini provider,
+  and its read-only tools
+- `app/approvals/`: the write-approval boundary, for future writes (none exists yet)
+- `app/observability/`: the coach's tracing (Langfuse, or off)
+- `app/cli.py`: development commands (`python -m app.cli set-password USER_ID`)
 - `alembic.ini`, `migrations/`: Alembic configuration and migration scripts
 - `tests/`: unit tests (`tests/unit/`) and integration tests (`tests/integration/`)
 - `pytest.ini`: pytest configuration
@@ -142,6 +152,7 @@ documentation at http://127.0.0.1:8000/docs.
 | Method | Path | Request body | Success |
 |---|---|---|---|
 | `GET` | `/health` | | 200 |
+| `POST` | `/auth/login` | email and password | 200 |
 | `POST` | `/users` | email and/or phone (at least one) | 201 |
 | `GET` | `/users/{user_id}` | | 200 |
 | `POST` | `/users/{user_id}/profile` | onboarding profile | 201 |
@@ -156,6 +167,33 @@ Errors return `{"detail": "..."}` with these status codes:
 - `400`: the request is invalid for the service (for example, `null` for a required profile field)
 - `404`: the user or profile does not exist
 - `409`: a user with the same email or phone, or a profile for the user, already exists
+- `401`: no valid access token (see Authentication)
+- `404`: also for any `user_id` other than the signed-in user's
 - `422`: the request body or `user_id` fails validation
+- `503`: authentication is not configured (`AUTH_JWT_SECRET` is not set)
 
-The API has no authentication yet; run it only for local development.
+## Authentication
+
+Every route under `/users/{user_id}`, and `POST /coach/message`, needs the header
+`Authorization: Bearer <access token>`, and serves only the signed-in user: any other `user_id`
+is not found. `POST /users` and the exercise catalog need no sign-in. The coach takes its user from
+the token only; its request body has no `user_id`.
+
+1. Set `AUTH_JWT_SECRET` in `.env` (never in `.env.example`), for example to the output of
+   `openssl rand -hex 32`. `AUTH_JWT_ALGORITHM` (HS256, HS384 or HS512) and
+   `AUTH_ACCESS_TOKEN_EXPIRE_MINUTES` (30 by default) are optional.
+2. Apply the migrations (`alembic upgrade head`): passwords are kept, as Argon2id hashes only,
+   in the `user_credentials` table.
+3. Give an existing user who has an email a password. The command asks for it without echoing
+   it, and never takes it as an argument:
+   ```bash
+   python -m app.cli set-password USER_ID
+   ```
+4. Log in, and send the returned `access_token` as the Bearer token:
+   ```bash
+   curl -s -X POST http://127.0.0.1:8000/auth/login -H 'Content-Type: application/json' \
+     -d '{"email": "you@example.com", "password": "..."}'
+   ```
+
+A wrong password, an unknown email and a user without a password all get the same 401. Tokens
+expire and cannot be revoked earlier; there is no logout, refresh token or password reset yet.
