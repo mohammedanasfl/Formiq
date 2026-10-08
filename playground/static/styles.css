@@ -1,0 +1,262 @@
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --text: #1b1f24;
+  --muted: #5b6470;
+  --line: #d6dbe1;
+  --accent: #2457c5;
+  --warn-bg: #b3261e;
+  --warn-text: #ffffff;
+  --error-bg: #fdecea;
+  --error-line: #e3a29c;
+  --user-bg: #e8eefc;
+  --coach-bg: #eef7ee;
+  --injected-bg: #fff4d6;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15181c;
+    --panel: #1d2126;
+    --text: #e6e9ed;
+    --muted: #9aa3ae;
+    --line: #343a42;
+    --accent: #7aa2ff;
+    --error-bg: #3a1d1b;
+    --error-line: #7a3a35;
+    --user-bg: #1f2a44;
+    --coach-bg: #1d3323;
+    --injected-bg: #3d3216;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.warning {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 10px 16px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) 1fr;
+  gap: 16px;
+  padding: 16px;
+}
+
+@media (max-width: 800px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.controls,
+.output {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  min-width: 0;
+}
+
+h1 {
+  font-size: 1.2rem;
+  margin: 0 0 4px;
+}
+
+h2 {
+  font-size: 1rem;
+  margin: 16px 0 8px;
+}
+
+h2:first-child {
+  margin-top: 0;
+}
+
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 12px 0;
+  padding: 10px 12px;
+}
+
+legend {
+  font-weight: 600;
+  padding: 0 4px;
+}
+
+label {
+  display: block;
+  margin: 6px 0 4px;
+  font-size: 0.9rem;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+textarea {
+  resize: vertical;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.row input {
+  flex: 1;
+}
+
+button {
+  font: inherit;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 4px 0;
+}
+
+.identity {
+  margin: 0 0 4px;
+}
+
+.quick-group {
+  margin: 8px 0;
+}
+
+.quick-group h3 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+
+.quick-group button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 3px 0;
+  font-size: 0.85rem;
+}
+
+.conversation {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.turn {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.turn .who {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.turn.user {
+  background: var(--user-bg);
+}
+
+.turn.coach {
+  background: var(--coach-bg);
+}
+
+.turn.injected {
+  background: var(--injected-bg);
+  border-style: dashed;
+}
+
+.notice {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  color: var(--muted);
+}
+
+.error {
+  background: var(--error-bg);
+  border: 1px solid var(--error-line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 12px;
+}
+
+.error p {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}

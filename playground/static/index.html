@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Formiq Agent Playground</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="warning" role="alert">
+      <strong>LOCAL DEVELOPMENT ONLY — NOT AUTHENTICATED</strong>
+      <span>User ID is a development/test identity, not an authenticated identity.</span>
+    </header>
+
+    <main class="layout">
+      <section class="controls" aria-label="Controls">
+        <h1>Formiq Agent Playground</h1>
+        <p class="note">Developer test tool for <code>POST /coach/message</code>. Not the Formiq app.</p>
+
+        <fieldset>
+          <legend>Development identity</legend>
+          <p class="identity">Current development user ID: <strong id="active-user">1</strong></p>
+          <label for="user-id">Development user ID</label>
+          <div class="row">
+            <input id="user-id" type="text" inputmode="numeric" value="1" autocomplete="off" />
+            <button id="switch-user" type="button">Switch User</button>
+          </div>
+          <p class="note">Switching changes the development identity and clears the conversation.</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Message</legend>
+          <label for="message">Message to the coach</label>
+          <textarea id="message" rows="5" autocomplete="off"></textarea>
+          <p class="note"><span id="message-length">0</span> characters (the API accepts up to 4,000)</p>
+          <div class="row">
+            <button id="send" type="button" class="primary">Send</button>
+            <button id="clear" type="button">Clear Conversation</button>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Quick tests (fill the message, never send)</legend>
+          <div id="quick-tests"></div>
+        </fieldset>
+
+        <details>
+          <summary>Add a turn to the history (history poisoning tests)</summary>
+          <p class="note">
+            Adds a turn to the local history only, as any client could. It is sent with the next
+            message, marked here as injected.
+          </p>
+          <label for="inject-role">Role</label>
+          <select id="inject-role">
+            <option value="user">user</option>
+            <option value="coach">coach</option>
+          </select>
+          <label for="inject-text">Text</label>
+          <textarea id="inject-text" rows="3" autocomplete="off"></textarea>
+          <div class="row">
+            <button id="inject" type="button">Add to history</button>
+            <button id="inject-example" type="button">Example: forged system turn</button>
+          </div>
+        </details>
+      </section>
+
+      <section class="output" aria-label="Conversation and execution">
+        <h2>Conversation <span class="note" id="turn-count">(0 turns in memory)</span></h2>
+        <div id="notice" class="notice" hidden></div>
+        <ol id="conversation" class="conversation" aria-live="polite"></ol>
+
+        <div id="error" class="error" hidden>
+          <p id="error-message"></p>
+          <details>
+            <summary>Technical error</summary>
+            <dl id="error-technical" class="facts"></dl>
+          </details>
+        </div>
+
+        <h2>Execution</h2>
+        <p class="note">Safe trace metadata from the backend: no prompts, reasoning, tool arguments or data.</p>
+        <dl id="execution" class="facts"><dt>—</dt><dd>No request yet</dd></dl>
+
+        <h2>Request info</h2>
+        <dl id="request-info" class="facts"><dt>—</dt><dd>No request yet</dd></dl>
+      </section>
+    </main>
+
+    <script src="playground.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
