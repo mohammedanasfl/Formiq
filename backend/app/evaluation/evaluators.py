@@ -37,10 +37,18 @@ EXPECTED_LIMITS = {
     "MAX_TEXT_LENGTH": 500,
 }
 
-# The only operations a model's call may run, as of Phase 4.11: Formiq's
-# reads. Pinned like the limits, so a write slipping into them fails a test.
+# The only operations a model's call may run: Formiq's reads (as of Phase 4.11,
+# plus the two discovery reads). Pinned like the limits, so a write slipping into them fails a test.
 EXPECTED_READS = frozenset(
-    {"get_user_profile", "get_workout_plan", "get_workout_session", "get_exercise", "search_exercises"}
+    {
+        "get_user_profile",
+        "get_workout_plan",
+        "get_workout_session",
+        "get_current_workout_plan",
+        "get_latest_workout_session",
+        "get_exercise",
+        "search_exercises",
+    }
 )
 
 # the decisions that answer from knowledge or data: never on the safety path

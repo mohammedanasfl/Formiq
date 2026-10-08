@@ -25,7 +25,9 @@ from app.tools.limits import (
 from app.tools.schemas import (
     ExerciseOutput,
     ExerciseSummaryOutput,
+    GetCurrentWorkoutPlanInput,
     GetExerciseInput,
+    GetLatestWorkoutSessionInput,
     GetUserProfileInput,
     GetWorkoutPlanInput,
     GetWorkoutSessionInput,
@@ -98,6 +100,11 @@ class FormiqTools:
             "get_user_profile": (GetUserProfileInput, self.get_user_profile),
             "get_workout_plan": (GetWorkoutPlanInput, self.get_workout_plan),
             "get_workout_session": (GetWorkoutSessionInput, self.get_workout_session),
+            "get_current_workout_plan": (GetCurrentWorkoutPlanInput, self.get_current_workout_plan),
+            "get_latest_workout_session": (
+                GetLatestWorkoutSessionInput,
+                self.get_latest_workout_session,
+            ),
             "get_exercise": (GetExerciseInput, self.get_exercise),
             "search_exercises": (SearchExercisesInput, self.search_exercises),
         }
@@ -171,6 +178,18 @@ class FormiqTools:
                 ToolErrorCode.RESOURCE_NOT_FOUND,
                 f"the user has no workout plan {request.plan_id}",
             )
+        return self._plan_output(plan)
+
+    def get_current_workout_plan(self, request: GetCurrentWorkoutPlanInput) -> WorkoutPlanOutput:
+        plan = self.plans.get_current_plan(request.user_id)
+        if plan is None:
+            raise ToolError(
+                ToolErrorCode.RESOURCE_NOT_FOUND,
+                "the user has no current workout plan (no PLANNED plan); there is no id to ask for",
+            )
+        return self._plan_output(plan)
+
+    def _plan_output(self, plan: Any) -> WorkoutPlanOutput:
         items = plan.exercises[:MAX_EXERCISES]
         names = self._exercise_names(item.exercise_id for item in items)
         return WorkoutPlanOutput(
@@ -202,6 +221,20 @@ class FormiqTools:
                 ToolErrorCode.RESOURCE_NOT_FOUND,
                 f"the user has no workout session {request.session_id}",
             )
+        return self._session_output(workout_session)
+
+    def get_latest_workout_session(
+        self, request: GetLatestWorkoutSessionInput
+    ) -> WorkoutSessionOutput:
+        workout_session = self.sessions.get_latest_completed_session(request.user_id)
+        if workout_session is None:
+            raise ToolError(
+                ToolErrorCode.RESOURCE_NOT_FOUND,
+                "the user has no completed workout session yet; there is no id to ask for",
+            )
+        return self._session_output(workout_session)
+
+    def _session_output(self, workout_session: Any) -> WorkoutSessionOutput:
         items = workout_session.exercises[:MAX_EXERCISES]
         names = self._exercise_names(item.exercise_id for item in items)
         return WorkoutSessionOutput(

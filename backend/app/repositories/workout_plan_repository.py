@@ -36,8 +36,10 @@ class WorkoutPlanRepository:
         *,
         status: str | None = None,
         scheduled_date: date | None = None,
+        limit: int | None = None,
     ) -> list[WorkoutPlan]:
-        """The user's plans matching every value that is not None.
+        """The user's plans matching every value that is not None, at most limit
+        of them when it is given.
 
         Latest scheduled date first and plans without a date last, then the
         most recently created first.
@@ -56,6 +58,8 @@ class WorkoutPlanRepository:
             query = query.where(WorkoutPlan.status == status)
         if scheduled_date is not None:
             query = query.where(WorkoutPlan.scheduled_date == scheduled_date)
+        if limit is not None:
+            query = query.limit(limit)
         return list(self.session.scalars(query))
 
     def update(self, plan: WorkoutPlan) -> WorkoutPlan:

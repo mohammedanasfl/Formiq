@@ -26,6 +26,8 @@ READ_ACTIONS = frozenset(
         "get_user_profile",
         "get_workout_plan",
         "get_workout_session",
+        "get_current_workout_plan",
+        "get_latest_workout_session",
         "get_exercise",
         "search_exercises",
     }

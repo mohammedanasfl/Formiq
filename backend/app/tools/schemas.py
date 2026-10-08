@@ -6,13 +6,19 @@ never ORM objects, internal ids beyond the resource's own, or audit timestamps.
 """
 
 from datetime import date, datetime
-from typing import Self
+from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.schemas.exercise import CatalogId, Difficulty, MovementPattern, MuscleRole
-from app.schemas.workout_plan import PositiveInteger, WorkoutPlanStatus
+from app.schemas.exercise import Difficulty, MovementPattern, MuscleRole
+from app.schemas.workout_plan import MAX_INTEGER, PositiveInteger, WorkoutPlanStatus
 from app.schemas.workout_session import WorkoutSessionStatus
+
+# A resource id from the model, in its one canonical form (as
+# app.agent.policy.is_canonical_id): a positive JSON integer within the
+# columns' range. Strict, so true, 7.0 and strings such as "7", "+7", "7.0" or
+# "1_0" are rejected, never coerced into an id.
+ResourceId = Annotated[int, Field(strict=True, ge=1, le=MAX_INTEGER)]
 
 
 class ToolInput(BaseModel):
@@ -30,21 +36,29 @@ class GetUserProfileInput(UserScopedInput):
 
 
 class GetWorkoutPlanInput(UserScopedInput):
-    plan_id: PositiveInteger
+    plan_id: ResourceId
 
 
 class GetWorkoutSessionInput(UserScopedInput):
-    session_id: PositiveInteger
+    session_id: ResourceId
+
+
+class GetCurrentWorkoutPlanInput(UserScopedInput):
+    pass
+
+
+class GetLatestWorkoutSessionInput(UserScopedInput):
+    pass
 
 
 class GetExerciseInput(ToolInput):
-    exercise_id: CatalogId
+    exercise_id: ResourceId
 
 
 class SearchExercisesInput(ToolInput):
     """Catalog filters; an exercise must match all of those given."""
 
-    equipment_id: CatalogId | None = None
+    equipment_id: ResourceId | None = None
     movement_pattern: MovementPattern | None = None
     difficulty: Difficulty | None = None
 
@@ -59,10 +73,14 @@ class SearchExercisesInput(ToolInput):
 
 
 class ProfileOutput(BaseModel):
-    """The fitness fields of the profile; the user's name is left out."""
+    """The user's name and the fitness fields of the profile. Never contact
+    details: the user's email and phone are in the users table, which the
+    coach's tools do not read."""
 
     model_config = ConfigDict(from_attributes=True)
 
+    first_name: str
+    last_name: str | None
     age: int
     height_cm: float
     weight_kg: float

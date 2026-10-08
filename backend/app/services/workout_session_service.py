@@ -81,6 +81,13 @@ class WorkoutSessionService:
         """The user's session, or None if the user has no session with this id."""
         return self.sessions.get_for_user(user_id, session_id)
 
+    def get_latest_completed_session(self, user_id: int) -> WorkoutSession | None:
+        """The user's last workout: their most recently started COMPLETED
+        session, in the order the sessions are listed; None if they have
+        none. A running or cancelled session is not a workout they did."""
+        sessions = self.sessions.find_by_user(user_id, status=COMPLETED, limit=1)
+        return sessions[0] if sessions else None
+
     def update_session(
         self, user_id: int, session_id: int, session_data: WorkoutSessionUpdate
     ) -> WorkoutSession:

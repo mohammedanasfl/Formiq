@@ -36,6 +36,8 @@ class Intent(StrEnum):
     ADAPTATION = "ADAPTATION"
     SAFETY_SENSITIVE = "SAFETY_SENSITIVE"
     AMBIGUOUS = "AMBIGUOUS"
+    # not about fitness: Formiq is a fitness coach, not a general assistant
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"
 
 
 class Decision(StrEnum):
@@ -77,12 +79,21 @@ class IntentPolicy:
 _FALLBACKS = frozenset(
     {Decision.ASK_CLARIFICATION, Decision.SAFE_REDIRECT, Decision.CANNOT_ANSWER}
 )
-_USER_DATA_TOOLS = frozenset({"get_user_profile", "get_workout_plan", "get_workout_session"})
+_USER_DATA_TOOLS = frozenset(
+    {
+        "get_user_profile",
+        "get_workout_plan",
+        "get_workout_session",
+        "get_current_workout_plan",
+        "get_latest_workout_session",
+    }
+)
 
 POLICY: dict[Intent, IntentPolicy] = {
     Intent.GENERAL_FITNESS: IntentPolicy(
-        "General training, exercise or nutrition knowledge that does not depend on the "
-        "user's own data, such as what progressive overload is.",
+        "General fitness knowledge (training, exercise, nutrition, recovery) that does not "
+        "depend on the user's own data, such as what progressive overload is, or how you "
+        "coach them. Not general knowledge outside fitness.",
         frozenset(),
         frozenset({Decision.ANSWER}) | _FALLBACKS,
     ),
@@ -94,13 +105,13 @@ POLICY: dict[Intent, IntentPolicy] = {
     ),
     Intent.WORKOUT_PLAN: IntentPolicy(
         "One of the user's workout plans: what was prescribed.",
-        frozenset({"get_workout_plan"}),
+        frozenset({"get_workout_plan", "get_current_workout_plan"}),
         frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
     ),
     Intent.WORKOUT_HISTORY: IntentPolicy(
         "What the user actually did in a workout session: exercises, sets, reps, "
         "weights, effort, including comparing it with the plan.",
-        frozenset({"get_workout_session"}),
+        frozenset({"get_workout_session", "get_latest_workout_session"}),
         frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
     ),
     Intent.EXERCISE: IntentPolicy(
@@ -127,7 +138,21 @@ POLICY: dict[Intent, IntentPolicy] = {
         frozenset(),
         frozenset({Decision.ASK_CLARIFICATION}),
     ),
+    Intent.OUT_OF_SCOPE: IntentPolicy(
+        "Anything not about fitness, the user's Formiq data or how you coach them, such as "
+        "general knowledge, technology, coding, news, trivia or jokes. Call no tools: "
+        "Formiq gives its own short reply.",
+        frozenset(),
+        frozenset({Decision.CANNOT_ANSWER}),
+    ),
 }
+
+# Formiq's reply to an OUT_OF_SCOPE request, whatever the model wrote: no
+# general answer reaches the user, only the coach's scope.
+OUT_OF_SCOPE_REPLY = (
+    "I'm your Formiq fitness coach, so I can help with workouts, exercise, nutrition, "
+    "recovery and your fitness progress. What would you like help with?"
+)
 
 # the tool error codes (app.tools) that mean the data does not exist for this user
 MISSING_ERROR_CODES = frozenset({"USER_NOT_FOUND", "PROFILE_NOT_FOUND", "RESOURCE_NOT_FOUND"})
@@ -348,7 +373,7 @@ def _ids_in(value: Any) -> set[int]:
     if isinstance(value, dict):
         found = set()
         for key, item in value.items():
-            if (key == "id" or key.endswith("_id")) and isinstance(item, int):
+            if (key == "id" or key.endswith("_id")) and is_canonical_id(item):
                 found.add(item)
             else:
                 found |= _ids_in(item)
@@ -358,29 +383,26 @@ def _ids_in(value: Any) -> set[int]:
     return set()
 
 
+def is_canonical_id(value: Any) -> bool:
+    """Whether the value is a resource id in its one canonical form: a positive
+    JSON integer. Never true or false (bool is an int in Python), a float such
+    as 7.0, or a string such as "7", "+7", "07", " 7 ", "7.0", "1_0" or "1e1":
+    those are not normalized into an id, so no other form of a grounded id can
+    stand in for it."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
 def ungrounded_ids(call: ToolCall, known: set[int]) -> list[str]:
-    """The call's resource id arguments that neither the user nor a tool gave.
+    """The call's resource id arguments that neither the user nor a tool gave:
+    an id that is not canonical, or a canonical one that is not known. An id
+    left out (None) is not one.
 
     user_id is not one of them: the tools reject it outright.
     """
     ungrounded = []
     for name, value in call.arguments.items():
-        if not name.endswith("_id") or name == "user_id":
+        if not name.endswith("_id") or name == "user_id" or value is None:
             continue
-        number = _as_int(value)
-        if number is not None and number not in known:
-            ungrounded.append(f"{name}={number}")
+        if not is_canonical_id(value) or value not in known:
+            ungrounded.append(f"{name}={value!r}")
     return ungrounded
-
-
-def _as_int(value: Any) -> int | None:
-    """The id as an integer, or None when it is not one (the tool rejects it)."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value)
-    return None

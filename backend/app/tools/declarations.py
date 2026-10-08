@@ -13,9 +13,10 @@ ID = {"type": "integer", "minimum": 1}
 GET_USER_PROFILE = ToolDeclaration(
     name="get_user_profile",
     description=(
-        "Get the user's Formiq fitness profile: age, height, weight, gender, training "
-        "experience, goal, target weight and goal period, training frequency and location, "
-        "activity level, sleep and dietary preference. Use it when your answer depends on "
+        "Get the user's Formiq fitness profile: first and last name, age, height, weight, "
+        "gender, training experience, goal, target weight and goal period, training frequency "
+        "and location, activity level, sleep and dietary preference. Never their email or "
+        "phone number, which Formiq does not give you. Use it when your answer depends on "
         "who the user is or what they are training for. Takes no arguments."
     ),
 )
@@ -47,6 +48,27 @@ GET_WORKOUT_SESSION = ToolDeclaration(
         "properties": {"session_id": {**ID, "description": "The workout session's id."}},
         "required": ["session_id"],
     },
+)
+
+GET_CURRENT_WORKOUT_PLAN = ToolDeclaration(
+    name="get_current_workout_plan",
+    description=(
+        "Get the user's current workout plan, without an id: their PLANNED plan with the "
+        "latest scheduled date. Returns the same as get_workout_plan. Use it when the user "
+        "asks about their current, active or planned workout plan. When the user names a "
+        "plan id, use get_workout_plan instead. Takes no arguments."
+    ),
+)
+
+GET_LATEST_WORKOUT_SESSION = ToolDeclaration(
+    name="get_latest_workout_session",
+    description=(
+        "Get the user's last workout, without an id: their most recently started "
+        "COMPLETED workout session. Returns the same as get_workout_session. Use it when "
+        "the user asks about their last, latest or most recent workout, or what they did "
+        "recently. When the user names a session id, use get_workout_session instead. "
+        "Takes no arguments."
+    ),
 )
 
 GET_EXERCISE = ToolDeclaration(
@@ -92,6 +114,8 @@ TOOL_DECLARATIONS = (
     GET_USER_PROFILE,
     GET_WORKOUT_PLAN,
     GET_WORKOUT_SESSION,
+    GET_CURRENT_WORKOUT_PLAN,
+    GET_LATEST_WORKOUT_SESSION,
     GET_EXERCISE,
     SEARCH_EXERCISES,
 )

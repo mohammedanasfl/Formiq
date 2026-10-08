@@ -8,7 +8,15 @@ from app.agent.policy import data_status
 from app.ai import ToolCall
 
 # the tools that read the trusted user's own data
-_USER_SCOPED = frozenset({"get_user_profile", "get_workout_plan", "get_workout_session"})
+_USER_SCOPED = frozenset(
+    {
+        "get_user_profile",
+        "get_workout_plan",
+        "get_workout_session",
+        "get_current_workout_plan",
+        "get_latest_workout_session",
+    }
+)
 
 
 def call_metadata(call: ToolCall) -> dict[str, Any]:

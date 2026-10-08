@@ -27,7 +27,7 @@ changing this document fails a test.
 The coach is a **read-only, single-turn, request-scoped agent**. For each request it:
 
 1. runs a deterministic safety check on the user's message;
-2. lets the model read the user's own Formiq data through five read-only tools, within fixed
+2. lets the model read the user's own Formiq data through seven read-only tools, within fixed
    limits;
 3. accepts the model's reply only when the decision, the evidence, the safety policy and the
    reply itself pass deterministic checks.
@@ -171,7 +171,7 @@ Enforced by:
 - **Tool errors are controlled.** Each has a code from `ToolErrorCode` and a plain message. An
   unexpected exception becomes `TOOL_ERROR`, its cause goes to the server log only, and the read
   transaction is ended.
-- **Tools are read-only.** The five tools listed below are Formiq's reads, and they are the only
+- **Tools are read-only.** The seven tools listed below are Formiq's reads, and they are the only
   operations a model's call can run. `app.approvals.access` classifies every other name as a
   write. The graph refuses a call to a known write action with `WRITE_NOT_AUTHORIZED`, and a call
   to any other unknown name with `UNKNOWN_TOOL`. Neither reaches the tools (see section 10).
@@ -183,6 +183,10 @@ The read tools (`READ_ACTIONS`, `TOOL_DECLARATIONS`):
 - `get_user_profile`
 - `get_workout_plan`
 - `get_workout_session`
+- `get_current_workout_plan`: the user's PLANNED plan with the latest scheduled date, read
+  without an id
+- `get_latest_workout_session`: the user's most recently started COMPLETED session, read
+  without an id
 - `get_exercise`
 - `search_exercises`
 
@@ -239,7 +243,7 @@ default), applied by the SDK to each HTTP request.
 
 Enforced by:
 
-- `tests/unit/test_formiq_tools.py::test_there_are_five_read_only_tools`
+- `tests/unit/test_formiq_tools.py::test_there_are_seven_read_only_tools`
 - `tests/unit/test_formiq_tools.py::test_tools_reach_data_only_through_the_services`
 - `tests/unit/test_formiq_tools.py::test_tools_call_only_read_methods_of_the_services`
 - `tests/unit/test_formiq_tools.py::test_only_the_first_calls_of_a_turn_run`
@@ -268,6 +272,7 @@ Intents (`Intent`):
 - `ADAPTATION`
 - `SAFETY_SENSITIVE`
 - `AMBIGUOUS`
+- `OUT_OF_SCOPE`: anything not about fitness, the user's Formiq data or how Formiq coaches
 
 Decisions (`Decision`):
 
@@ -294,6 +299,10 @@ Critical invariants:
   `SAFE_REDIRECT`, and a request flagged by the safety backstop allows only its `SAFETY_POLICY`
   decisions (section 7).
 - **Ambiguous requests require clarification.** `AMBIGUOUS` allows only `ASK_CLARIFICATION`.
+- **Formiq answers fitness only.** `GENERAL_FITNESS` means general *fitness* knowledge, not
+  general knowledge. `OUT_OF_SCOPE` allows only `CANNOT_ANSWER`, and the user always gets
+  Formiq's fixed redirect (`OUT_OF_SCOPE_REPLY`), never the model's text. The classification is
+  the model's: no deterministic check decides what is fitness.
 - **Invalid decisions fail closed.** A malformed or disallowed `respond`, or one beside other
   calls, goes back to the model as `DECISION_REJECTED`, within the iteration limit. A rejected
   final decision ends the turn with `CANNOT_ANSWER` and Formiq's own reply (`CANNOT_ANSWER_REPLY`).

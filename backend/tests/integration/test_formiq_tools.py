@@ -86,6 +86,8 @@ def test_profile_holds_the_fitness_fields(tools, db_session, user, profile_field
         "output": {
             "user_id": user.id,
             "profile": {
+                "first_name": "Test",
+                "last_name": "Example",
                 "age": 30,
                 "height_cm": 175.0,
                 "weight_kg": 70.0,
@@ -104,15 +106,25 @@ def test_profile_holds_the_fitness_fields(tools, db_session, user, profile_field
     }
 
 
-def test_profile_leaves_out_names_ids_and_timestamps(tools, db_session, user, profile_fields):
+def test_profile_never_holds_contact_details_ids_or_timestamps(
+    tools, db_session, user, profile_fields
+):
+    # the user's email and phone exist, in the users table
+    user.phone = "+15550100"
+    db_session.flush()
     add_profile(db_session, user, profile_fields, last_name="Example")
 
     result = run(tools, "get_user_profile", user_id=user.id)
 
     assert set(result["output"]["profile"]).isdisjoint(
-        {"id", "user_id", "first_name", "last_name", "created_at", "updated_at"}
+        {"id", "user_id", "email", "phone", "created_at", "updated_at"}
     )
-    assert "Test" not in str(result) and "Example" not in str(result)
+    # the name, and nothing to contact the user by
+    assert (result["output"]["profile"]["first_name"], result["output"]["profile"]["last_name"]) == (
+        "Test",
+        "Example",
+    )
+    assert "tools@example.com" not in str(result) and "5550100" not in str(result)
 
 
 def test_profile_of_an_unknown_user(tools):

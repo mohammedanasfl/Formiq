@@ -6,6 +6,7 @@ from app.schemas import WorkoutPlanCreate, WorkoutPlanFilters, WorkoutPlanUpdate
 from app.services.exceptions import UserNotFoundError, WorkoutPlanNotDeletableError
 from app.services.workout_plan_rules import (
     DRAFT,
+    PLANNED,
     REQUIRED_PLAN_FIELDS,
     check_editable,
     check_exercise_available,
@@ -64,6 +65,14 @@ class WorkoutPlanService:
     def get_plan(self, user_id: int, plan_id: int) -> WorkoutPlan | None:
         """The user's plan, or None if the user has no plan with this id."""
         return self.plans.get_for_user(user_id, plan_id)
+
+    def get_current_plan(self, user_id: int) -> WorkoutPlan | None:
+        """The user's current plan: their PLANNED plan with the latest scheduled
+        date (then the most recently created), in the order the plans are
+        listed; None if they have no PLANNED plan. DRAFT plans are not ready and
+        CANCELLED plans are not to be done, so neither is current."""
+        plans = self.plans.find_by_user(user_id, status=PLANNED, limit=1)
+        return plans[0] if plans else None
 
     def update_plan(
         self, user_id: int, plan_id: int, plan_data: WorkoutPlanUpdate

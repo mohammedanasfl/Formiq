@@ -30,9 +30,11 @@ class WorkoutSessionRepository:
             .where(WorkoutSession.id == session_id, WorkoutSession.user_id == user_id)
         ).one_or_none()
 
-    def find_by_user(self, user_id: int, *, status: str | None = None) -> list[WorkoutSession]:
+    def find_by_user(
+        self, user_id: int, *, status: str | None = None, limit: int | None = None
+    ) -> list[WorkoutSession]:
         """The user's sessions, with the given status if it is not None; the most
-        recently started first."""
+        recently started first, at most limit of them when it is given."""
         query = (
             select(WorkoutSession)
             .options(*LOAD_EXERCISES_AND_SETS)
@@ -41,6 +43,8 @@ class WorkoutSessionRepository:
         )
         if status is not None:
             query = query.where(WorkoutSession.status == status)
+        if limit is not None:
+            query = query.limit(limit)
         return list(self.session.scalars(query))
 
     def get_first_with_status(self, user_id: int, status: str) -> WorkoutSession | None:

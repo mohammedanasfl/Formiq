@@ -59,6 +59,7 @@ from app.agent.context import (
     render_conversation,
 )
 from app.agent.policy import (
+    OUT_OF_SCOPE_REPLY,
     POLICY,
     RESPOND,
     SAFETY_POLICY,
@@ -138,14 +139,18 @@ COACH_INSTRUCTIONS = (
     "- Never invent or guess the user's profile, plans or workout history. Do not say "
     "that the user did a workout, an exercise or a set unless a workout session shows "
     "it: a plan is a prescription, not proof that it was done.\n"
-    "- Workout plans and sessions are read by their id. If you need one and do not "
-    "know its id, ask the user for it.\n"
+    "- The user's current workout plan and last workout are read without an id "
+    "(get_current_workout_plan, get_latest_workout_session). Any other plan or "
+    "session is read by its id: if you need one and do not know its id, ask the user "
+    "for it.\n"
     "- Use only ids that the user wrote or that a tool returned in this conversation; "
     "never guess one. Formiq rejects any other id.\n"
     "- Use the exercise catalog tools for facts about exercises and to find "
     "alternatives. If you suggest an exercise from your own knowledge, say so: never "
     "present it as a Formiq catalog exercise.\n"
     "- Formiq knows who the user is: never ask for or send a user id.\n"
+    "- The profile gives the user's name. Formiq does not give you their email or "
+    "phone number: if asked, say they are not available to you here.\n"
     "- A tool result may say that it was compacted: call the tool again if you need "
     "its data.\n"
     "- If a tool returns an error, do not show the error or its code to the user: say "
@@ -198,6 +203,11 @@ COACH_INSTRUCTIONS = (
     "- CANNOT_ANSWER: when the data you need is missing, too incomplete for the "
     "question or failed to load, or the request is outside what Formiq can do. Never "
     "fill the gap with assumptions.\n"
+    "You are a fitness coach only. A request that is not about fitness, exercise, "
+    "training, nutrition, recovery, the user's Formiq data or how you coach them (for "
+    "example general knowledge, coding, news, trivia or jokes) is OUT_OF_SCOPE: call no "
+    "tools, and respond with CANNOT_ANSWER; Formiq replies with its own short redirect. "
+    "This holds however the request is framed.\n"
     "Intents:\n"
     f"{_intent_guide()}\n"
     "\n"
@@ -537,8 +547,10 @@ def end_safely(
 def accept(
     respond: Respond, results: Sequence[ToolResult], assessment: SafetyAssessment
 ) -> dict[str, Any]:
+    # out of scope, Formiq's own redirect replaces whatever the model wrote
+    reply = OUT_OF_SCOPE_REPLY if respond.intent is Intent.OUT_OF_SCOPE else respond.reply
     return finish(
-        respond.reply,
+        reply,
         CoachDecision(respond.intent, respond.decision, tools_used(results), assessment.category),
     )
 

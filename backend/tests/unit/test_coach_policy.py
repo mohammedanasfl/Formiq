@@ -16,6 +16,7 @@ from app.agent.policy import (
     Respond,
     check_decision,
     data_status,
+    is_canonical_id,
     known_ids,
     tools_used,
     ungrounded_ids,
@@ -47,6 +48,7 @@ def test_the_intents_and_decisions():
         "ADAPTATION",
         "SAFETY_SENSITIVE",
         "AMBIGUOUS",
+        "OUT_OF_SCOPE",
     ]
     assert [decision.value for decision in Decision] == [
         "ANSWER",
@@ -75,13 +77,19 @@ def test_only_general_and_exercise_questions_may_be_answered_without_data():
 
 def test_questions_about_the_users_data_name_the_tools_that_hold_it():
     assert POLICY[Intent.PROFILE].data_tools == {"get_user_profile"}
-    assert POLICY[Intent.WORKOUT_PLAN].data_tools == {"get_workout_plan"}
-    assert POLICY[Intent.WORKOUT_HISTORY].data_tools == {"get_workout_session"}
+    # by id, or the current plan / last workout without one
+    assert POLICY[Intent.WORKOUT_PLAN].data_tools == {"get_workout_plan", "get_current_workout_plan"}
+    assert POLICY[Intent.WORKOUT_HISTORY].data_tools == {
+        "get_workout_session",
+        "get_latest_workout_session",
+    }
     assert POLICY[Intent.EXERCISE].data_tools == {"get_exercise", "search_exercises"}
     assert POLICY[Intent.ADAPTATION].data_tools == {
         "get_user_profile",
         "get_workout_plan",
         "get_workout_session",
+        "get_current_workout_plan",
+        "get_latest_workout_session",
     }
     # a decision answered from data needs a tool to get it from
     for policy in POLICY.values():
@@ -278,21 +286,45 @@ def test_known_ids_come_from_the_message_and_returned_data_only():
     ("arguments", "ungrounded"),
     [
         ({"plan_id": 12}, []),
-        ({"plan_id": 12.0}, []),
-        ({"plan_id": "12"}, []),
         ({"plan_id": 13}, ["plan_id=13"]),
         ({"equipment_id": 3, "movement_pattern": "HORIZONTAL_PUSH"}, ["equipment_id=3"]),
         ({"movement_pattern": "HORIZONTAL_PUSH"}, []),
-        # the tools reject a user_id outright, and a non-number fails their validation
+        # an id left out is not one
+        ({"equipment_id": None, "difficulty": "BEGINNER"}, []),
+        # the tools reject a user_id outright
         ({"user_id": 42}, []),
-        ({"plan_id": "latest"}, []),
-        ({"plan_id": True}, []),
+        # only the canonical form of a known id is grounded: no other form of 12
+        ({"plan_id": 12.0}, ["plan_id=12.0"]),
+        ({"plan_id": "12"}, ["plan_id='12'"]),
+        ({"plan_id": "latest"}, ["plan_id='latest'"]),
+        ({"plan_id": True}, ["plan_id=True"]),
     ],
 )
 def test_ungrounded_ids(arguments, ungrounded):
     call = ToolCall(name="any", arguments=arguments)
 
     assert ungrounded_ids(call, {12}) == ungrounded
+
+
+@pytest.mark.parametrize("value", [7, 42, 1_000_127])
+def test_a_canonical_id_is_a_positive_json_integer(value):
+    assert is_canonical_id(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, 0, -7, 7.0, "7", "+7", "-7", "7.0", "01", "07", "1_0", " 7 ", "7 ", " 7", "7e0",
+     "1e1", None, [7], {"id": 7}],
+)
+def test_no_other_form_is_a_canonical_id(value):
+    assert not is_canonical_id(value)
+
+
+def test_a_tool_result_grounds_only_canonical_ids():
+    results = [result("search_exercises", {"output": {"exercise_id": 7, "equipment_id": True, "plan_id": "9"}})]
+
+    # true would otherwise ground 1
+    assert known_ids("Find an exercise.", results) == {7}
 
 
 # respond and the decision record

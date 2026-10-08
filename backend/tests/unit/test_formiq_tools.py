@@ -30,7 +30,9 @@ from app.tools.limits import (
     MAX_TEXT_LENGTH,
 )
 from app.tools.schemas import (
+    GetCurrentWorkoutPlanInput,
     GetExerciseInput,
+    GetLatestWorkoutSessionInput,
     GetUserProfileInput,
     GetWorkoutPlanInput,
     GetWorkoutSessionInput,
@@ -44,6 +46,8 @@ INPUTS = {
     "get_user_profile": GetUserProfileInput,
     "get_workout_plan": GetWorkoutPlanInput,
     "get_workout_session": GetWorkoutSessionInput,
+    "get_current_workout_plan": GetCurrentWorkoutPlanInput,
+    "get_latest_workout_session": GetLatestWorkoutSessionInput,
     "get_exercise": GetExerciseInput,
     "search_exercises": SearchExercisesInput,
 }
@@ -92,7 +96,7 @@ def exercise(exercise_id, name="Push-Up", **fields):
 # declarations
 
 
-def test_there_are_five_read_only_tools():
+def test_there_are_seven_read_only_tools():
     assert [tool.name for tool in TOOL_DECLARATIONS] == list(INPUTS)
 
 
@@ -141,6 +145,12 @@ def test_search_needs_a_filter(arguments):
         (SearchExercisesInput, {"difficulty": "EXPERT"}),
         (SearchExercisesInput, {"movement_pattern": "PUSH"}),
         (GetExerciseInput, {"exercise_id": 3, "name": "Push-Up"}),
+        # a resource id is a JSON integer only: never coerced from another form
+        (GetWorkoutPlanInput, {"user_id": 1, "plan_id": True}),
+        (GetWorkoutSessionInput, {"user_id": 1, "session_id": "+7"}),
+        (GetExerciseInput, {"exercise_id": "7.0"}),
+        (SearchExercisesInput, {"equipment_id": "1_0"}),
+        (GetWorkoutPlanInput, {"user_id": 1, "plan_id": 7.0}),
     ],
     ids=[
         "user_id 0",
@@ -151,6 +161,11 @@ def test_search_needs_a_filter(arguments):
         "unknown difficulty",
         "unknown movement pattern",
         "undeclared argument",
+        "plan_id true",
+        "session_id +7",
+        "exercise_id 7.0 string",
+        "equipment_id 1_0",
+        "plan_id 7.0 float",
     ],
 )
 def test_invalid_inputs_are_rejected(model, arguments):
@@ -408,6 +423,8 @@ def test_tools_call_only_read_methods_of_the_services():
         "get_profile_by_user_id",
         "get_plan",
         "get_session",
+        "get_current_plan",
+        "get_latest_completed_session",
         "get_exercise_by_id",
         "list_exercises",
     }
