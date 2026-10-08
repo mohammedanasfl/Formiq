@@ -20,6 +20,7 @@ from app.main import app
 from app.schemas import UserCreate, UserProfileCreate
 from app.services import CoachService, UserProfileService, UserService
 from app.tools import FormiqTools
+from tests.auth import bearer
 from tests.coach import call, fake_provider, respond_turn, tool_turn
 
 API_KEY = "test-secret-key"
@@ -72,7 +73,7 @@ def test_the_api_returns_only_the_safe_reply(client, user):
     provider = fake_provider(respond_turn("Bench 4x8.", "GENERAL_FITNESS", "ANSWER"))
     app.dependency_overrides[get_ai_provider] = lambda: provider
     try:
-        response = client.post("/coach/message", json={"user_id": user.id, "message": CHEST})
+        response = client.post("/coach/message", headers=bearer(user.id), json={"message": CHEST})
     finally:
         app.dependency_overrides.pop(get_ai_provider, None)
 
@@ -120,7 +121,9 @@ def test_a_provider_failure_returns_the_safe_reply_not_502(
             API_KEY, "gemini-3.8-flash", timeout_seconds=30
         )
         try:
-            response = client.post("/coach/message", json={"user_id": user.id, "message": message})
+            response = client.post(
+                "/coach/message", headers=bearer(user.id), json={"message": message}
+            )
         finally:
             app.dependency_overrides.pop(get_ai_provider, None)
 
@@ -141,7 +144,7 @@ def test_a_provider_failure_on_an_ordinary_request_is_still_a_502(client, user):
         )
         try:
             response = client.post(
-                "/coach/message", json={"user_id": user.id, "message": "How do I squat?"}
+                "/coach/message", headers=bearer(user.id), json={"message": "How do I squat?"}
             )
         finally:
             app.dependency_overrides.pop(get_ai_provider, None)

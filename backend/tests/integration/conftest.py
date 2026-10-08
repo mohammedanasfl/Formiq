@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import get_access_tokens
 from app.core.config import settings
 from app.db import database
 from app.db.database import get_db
@@ -20,9 +22,49 @@ from app.models import (
     WorkoutSession,
     WorkoutSessionExercise,
 )
+from app.schemas.workout_plan import MAX_INTEGER
+from tests.auth import TEST_ACCESS_TOKENS, bearer
 from tests.integration.database import check_test_database_url
 
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
+
+
+@pytest.fixture(autouse=True)
+def test_access_tokens():
+    """Access tokens are signed and verified with the test-only secret, whatever
+    AUTH_JWT_SECRET is set to."""
+    app.dependency_overrides[get_access_tokens] = lambda: TEST_ACCESS_TOKENS
+    try:
+        yield TEST_ACCESS_TOKENS
+    finally:
+        app.dependency_overrides.pop(get_access_tokens, None)
+
+
+_USER_PATH = re.compile(r"/users/(\d+)(?:/|$)")
+
+
+class PathUserClient(TestClient):
+    """A TestClient that signs each request under /users/{user_id} in as that
+    user, unless the request sets its own Authorization header, so the tests of
+    those routes test them as their owner. Other requests are sent as they are.
+    With sign_in_path_user set to False, no request is signed in."""
+
+    sign_in_path_user = True
+
+    def request(self, method, url, *, headers=None, **kwargs):
+        match = _USER_PATH.match(str(url))
+        # an id no user can have, such as 0, is sent as it is: not signed in
+        if (
+            self.sign_in_path_user
+            and match
+            and 1 <= int(match[1]) <= MAX_INTEGER
+            and "authorization"
+            not in {
+                name.lower() for name in headers or {}
+            }
+        ):
+            headers = {**(headers or {}), **bearer(int(match[1]))}
+        return super().request(method, url, headers=headers, **kwargs)
 
 
 @pytest.fixture(scope="session")
@@ -84,7 +126,8 @@ def service_session(test_engine):
 
 @pytest.fixture
 def client(test_engine, monkeypatch):
-    """TestClient whose requests use the test database.
+    """TestClient whose requests use the test database, signed in as the user in
+    a /users/{user_id} path (PathUserClient).
 
     get_db is overridden so each request gets a session on the test database,
     and the development SessionLocal raises if anything still reaches it. The
@@ -105,7 +148,7 @@ def client(test_engine, monkeypatch):
     app.dependency_overrides[get_db] = get_test_db
     delete_user_rows(test_engine)
     try:
-        yield TestClient(app)
+        yield PathUserClient(app)
     finally:
         app.dependency_overrides.pop(get_db, None)
         delete_user_rows(test_engine)

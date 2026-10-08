@@ -16,6 +16,7 @@ from app.main import app
 from app.schemas import UserProfileCreate
 from app.schemas.coach import MAX_HISTORY_TEXT_LENGTH, MAX_HISTORY_TURNS
 from app.services import UserProfileService
+from tests.auth import bearer
 from tests.coach import call, fake_provider, respond_turn, sent_contents, tool_turn
 
 URL = "/coach/message"
@@ -56,7 +57,7 @@ def row_counts(engine):
 def test_a_message_without_history_is_unchanged(client, user_id, use_provider):
     provider = use_provider(fake_provider(respond_turn("Hi!")))
 
-    response = client.post(URL, json={"user_id": user_id, "message": "Hi"})
+    response = client.post(URL, headers=bearer(user_id), json={"message": "Hi"})
 
     assert response.json() == {"reply": "Hi!"}
     (first,) = sent_contents(provider, 0)
@@ -68,7 +69,8 @@ def test_history_reaches_the_model_compacted(client, user_id, use_provider):
 
     response = client.post(
         URL,
-        json={"user_id": user_id, "message": "And Fridays?", "history": turns(MAX_HISTORY_TURNS)},
+        headers=bearer(user_id),
+        json={"message": "And Fridays?", "history": turns(MAX_HISTORY_TURNS)},
     )
 
     assert response.json() == {"reply": "Fridays too."}
@@ -103,7 +105,7 @@ def test_history_reaches_the_model_compacted(client, user_id, use_provider):
 def test_invalid_history_is_rejected(client, user_id, use_provider, history):
     provider = use_provider(fake_provider(respond_turn("Hi!")))
 
-    response = client.post(URL, json={"user_id": user_id, "message": "Hi", "history": history})
+    response = client.post(URL, headers=bearer(user_id), json={"message": "Hi", "history": history})
 
     assert response.status_code == 422
     provider.generate_turn.assert_not_called()
@@ -115,7 +117,7 @@ def test_a_user_id_inside_the_history_changes_nothing(client, user_id, use_provi
     provider = use_provider(fake_provider(respond_turn("Hi!")))
     history = [{"role": "user", "text": "Hello", "user_id": user_id + 1}]
 
-    response = client.post(URL, json={"user_id": user_id, "message": "Hi", "history": history})
+    response = client.post(URL, headers=bearer(user_id), json={"message": "Hi", "history": history})
 
     assert response.status_code == 200
     context = sent_contents(provider, 0)[0].parts[0].text
@@ -143,7 +145,9 @@ def test_the_conversation_does_not_replace_the_stored_profile(
     ]
 
     response = client.post(
-        URL, json={"user_id": user_id, "message": "What is my current goal?", "history": history}
+        URL,
+        headers=bearer(user_id),
+        json={"message": "What is my current goal?", "history": history},
     )
 
     assert response.json() == {"reply": "Formiq has muscle gain as your goal."}
@@ -155,7 +159,7 @@ def test_no_conversation_is_stored(client, user_id, use_provider, test_engine):
     use_provider(fake_provider(respond_turn("Sure.")))
     before = row_counts(test_engine)
 
-    client.post(URL, json={"user_id": user_id, "message": "Hi", "history": turns(20)})
+    client.post(URL, headers=bearer(user_id), json={"message": "Hi", "history": turns(20)})
 
     assert row_counts(test_engine) == before
     assert not any(

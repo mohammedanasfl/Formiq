@@ -2,8 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path, Query, status
 
-from app.api.dependencies import DbSession
-from app.api.routes.users import UserId
+from app.api.dependencies import DbSession, PathUserIsCurrentUser, UserId
 from app.schemas import (
     WorkoutPlanCreate,
     WorkoutPlanExerciseCreate,
@@ -24,8 +23,13 @@ from app.services.exceptions import (
     WorkoutPlanNotFoundError,
 )
 
-# Each route is scoped to the user in the path: another user's plan is not found.
-router = APIRouter(prefix="/users/{user_id}/workout-plans", tags=["workout plans"])
+# Each route is scoped to the user in the path, who must be the signed-in user:
+# another user's plan is not found.
+router = APIRouter(
+    prefix="/users/{user_id}/workout-plans",
+    tags=["workout plans"],
+    dependencies=[PathUserIsCurrentUser],
+)
 
 # Like users.id, these are PostgreSQL integer columns: IDs outside their range
 # would fail in the database, so they are rejected with 422.

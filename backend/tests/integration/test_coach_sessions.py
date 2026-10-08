@@ -26,6 +26,7 @@ from app.db import database
 from app.evaluation import create_fixtures
 from app.main import app
 from app.services import UserProfileService
+from tests.auth import bearer
 from tests.reliability import (
     EchoModel,
     TrackedSessions,
@@ -100,7 +101,8 @@ def released(sessions, test_engine):
 # (tests.reliability.EchoModel); each case sets what else goes wrong.
 CASES = {
     "success": ("goal", 200, "success"),
-    "user_not_found": ("goal", 404, "user_not_found"),
+    # a token whose user does not exist: authentication turns it away, before the coach
+    "user_not_found": ("goal", 401, None),
     "profile_not_found": ("goal", 200, "cannot_answer"),
     "tool_failure": ("goal", 200, "cannot_answer"),
     "provider_failure": ("goal", 502, "provider_error"),
@@ -138,12 +140,15 @@ def test_every_request_closes_its_session_and_holds_nothing(
             "app.services.coach_service.CoachContext", partial(CoachContext, max_context_chars=100)
         )
 
-    response = client.post("/coach/message", json={"user_id": user_id, "message": f"s {ask}"})
+    response = client.post("/coach/message", headers=bearer(user_id), json={"message": f"s {ask}"})
 
     assert response.status_code == http_status
     assert "CANARY" not in response.text
-    (root,) = backend.roots()
-    assert root.metadata["status"] == status
+    if status is None:
+        assert backend.roots() == []
+    else:
+        (root,) = backend.roots()
+        assert root.metadata["status"] == status
     released(sessions, test_engine)
     # the model never answered while a connection or a transaction was held
     assert model.held == [(0, 0)] * len(model.requests("s"))
@@ -166,7 +171,9 @@ def test_a_request_with_several_tool_rounds_holds_nothing_while_the_model_answer
     provider = transport_provider(model)
     app.dependency_overrides[get_ai_provider] = lambda: provider
 
-    response = client.post("/coach/message", json={"user_id": fixtures.user_id, "message": "s goal"})
+    response = client.post(
+        "/coach/message", headers=bearer(fixtures.user_id), json={"message": "s goal"}
+    )
 
     assert response.status_code == 200
     assert len(model.requests("s")) == 4
@@ -190,7 +197,7 @@ def test_simultaneous_api_requests_each_close_their_session(api, fixtures, sessi
     def send(number):
         return client.post(
             "/coach/message",
-            json={"user_id": users[number % 2], "message": f"r{number} goal"},
+            headers=bearer(users[number % 2]), json={"message": f"r{number} goal"},
         )
 
     threads = []

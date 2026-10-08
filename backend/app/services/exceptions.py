@@ -17,6 +17,19 @@ class UserNotFoundError(ServiceError):
     """The user does not exist."""
 
 
+class AuthenticationError(ServiceError):
+    """The request's credentials do not identify a user. Its message never says
+    which part was wrong."""
+
+
+class InvalidCredentialsError(AuthenticationError):
+    """The email and password do not match a user's login."""
+
+
+class InvalidPasswordError(ServiceError):
+    """The new password is too short or too long."""
+
+
 class UserProfileAlreadyExistsError(ServiceError):
     """The user already has a profile."""
 

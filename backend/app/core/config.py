@@ -1,7 +1,11 @@
-from typing import Annotated
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# A signing secret is at least as long as its algorithm's hash (RFC 7518,
+# section 3.2): `openssl rand -hex 32` prints 64 characters, enough for all three.
+MIN_JWT_SECRET_LENGTH = {"HS256": 32, "HS384": 48, "HS512": 64}
 
 
 class Settings(BaseSettings):
@@ -28,6 +32,29 @@ class Settings(BaseSettings):
     langfuse_base_url: str = "https://cloud.langfuse.com"
     # seconds the background export may wait on Langfuse; requests never do
     langfuse_timeout: Annotated[int, Field(gt=0)] = 5
+    # Access tokens (app.core.security). Without a secret, logging in and every
+    # route that needs the signed-in user answer 503: nothing falls back to
+    # anonymous access. Only HMAC algorithms are accepted, so a token can never
+    # name its own verification ("none", or a public key).
+    auth_jwt_secret: SecretStr | None = None
+    auth_jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
+    auth_access_token_expire_minutes: Annotated[int, Field(gt=0, le=1440)] = 30
+
+    @field_validator("auth_jwt_secret")
+    @classmethod
+    def empty_jwt_secret_is_none(cls, secret: SecretStr | None) -> SecretStr | None:
+        return secret if secret and secret.get_secret_value() else None
+
+    @model_validator(mode="after")
+    def check_jwt_secret_length(self) -> Self:
+        # a short secret is guessable
+        minimum = MIN_JWT_SECRET_LENGTH[self.auth_jwt_algorithm]
+        if self.auth_jwt_secret and len(self.auth_jwt_secret.get_secret_value()) < minimum:
+            raise ValueError(
+                f"AUTH_JWT_SECRET must be at least {minimum} characters"
+                f" for {self.auth_jwt_algorithm}"
+            )
+        return self
 
 
 settings = Settings()

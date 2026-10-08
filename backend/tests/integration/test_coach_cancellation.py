@@ -27,6 +27,7 @@ from app.observability import Tracer
 from app.observability.memory import MemoryBackend
 from app.repositories import UserRepository
 from app.services import CoachService, UserProfileService
+from tests.auth import bearer
 from tests.reliability import (
     WAIT_SECONDS,
     ConcurrentBackend,
@@ -229,7 +230,7 @@ def test_a_cancelled_error_raised_in_a_node_is_never_a_success(client, fixtures)
     app.dependency_overrides[get_tracer] = lambda: Tracer(backend)
     try:
         response = TestClient(app, raise_server_exceptions=False).post(
-            "/coach/message", json={"user_id": fixtures.user_id, "message": "i goal"}
+            "/coach/message", headers=bearer(fixtures.user_id), json={"message": "i goal"}
         )
     finally:
         app.dependency_overrides.pop(get_ai_provider, None)
@@ -271,7 +272,9 @@ def test_a_cancelled_api_request_runs_to_its_own_end_and_then_holds_nothing(
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://formiq.test") as api:
             task = asyncio.create_task(
-                api.post("/coach/message", json={"user_id": fixtures.user_id, "message": "c goal"})
+                api.post(
+                    "/coach/message", headers=bearer(fixtures.user_id), json={"message": "c goal"}
+                )
             )
             assert await asyncio.to_thread(entered.wait, WAIT_SECONDS)
             task.cancel()

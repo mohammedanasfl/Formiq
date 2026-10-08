@@ -31,6 +31,7 @@ from app.services import (
     UserService,
     WorkoutPlanService,
 )
+from tests.auth import bearer
 from tests.coach import call, fake_provider, respond_turn, tool_turn
 from tests.observability import FailingBackend, recording
 
@@ -373,14 +374,14 @@ def use(client):
 
 @pytest.mark.parametrize("error", [RuntimeError, TimeoutError, ConnectionError])
 def test_a_failing_tracer_never_changes_the_api_response(client, user, use, error):
-    message = {"user_id": user.id, "message": "What is my goal?"}
+    message = {"message": "What is my goal?"}
     use(get_ai_provider, fake_provider(*profile_turns()))
     use(get_tracer, TRACING_OFF)
-    expected = client.post("/coach/message", json=message)
+    expected = client.post("/coach/message", headers=bearer(user.id), json=message)
 
     use(get_ai_provider, fake_provider(*profile_turns()))
     use(get_tracer, Tracer(FailingBackend(error)))
-    response = client.post("/coach/message", json=message)
+    response = client.post("/coach/message", headers=bearer(user.id), json=message)
 
     assert (response.status_code, response.json()) == (expected.status_code, expected.json())
     assert response.json() == {"reply": "Your goal is muscle gain."}
@@ -392,7 +393,7 @@ def test_a_failing_tracer_never_changes_an_error_response(client, user, use):
     provider.generate_turn.side_effect = AIProviderError("failed")
     use(get_ai_provider, provider)
 
-    response = client.post("/coach/message", json={"user_id": user.id, "message": "Hi"})
+    response = client.post("/coach/message", headers=bearer(user.id), json={"message": "Hi"})
 
     assert response.status_code == 502
 

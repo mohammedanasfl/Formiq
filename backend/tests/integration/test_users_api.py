@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models import User, UserProfile
 from app.schemas import UserProfileResponse, UserResponse
+from tests.auth import bearer
 
 EMAIL = "api-user@example.com"
 PHONE = "+910000000020"
@@ -122,15 +123,19 @@ def test_get_user_returns_200_and_the_user(client, user_id):
     assert response.json()["email"] == EMAIL
 
 
-def test_get_missing_user_returns_404(client):
-    response = client.get("/users/999999")
+def test_get_another_or_a_missing_user_returns_404(client, user_id):
+    other_user_id = client.post("/users", json={"phone": PHONE}).json()["id"]
 
-    assert response.status_code == 404
-    assert response.json() == {"detail": "user 999999 does not exist"}
+    # the same answer whether or not the other user exists
+    for other in (other_user_id, 999999):
+        response = client.get(f"/users/{other}", headers=bearer(user_id))
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": "not found"}
 
 
-def test_get_user_with_invalid_id_returns_422(client):
-    assert client.get("/users/abc").status_code == 422
+def test_get_user_with_invalid_id_returns_422(client, user_id):
+    assert client.get("/users/abc", headers=bearer(user_id)).status_code == 422
 
 
 @pytest.mark.parametrize("user_id", ["0", "-1", "2147483648"])
@@ -147,14 +152,15 @@ def test_user_id_outside_the_integer_column_range_returns_422(
     client, profile_body, method, path, body, user_id
 ):
     json = profile_body if body == "profile" else body
+    signed_in = client.post("/users", json={"phone": PHONE}).json()["id"]
 
-    response = client.request(method, path.format(user_id), json=json)
+    response = client.request(method, path.format(user_id), json=json, headers=bearer(signed_in))
 
     assert response.status_code == 422
 
 
-def test_largest_integer_user_id_returns_404(client):
-    assert client.get("/users/2147483647").status_code == 404
+def test_largest_integer_user_id_returns_404(client, user_id):
+    assert client.get("/users/2147483647", headers=bearer(user_id)).status_code == 404
 
 
 # POST /users/{user_id}/profile
@@ -173,11 +179,11 @@ def test_create_profile_returns_201_and_the_profile(client, user_id, profile_bod
         assert session.get(UserProfile, profile["id"]).user_id == user_id
 
 
-def test_create_profile_for_missing_user_returns_404(client, profile_body):
-    response = client.post("/users/999999/profile", json=profile_body)
+def test_create_profile_for_another_or_a_missing_user_returns_404(client, user_id, profile_body):
+    response = client.post("/users/999999/profile", json=profile_body, headers=bearer(user_id))
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "user 999999 does not exist"}
+    assert response.json() == {"detail": "not found"}
 
 
 def test_create_second_profile_returns_409(client, user_id, profile, profile_body):
@@ -236,8 +242,8 @@ def test_get_profile_of_user_without_profile_returns_404(client, user_id):
     assert response.json() == {"detail": f"no profile found for user {user_id}"}
 
 
-def test_get_profile_of_missing_user_returns_404(client):
-    assert client.get("/users/999999/profile").status_code == 404
+def test_get_profile_of_missing_user_returns_404(client, user_id):
+    assert client.get("/users/999999/profile", headers=bearer(user_id)).status_code == 404
 
 
 # PATCH /users/{user_id}/profile
@@ -306,8 +312,12 @@ def test_patch_profile_of_user_without_profile_returns_404(client, user_id):
     assert response.json() == {"detail": f"user {user_id} has no profile"}
 
 
-def test_patch_profile_of_missing_user_returns_404(client):
-    assert client.patch("/users/999999/profile", json={"weight_kg": 70.0}).status_code == 404
+def test_patch_profile_of_missing_user_returns_404(client, user_id):
+    response = client.patch(
+        "/users/999999/profile", json={"weight_kg": 70.0}, headers=bearer(user_id)
+    )
+
+    assert response.status_code == 404
 
 
 @pytest.mark.parametrize("body", [{"age": 0}, {"age": "abc"}, {"sleep_hours": -1}])

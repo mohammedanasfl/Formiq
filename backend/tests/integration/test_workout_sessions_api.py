@@ -9,7 +9,12 @@ from datetime import datetime
 
 import pytest
 
-from app.schemas import WorkoutSessionExerciseResponse, WorkoutSessionResponse, WorkoutSetResponse
+from app.schemas import (
+    WorkoutSessionExerciseResponse,
+    WorkoutSessionResponse,
+    WorkoutSetResponse,
+)
+from tests.auth import bearer
 from tests.integration.workout_plans import retire_exercise
 
 DATE = "2026-10-10"
@@ -230,11 +235,11 @@ def test_create_session_after_finishing_the_one_in_progress_returns_201(
     ]
 
 
-def test_create_session_for_missing_user_returns_404(client):
-    response = client.post(sessions_url(2_147_483_647), json={})
+def test_create_session_for_another_or_a_missing_user_returns_404(client, user_id):
+    response = client.post(sessions_url(2_147_483_647), json={}, headers=bearer(user_id))
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "user 2147483647 does not exist"}
+    assert response.json() == {"detail": "not found"}
 
 
 @pytest.mark.parametrize(
@@ -277,8 +282,8 @@ def test_list_sessions_with_invalid_filter_returns_422(client, user_id):
     assert client.get(sessions_url(user_id), params={"status": "PLANNED"}).status_code == 422
 
 
-def test_list_sessions_of_missing_user_returns_404(client):
-    assert client.get(sessions_url(2_147_483_647)).status_code == 404
+def test_list_sessions_of_another_or_a_missing_user_returns_404(client, user_id):
+    assert client.get(sessions_url(2_147_483_647), headers=bearer(user_id)).status_code == 404
 
 
 # GET /users/{user_id}/workout-sessions/{session_id}
@@ -1019,6 +1024,7 @@ def test_malformed_ids_return_422(client, user_id, make_session, method, url, bo
             bad=bad_id, user=user_id, session=created["id"], exercise=created["exercises"][0]["id"]
         ),
         json=body,
+        headers=bearer(user_id),
     )
 
     assert response.status_code == 422

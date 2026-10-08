@@ -14,6 +14,7 @@ from google.genai import errors, types
 from app.ai import GeminiProvider, user_content
 from app.api.dependencies import get_ai_provider
 from app.main import app
+from tests.auth import bearer
 from tests.coach import fake_provider, respond_turn
 
 API_KEY = "test-secret-key"
@@ -66,7 +67,9 @@ def provider(use_provider):
 
 
 def test_message_returns_200_and_the_reply(client, user_id, provider):
-    response = client.post(URL, json={"user_id": user_id, "message": "  How should I start?  "})
+    response = client.post(
+        URL, headers=bearer(user_id), json={"message": "  How should I start?  "}
+    )
 
     assert response.status_code == 200
     assert response.json() == {"reply": "Start with three sets of eight."}
@@ -74,48 +77,45 @@ def test_message_returns_200_and_the_reply(client, user_id, provider):
     assert provider.generate_turn.call_args.args == ([user_content("How should I start?")],)
 
 
-def test_message_of_an_unknown_user_returns_404(client, provider):
-    response = client.post(URL, json={"user_id": 2_147_483_647, "message": "Hi"})
+def test_a_token_of_a_user_that_does_not_exist_returns_401(client, provider):
+    response = client.post(URL, headers=bearer(2_147_483_647), json={"message": "Hi"})
 
-    assert response.status_code == 404
-    assert response.json() == {"detail": "user 2147483647 does not exist"}
+    assert response.status_code == 401
+    assert response.json() == {"detail": "not authenticated"}
     provider.generate_turn.assert_not_called()
 
 
 @pytest.mark.parametrize(
     "body",
     [
-        {"message": "Hi"},
-        {"user_id": 1},
-        {"user_id": 1, "message": ""},
-        {"user_id": 1, "message": "   "},
-        {"user_id": 1, "message": "x" * 4001},
-        {"user_id": 1, "message": 42},
-        {"user_id": 0, "message": "Hi"},
-        {"user_id": 2_147_483_648, "message": "Hi"},
-        {"user_id": "me", "message": "Hi"},
+        {},
+        {"message": ""},
+        {"message": "   "},
+        {"message": "x" * 4001},
+        {"message": 42},
+        # the user is the access token's: a body naming one is rejected
+        {"user_id": 1, "message": "Hi"},
+        {"user_id": None, "message": "Hi"},
     ],
     ids=[
-        "no user_id",
         "no message",
         "empty message",
         "blank message",
         "message too long",
         "message not text",
-        "user_id 0",
-        "user_id beyond the column",
-        "user_id not a number",
+        "user_id in the body",
+        "null user_id in the body",
     ],
 )
-def test_invalid_body_returns_422(client, provider, body):
-    response = client.post(URL, json=body)
+def test_invalid_body_returns_422(client, user_id, provider, body):
+    response = client.post(URL, headers=bearer(user_id), json=body)
 
     assert response.status_code == 422
     provider.generate_turn.assert_not_called()
 
 
 def test_longest_message_is_accepted(client, user_id, provider):
-    response = client.post(URL, json={"user_id": user_id, "message": "x" * 4000})
+    response = client.post(URL, headers=bearer(user_id), json={"message": "x" * 4000})
 
     assert response.status_code == 200
 
@@ -123,7 +123,7 @@ def test_longest_message_is_accepted(client, user_id, provider):
 def test_missing_api_key_returns_503(client, user_id, use_provider):
     use_provider(GeminiProvider(None, "gemini-3.8-flash", timeout_seconds=30))
 
-    response = client.post(URL, json={"user_id": user_id, "message": "Hi"})
+    response = client.post(URL, headers=bearer(user_id), json={"message": "Hi"})
 
     assert response.status_code == 503
     assert response.json() == {"detail": "the AI coach is not configured"}
@@ -148,7 +148,7 @@ def test_provider_failure_returns_502_without_its_details(client, user_id, use_p
         client_class.return_value.models.generate_content.side_effect = failure
         use_provider(GeminiProvider(API_KEY, "gemini-3.8-flash", timeout_seconds=30))
 
-        response = client.post(URL, json={"user_id": user_id, "message": "Hi"})
+        response = client.post(URL, headers=bearer(user_id), json={"message": "Hi"})
 
     assert response.status_code == 502
     assert response.json() == {"detail": "the AI coach could not answer; try again later"}
@@ -163,7 +163,7 @@ def test_reply_without_text_returns_502(client, user_id, use_provider):
         )
         use_provider(GeminiProvider(API_KEY, "gemini-3.8-flash", timeout_seconds=30))
 
-        response = client.post(URL, json={"user_id": user_id, "message": "Hi"})
+        response = client.post(URL, headers=bearer(user_id), json={"message": "Hi"})
 
     assert response.status_code == 502
 
@@ -186,7 +186,7 @@ def test_the_coach_answers_after_a_tool_call(client, user_id, use_provider):
         generate_content.side_effect = [calls_profile, answers]
         use_provider(GeminiProvider(API_KEY, "gemini-3.8-flash", timeout_seconds=30))
 
-        response = client.post(URL, json={"user_id": user_id, "message": "What is my goal?"})
+        response = client.post(URL, headers=bearer(user_id), json={"message": "What is my goal?"})
 
     assert response.status_code == 200
     assert response.json() == {"reply": "Set up a profile."}
@@ -222,7 +222,7 @@ def test_a_turn_requesting_too_many_tool_calls_is_a_controlled_502(
         generate_content.side_effect = [calls, answers]
         use_provider(GeminiProvider(API_KEY, "gemini-3.8-flash", timeout_seconds=30))
 
-        response = client.post(URL, json={"user_id": user_id, "message": "Exercise 1, often?"})
+        response = client.post(URL, headers=bearer(user_id), json={"message": "Exercise 1, often?"})
 
     assert response.status_code == status
     if status == 502:

@@ -1,8 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, StringConstraints
-
-from app.schemas.workout_plan import PositiveInteger
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 # Surrounding whitespace is dropped, and a blank message is rejected. The limit
 # keeps one message, and the model request it becomes, a reasonable size.
@@ -34,7 +32,12 @@ class CoachHistoryTurn(BaseModel):
 
 
 class CoachMessageRequest(BaseModel):
-    user_id: PositiveInteger
+    """A message to the coach from the signed-in user. The user is the access
+    token's, never the body's: a body that names a user_id, or any other field
+    not here, is rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
     message: CoachMessageText
     # earlier turns, oldest first; the coach keeps the most recent ones
     history: list[CoachHistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)

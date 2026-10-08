@@ -54,7 +54,8 @@ It keeps no memory between requests, runs no background work, and never changes 
 | PostgreSQL | Application data: users, profiles, plans, sessions, the catalog | |
 | Application policy: code and instructions (`app/agent/graph.py`, `app/agent/policy.py`) | The coach's rules, its decisions and its limits | |
 | Deterministic safety (`app/agent/safety.py`) | The safety boundary: whether a request is flagged, and with which category | Medical judgement. See section 7. |
-| `CoachContext.user_id` (`app/agent/graph.py`) | The identity whose data the tools read | |
+| Authentication (`app/api/dependencies.py`, `app/services/auth_service.py`) | Who a request acts for: the user its verified access token was issued for | |
+| `CoachContext.user_id` (`app/agent/graph.py`) | The identity whose data the tools read, set from the authenticated user | |
 | Application tool contracts (`app/tools/`) | Tool behavior: inputs, ownership, bounds, errors | |
 | Approval system (`app/approvals/`) | Write authorization, for any future write | |
 | The LLM (Gemini, through `app/ai/gemini.py`) | **Nothing.** It is a reasoning and proposal component only. | Memory, identity, safety, policy, evidence, authorization |
@@ -123,9 +124,20 @@ Enforced by:
 
 ## 4. Identity contract
 
+- **Authentication is the only source of the request's identity.** `POST /coach/message`
+  requires a Bearer access token (a JWT signed with `AUTH_JWT_SECRET`, `app/core/security.py`),
+  issued by `POST /auth/login` for an email and password. `get_current_user`
+  (`app/api/dependencies.py`) verifies it and loads its user before the coach runs: a missing,
+  malformed, wrongly signed or expired token, or one whose user does not exist, ends the request
+  with 401, and nothing is read for anyone. Without a signing secret the route answers 503; there
+  is no anonymous fallback.
+- **A client-provided `user_id` is never authoritative.** The request body has no `user_id`
+  field, and a body that names one (or any other unknown field) is rejected with 422 before the
+  coach runs. The message, the history, tool results and model output are text: none of them can
+  change the user.
 - The coach acts for exactly one user per request: `CoachContext.user_id`. `CoachService` sets it
-  from the API request, and it lives outside the graph state, so no node and no model output can
-  change it.
+  to the authenticated user's id, and it lives outside the graph state, so no node and no model
+  output can change it.
 - No tool declares a `user_id`. `FormiqTools` adds the trusted user to every user-scoped input. A
   `user_id` argument from the model is rejected with `INVALID_INPUT` before anything is read.
 - History does not establish identity: it is only text. Tool results do not either: the tools are
@@ -137,12 +149,11 @@ Enforced by:
 - Ids must be grounded. A resource id argument must have been written by the user in this message
   or returned by a tool in this turn (`known_ids`, `ungrounded_ids` in `app/agent/policy.py`).
   Otherwise the call is refused with `ID_NOT_GROUNDED` before it runs.
-
-> **Production prerequisite: authentication.** Today the API takes `user_id` from the request
-> body (`app/schemas/coach.py`), and the API has no authentication (see `backend/README.md`). The
-> agent's identity contract holds *downstream* of the API: the model, the history and the tools
-> cannot change the user. But nothing yet proves that the caller *is* that user. An authenticated
-> identity must replace the body's `user_id` before the coach is exposed beyond local development.
+- The API routes under `/users/{user_id}` serve only the authenticated user: any other `user_id`
+  is answered 404, exactly like a user that does not exist.
+- Credentials stay outside the coach. The password hash is in its own table (`user_credentials`),
+  which no tool and no agent module reads. The profile tool gives the user's
+  name and fitness profile, never their email or phone, although login uses the email.
 
 Enforced by:
 
@@ -154,6 +165,15 @@ Enforced by:
 - `tests/integration/test_coach_injection.py::test_history_cannot_ground_an_id_or_set_the_user`
 - `tests/integration/test_coach_concurrency.py::test_simultaneous_requests_of_different_users_each_get_only_their_own_answer`
 - `tests/unit/test_coach_decisions.py::test_a_guessed_equipment_id_is_rejected_before_any_tool_runs`
+- `tests/integration/test_auth_api.py::test_a_request_without_a_valid_token_is_401_and_reads_nothing`
+- `tests/integration/test_auth_api.py::test_without_a_signing_secret_authentication_is_unavailable_not_skipped`
+- `tests/integration/test_auth_api.py::test_a_body_naming_a_user_is_rejected`
+- `tests/integration/test_auth_api.py::test_the_message_cannot_change_who_the_coach_acts_for`
+- `tests/integration/test_auth_api.py::test_the_history_cannot_change_who_the_coach_acts_for`
+- `tests/integration/test_auth_api.py::test_each_token_gets_its_own_users_data`
+- `tests/integration/test_auth_api.py::test_another_users_resources_are_not_found_and_unchanged`
+- `tests/integration/test_auth_api.py::test_the_login_email_never_reaches_the_coach`
+- `tests/unit/test_auth_security.py::test_the_coach_never_imports_credentials_or_token_code`
 - Evaluation invariant `trusted_identity`, run on every case.
 
 ---
@@ -606,7 +626,10 @@ trace records only its category (`Failure`).
 | Tool validation failure (`INVALID_INPUT`, `UNKNOWN_TOOL`, `ID_NOT_GROUNDED`, `WRITE_NOT_AUTHORIZED`) | 200 | The turn's outcome | The model gets the error as data and must decide again, usually ending in `CANNOT_ANSWER` or a question. |
 | Tool failure (`TOOL_ERROR`, for example a database error) | 200 | Usually `cannot_answer` | The read transaction is ended, and the turn's other calls still work. |
 | Profile or resource not found, or another user's resource | 200 | Usually `cannot_answer` | It is never answered as if the data existed. |
-| User not found (the request's `user_id`) | 404 | `user_not_found` | The model is never called. |
+| No access token, or one that is malformed, wrongly signed, expired, or for a user that does not exist | 401 | Not traced | The coach never runs: nothing is read and the model is never called. |
+| Authentication not configured (no `AUTH_JWT_SECRET`) | 503 | Not traced | The same. |
+| A body with a `user_id` or another unknown field | 422 | Not traced | The same. |
+| User not found after authentication (deleted in between) | 404 | `user_not_found` | The model is never called. |
 | Context exhaustion (budget or compaction limit) | 200 | `cannot_answer` | `CANNOT_ANSWER_REPLY`, or the fixed safe reply when flagged |
 | Iteration limit with no acceptable decision | 200 | `cannot_answer` | `CANNOT_ANSWER_REPLY` |
 | Graph step limit (`GraphRecursionError`, a backstop the production limits never reach) | 500 | `graph_limit_exceeded` | A generic server error |
@@ -850,11 +873,15 @@ records its own observation as it runs, and the trace's final status is written 
 ### Ordinary request
 
 ```
-REQUEST                POST /coach/message; the body is validated (CoachMessageRequest)
+REQUEST                POST /coach/message
+  ↓
+AUTHENTICATION         get_current_user: Bearer token verified, its user loaded (401 if not);
+                       the body is then validated (CoachMessageRequest: no user_id)
   ↓
 REQUEST ID             CoachService: uuid4 request id; the trace is opened (metadata only)
   ↓
-TRUSTED USER CONTEXT   the user is looked up (404 if missing); the read is ended;
+TRUSTED USER CONTEXT   the authenticated user's id; it is looked up again (404 if gone since);
+                       the read is ended;
                        CoachContext(user_id, provider, tools, trace), outside the state
   ↓
 SAFETY CHECK           assess_safety(current message): before the model and any tool
@@ -946,6 +973,8 @@ document, and new tests. It is never a test to relax.
 16. Production code never depends on the evaluation (section 13).
 17. Requests share no mutable state, and no database connection is held during a model call
     (section 14).
+18. The coach's user is the authenticated user. No request body, message, history, tool result or
+    model output chooses it, and nothing falls back to anonymous access (section 4).
 
 ---
 
@@ -955,7 +984,7 @@ Each item is a statement of what is **not** guaranteed today.
 
 | # | Limitation | Section |
 |---|---|---|
-| 1 | No authentication. `user_id` comes from the request body. **This must be fixed before production exposure.** | 4 |
+| 1 | Authentication is minimal. An access token cannot be revoked before it expires (`AUTH_ACCESS_TOKEN_EXPIRE_MINUTES`): there is no logout, refresh token or key rotation. Login has no rate limiting or lockout, and matches the email exactly as stored. Passwords are set with a command (`python -m app.cli set-password`), not through the API. | 4 |
 | 2 | The approval store is in memory and per process. There is no persistence, no distributed idempotency, and no approval endpoint or user interface. | 10 |
 | 3 | A running turn cannot be cancelled, because the endpoint is synchronous. | 14 |
 | 4 | The read transaction of an interrupted user lookup is released late. | 14 |

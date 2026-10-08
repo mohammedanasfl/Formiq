@@ -37,6 +37,7 @@ from app.schemas import (
 from app.schemas.coach import MAX_HISTORY_TEXT_LENGTH, MAX_HISTORY_TURNS
 from app.services import UserProfileService, UserService, WorkoutPlanService
 from app.tools.limits import MAX_EXERCISES, MAX_TEXT_LENGTH
+from tests.auth import bearer
 from tests.reliability import (
     EchoModel,
     TrackedSessions,
@@ -103,7 +104,9 @@ def test_request_after_request_nothing_builds_up(api, fixtures, sessions, test_e
 
     def round_of_requests():
         for kind, (reply, status) in kinds.items():
-            response = client.post(URL, json={"user_id": fixtures.user_id, "message": messages[kind]})
+            response = client.post(
+                URL, headers=bearer(fixtures.user_id), json={"message": messages[kind]}
+            )
             assert response.status_code == status
             if reply is not None:
                 assert response.json() == {"reply": f"{kind} {reply}"}
@@ -157,7 +160,8 @@ def test_the_largest_histories_stay_within_the_budget_and_apart(api, fixtures):
     def send(number):
         responses[number] = client.post(
             URL,
-            json={"user_id": fixtures.user_id, "message": f"h{number} goal", "history": history(number)},
+            headers=bearer(fixtures.user_id),
+            json={"message": f"h{number} goal", "history": history(number)},
         )
 
     threads = [threading.Thread(target=send, args=(n,)) for n in range(count)]
@@ -203,7 +207,7 @@ def test_a_large_plan_reaches_the_model_within_the_tools_limits(api, service_ses
     plan_id = plan.id
     service_session.rollback()
 
-    response = client.post(URL, json={"user_id": user.id, "message": f"big plan {plan_id}"})
+    response = client.post(URL, headers=bearer(user.id), json={"message": f"big plan {plan_id}"})
 
     assert response.status_code == 200
     (result,) = model.requests("big")[-1].results
@@ -229,8 +233,9 @@ def test_limits_start_from_zero_for_every_request(api, fixtures):
     app.dependency_overrides[get_ai_provider] = lambda: provider
 
     for _ in range(3):
-        assert client.post(URL, json={"user_id": fixtures.user_id, "message": "seek"}).status_code == 200
-        normal = client.post(URL, json={"user_id": fixtures.user_id, "message": "n goal"})
+        seek = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "seek"})
+        assert seek.status_code == 200
+        normal = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "n goal"})
         assert normal.json() == {"reply": f"n user={fixtures.user_id} age=30"}
 
     seeking, normal = backend.roots()[0::2], backend.roots()[1::2]

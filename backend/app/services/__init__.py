@@ -1,3 +1,4 @@
+from app.services.auth_service import AuthService
 from app.services.coach_service import CoachService
 from app.services.exercise_catalog_service import ExerciseCatalogService
 from app.services.user_profile_service import UserProfileService
@@ -9,6 +10,7 @@ from app.services.workout_session_service import WorkoutSessionService
 from app.services.workout_set_service import WorkoutSetService
 
 __all__ = [
+    "AuthService",
     "UserService",
     "UserProfileService",
     "ExerciseCatalogService",

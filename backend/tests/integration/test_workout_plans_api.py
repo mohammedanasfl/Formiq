@@ -8,6 +8,7 @@ tables before and after each test.
 import pytest
 
 from app.schemas import WorkoutPlanExerciseResponse, WorkoutPlanResponse
+from tests.auth import bearer
 from tests.integration.workout_plans import retire_exercise
 
 DATE = "2026-10-10"
@@ -136,11 +137,13 @@ def test_create_plan_with_exercises_returns_them_in_order(client, user_id, bench
     assert all(item["workout_plan_id"] == plan["id"] for item in plan["exercises"])
 
 
-def test_create_plan_for_missing_user_returns_404(client):
-    response = client.post(plans_url(2_147_483_647), json={"name": "Push Day"})
+def test_create_plan_for_another_or_a_missing_user_returns_404(client, user_id):
+    response = client.post(
+        plans_url(2_147_483_647), json={"name": "Push Day"}, headers=bearer(user_id)
+    )
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "user 2147483647 does not exist"}
+    assert response.json() == {"detail": "not found"}
 
 
 def test_create_plan_ignores_identity_fields_in_the_body(client, user_id, other_user_id):
@@ -255,11 +258,11 @@ def test_list_plans_applies_the_filters(client, user_id, make_plan, params, expe
     assert [plan["id"] for plan in response.json()] == [plans[key]["id"] for key in expected]
 
 
-def test_list_plans_of_missing_user_returns_404(client):
-    response = client.get(plans_url(2_147_483_647))
+def test_list_plans_of_another_or_a_missing_user_returns_404(client, user_id):
+    response = client.get(plans_url(2_147_483_647), headers=bearer(user_id))
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "user 2147483647 does not exist"}
+    assert response.json() == {"detail": "not found"}
 
 
 @pytest.mark.parametrize("params", [{"status": "COMPLETED"}, {"scheduled_date": "tomorrow"}])
@@ -671,7 +674,10 @@ def test_malformed_ids_return_422(client, user_id, make_plan, method, url, body,
     plan = make_plan()
 
     response = client.request(
-        method, url.format(bad=bad_id, user=user_id, plan=plan["id"]), json=body
+        method,
+        url.format(bad=bad_id, user=user_id, plan=plan["id"]),
+        json=body,
+        headers=bearer(user_id),
     )
 
     assert response.status_code == 422

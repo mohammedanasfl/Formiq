@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.agent import ConversationTurn
 from app.ai import AIProviderError, AIProviderNotConfiguredError
-from app.api.dependencies import AIProvider, CoachTracer, DbSession
+from app.api.dependencies import AIProvider, CoachTracer, CurrentUser, DbSession
 from app.schemas import CoachMessageRequest, CoachMessageResponse
 from app.services import CoachService
 from app.services.exceptions import UserNotFoundError
@@ -12,11 +12,17 @@ router = APIRouter(prefix="/coach", tags=["coach"])
 
 @router.post("/message", response_model=CoachMessageResponse)
 def send_coach_message(
-    message_data: CoachMessageRequest, db: DbSession, provider: AIProvider, tracer: CoachTracer
+    message_data: CoachMessageRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+    provider: AIProvider,
+    tracer: CoachTracer,
 ):
+    # The coach acts for the signed-in user only: its id is the one the access
+    # token was issued for, and the body has no field that could name another.
     try:
         reply = CoachService(db, provider, tracer).reply(
-            message_data.user_id,
+            current_user.id,
             message_data.message,
             [ConversationTurn(turn.role, turn.text) for turn in message_data.history],
         )

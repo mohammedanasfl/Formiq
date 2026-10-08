@@ -28,6 +28,7 @@ from app.models import User, UserProfile, WorkoutPlan, WorkoutSession, WorkoutSe
 from app.observability import TRACING_OFF, Tracer
 from app.repositories import UserRepository
 from app.services import CoachService, UserProfileService
+from tests.auth import bearer
 from tests.observability import FailingBackend
 from tests.reliability import (
     EchoModel,
@@ -112,7 +113,7 @@ def test_a_provider_failure_is_tried_once_and_changes_nothing(
     model.failures["f"] = FAILURES[failure][0]
     before = rows(test_engine)
 
-    response = client.post(URL, json={"user_id": fixtures.user_id, "message": "f goal"})
+    response = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "f goal"})
 
     assert response.status_code == FAILURES[failure][1]
     assert response.json() == {"detail": "the AI coach could not answer; try again later"}
@@ -122,7 +123,7 @@ def test_a_provider_failure_is_tried_once_and_changes_nothing(
     assert rows(test_engine) == before
     assert test_engine.pool.checkedout() == 0
     # the next request starts clean, on the same shared provider
-    after = client.post(URL, json={"user_id": fixtures.user_id, "message": "n goal"})
+    after = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "n goal"})
     assert after.json() == {"reply": f"n user={fixtures.user_id} age=30"}
     assert backend.roots()[-1].metadata["model_requests"] == 2
 
@@ -135,7 +136,9 @@ def test_an_unconfigured_provider_sends_nothing_and_answers_503(client, fixtures
     app.dependency_overrides[get_tracer] = lambda: tracer
     before = rows(test_engine)
     try:
-        response = client.post(URL, json={"user_id": fixtures.user_id, "message": "How often?"})
+        response = client.post(
+            URL, headers=bearer(fixtures.user_id), json={"message": "How often?"}
+        )
     finally:
         app.dependency_overrides.pop(get_ai_provider, None)
         app.dependency_overrides.pop(get_tracer, None)
@@ -153,7 +156,7 @@ def test_a_flagged_request_keeps_the_fixed_safe_reply_whatever_the_provider_does
     client, model, backend = api
     model.failures["f"] = FAILURES[failure][0]
 
-    response = client.post(URL, json={"user_id": fixtures.user_id, "message": f"f {FLAGGED}"})
+    response = client.post(URL, headers=bearer(fixtures.user_id), json={"message": f"f {FLAGGED}"})
 
     assert response.status_code == 200
     assert response.json() == {"reply": SAFETY_POLICY[SafetyCategory.PAIN_OR_INJURY].fallback_reply}
@@ -164,7 +167,7 @@ def test_a_flagged_request_keeps_the_fixed_safe_reply_whatever_the_provider_does
 def test_the_configured_timeout_bounds_every_model_request(api, fixtures):
     client, model, _ = api
 
-    client.post(URL, json={"user_id": fixtures.user_id, "message": "t goal"})
+    client.post(URL, headers=bearer(fixtures.user_id), json={"message": "t goal"})
 
     timeouts = [sent.timeout for sent in model.requests("t")]
     assert timeouts == [{"connect": 30.0, "read": 30.0, "write": 30.0, "pool": 30.0}] * 2
@@ -181,7 +184,7 @@ def test_a_repeated_provider_failure_never_builds_up(api, fixtures, test_engine,
     model.failures["f"] = failure
 
     responses = [
-        client.post(URL, json={"user_id": fixtures.user_id, "message": "f goal"})
+        client.post(URL, headers=bearer(fixtures.user_id), json={"message": "f goal"})
         for _ in range(10)
     ]
 
@@ -192,7 +195,7 @@ def test_a_repeated_provider_failure_never_builds_up(api, fixtures, test_engine,
     assert all(trace == traces[0] for trace in traces)
     assert traces[0]["model_requests"] == 1
     assert test_engine.pool.checkedout() == 0
-    after = client.post(URL, json={"user_id": fixtures.user_id, "message": "n goal"})
+    after = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "n goal"})
     assert after.status_code == 200
     assert backend.roots()[-1].metadata["model_requests"] == 2
     assert backend.roots()[-1].metadata["iterations"] == 1
@@ -207,7 +210,7 @@ def test_a_repeated_tool_failure_never_builds_up(api, fixtures, monkeypatch):
     monkeypatch.setattr(UserProfileService, "get_profile_by_user_id", broken)
 
     replies = [
-        client.post(URL, json={"user_id": fixtures.user_id, "message": "f goal"}).json()
+        client.post(URL, headers=bearer(fixtures.user_id), json={"message": "f goal"}).json()
         for _ in range(10)
     ]
 
@@ -266,8 +269,8 @@ def test_a_timeout_anywhere_in_a_turn_ends_it_without_a_retry(client, fixtures, 
     app.dependency_overrides[get_tracer] = lambda: tracer
     try:
         api = TestClient(app, raise_server_exceptions=False)
-        response = api.post(URL, json={"user_id": fixtures.user_id, "message": "t goal"})
-        after = api.post(URL, json={"user_id": fixtures.user_id, "message": "n goal"})
+        response = api.post(URL, headers=bearer(fixtures.user_id), json={"message": "t goal"})
+        after = api.post(URL, headers=bearer(fixtures.user_id), json={"message": "n goal"})
     finally:
         app.dependency_overrides.pop(get_ai_provider, None)
         app.dependency_overrides.pop(get_tracer, None)
@@ -325,9 +328,15 @@ def raising(*args, **kwargs):
     raise RuntimeError(f"{SECRET} password=hunter2 host=db.internal")
 
 
+class FailingUserLookup(UserRepository):
+    """The coach service's user lookup, failing; authentication's still works."""
+
+    get_by_id = raising
+
+
 EXCEPTIONS = {
     # where it is raised, and what the client gets
-    "service": ("app.repositories.UserRepository.get_by_id", 500, "unknown_error"),
+    "service": ("app.services.coach_service.UserRepository", 500, "unknown_error"),
     "graph_node": ("app.agent.graph.fit_request", 500, "unknown_error"),
     "safety_check": ("app.agent.graph.assess_safety", 500, "unknown_error"),
     "tool": ("app.services.UserProfileService.get_profile_by_user_id", 200, "cannot_answer"),
@@ -340,9 +349,9 @@ def test_an_unexpected_exception_ends_only_its_request_and_shows_nothing(
 ):
     client, model, backend = api
     target, http_status, status = EXCEPTIONS[where]
-    monkeypatch.setattr(target, raising)
+    monkeypatch.setattr(target, FailingUserLookup if where == "service" else raising)
 
-    response = client.post(URL, json={"user_id": fixtures.user_id, "message": "x goal"})
+    response = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "x goal"})
 
     assert response.status_code == http_status
     assert SECRET not in response.text
@@ -350,7 +359,7 @@ def test_an_unexpected_exception_ends_only_its_request_and_shows_nothing(
     assert status_of(backend) == status
     assert test_engine.pool.checkedout() == 0
     monkeypatch.undo()
-    after = client.post(URL, json={"user_id": fixtures.user_id, "message": "n goal"})
+    after = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "n goal"})
     assert after.status_code == 200
     assert status_of(backend) == "success"
 
@@ -359,7 +368,7 @@ def test_an_unexpected_exception_in_the_provider_is_a_provider_error(api, fixtur
     client, model, backend = api
     model.failures["x"] = RuntimeError(f"{SECRET} password=hunter2")
 
-    response = client.post(URL, json={"user_id": fixtures.user_id, "message": "x goal"})
+    response = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "x goal"})
 
     # the provider turns anything its SDK raises into a provider error
     assert response.status_code == 502
@@ -370,10 +379,10 @@ def test_an_unexpected_exception_in_the_provider_is_a_provider_error(api, fixtur
 @pytest.mark.parametrize("error", [RuntimeError, TimeoutError, ConnectionError, ValueError])
 def test_an_unexpected_exception_in_tracing_changes_nothing(api, fixtures, error):
     client, _, _ = api
-    expected = client.post(URL, json={"user_id": fixtures.user_id, "message": "x goal"})
+    expected = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "x goal"})
     app.dependency_overrides[get_tracer] = lambda: Tracer(FailingBackend(error))
 
-    response = client.post(URL, json={"user_id": fixtures.user_id, "message": "x goal"})
+    response = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "x goal"})
 
     assert (response.status_code, response.json()) == (expected.status_code, expected.json())
 
@@ -382,9 +391,23 @@ def test_the_user_lookup_failing_is_not_a_missing_user(api, fixtures, monkeypatc
     # a database failure is a server error, never a 404 that would tell the
     # client the user does not exist
     client, _, backend = api
-    monkeypatch.setattr(UserRepository, "get_by_id", raising)
+    monkeypatch.setattr("app.services.coach_service.UserRepository", FailingUserLookup)
 
-    response = client.post(URL, json={"user_id": fixtures.user_id, "message": "x goal"})
+    response = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "x goal"})
 
     assert response.status_code == 500
     assert status_of(backend) == "unknown_error"
+
+
+def test_the_authentication_lookup_failing_is_a_server_error(api, fixtures, monkeypatch):
+    # nor a 401 that would tell the client its token is bad: the request ends
+    # before the coach, so nothing reaches the model or the trace
+    client, model, backend = api
+    monkeypatch.setattr(UserRepository, "get_by_id", raising)
+
+    response = client.post(URL, headers=bearer(fixtures.user_id), json={"message": "x goal"})
+
+    assert response.status_code == 500
+    assert SECRET not in response.text
+    assert model.requests("x") == []
+    assert backend.roots() == []

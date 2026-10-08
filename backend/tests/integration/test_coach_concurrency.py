@@ -39,6 +39,7 @@ from app.services import (
     UserService,
     WorkoutPlanService,
 )
+from tests.auth import bearer
 from tests.coach import fake_provider, respond_turn
 from tests.reliability import (
     WAIT_SECONDS,
@@ -466,7 +467,7 @@ def test_simultaneous_api_requests_get_their_own_responses(client, people, bench
         async with httpx.AsyncClient(transport=transport, base_url="http://formiq.test") as api:
             return await asyncio.gather(
                 *[
-                    api.post("/coach/message", json={"user_id": user_id, "message": message})
+                    api.post("/coach/message", headers=bearer(user_id), json={"message": message})
                     for _, user_id, message in requests
                 ]
             )
