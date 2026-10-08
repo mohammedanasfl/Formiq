@@ -227,7 +227,9 @@ def test_an_unexpected_failure_is_logged_and_hidden_from_the_model(
     assert result == {"error": {"code": "TOOL_ERROR", "message": "the data could not be read"}}
     assert "Coach tool get_workout_plan failed" in caplog.text
     assert "password=secret" in caplog.text  # the cause is in the server log only
-    services.end_read.assert_called_once()
+    # ended after the failure, so the batch's next call starts a new read, and
+    # after the batch
+    assert services.end_read.call_count == 2
 
 
 def test_the_read_is_ended_after_every_batch(tools, services):

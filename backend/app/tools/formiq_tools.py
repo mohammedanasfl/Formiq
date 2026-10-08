@@ -144,6 +144,10 @@ class FormiqTools:
         except Exception:
             # The cause, such as a database error, goes to the server log only.
             logger.exception("Coach tool %s failed", call.name)
+            # A database error aborts the read transaction, and every later
+            # query in it would fail too: end it, so the turn's other calls read
+            # as if this one had not run.
+            self.end_read()
             return error_result(ToolErrorCode.TOOL_ERROR, "the data could not be read")
         return {"output": output.model_dump(mode="json")}
 
