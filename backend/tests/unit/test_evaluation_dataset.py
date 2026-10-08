@@ -8,8 +8,9 @@ from string import Formatter
 import pytest
 
 from app.agent import Decision, Intent, SafetyCategory, assess_safety
+from app.approvals import WRITE_ACTIONS
 from app.evaluation import CASES
-from app.evaluation.dataset import DATA_TOOLS
+from app.evaluation.dataset import DATA_TOOLS, UNKNOWN_WRITE
 from app.evaluation.fixtures import OTHER_EMAIL, USER_EMAIL, Fixtures
 from app.evaluation.models import CallTools, Respond
 from app.evaluation.runner import (
@@ -22,6 +23,8 @@ from app.evaluation.runner import (
 from app.tools import TOOL_DECLARATIONS
 
 TOOLS = {tool.name for tool in TOOL_DECLARATIONS}
+# what a case's model may call: the tools, and the writes it must be refused
+CALLABLE = TOOLS | WRITE_ACTIONS | {UNKNOWN_WRITE}
 NAMES = Fixtures(
     user_id=1,
     other_user_id=2,
@@ -51,11 +54,12 @@ def test_a_case_is_well_formed(case):
     assert case.expected_decision in (None, *Decision)
     assert case.expected_safety_category in (None, *SafetyCategory)
     assert case.expected_status in (None, *STATUSES)
-    for tool in (*case.required_tools, *case.forbidden_tools, *(t for t, _ in case.expected_refused_calls)):
+    for tool in (*case.required_tools, *case.forbidden_tools):
         assert tool in TOOLS
+    assert all(tool in CALLABLE for tool, _ in case.expected_refused_calls)
     for turn in case.script:
         if isinstance(turn, CallTools):
-            assert all(call.name in TOOLS for call in turn.calls)
+            assert all(call.name in CALLABLE for call in turn.calls)
         if isinstance(turn, Respond):
             assert turn.intent in Intent and turn.decision in Decision
     # every fixture it names exists
@@ -85,6 +89,7 @@ def test_the_dataset_covers_every_area():
         "general", "profile", "history", "exercise", "ambiguous", "safety", "false_positive",
         "bypass", "injection", "tool_result", "extraction", "identity", "id_grounding",
         "ownership", "compaction", "trajectory", "failure", "provider", "tools", "limits",
+        "write",
     } <= tags  # fmt: skip
     categories = {case.expected_safety_category for case in CASES} - {None}
     assert categories == set(SafetyCategory)

@@ -68,7 +68,7 @@ def test_the_dataset_has_no_regressions(service_session, fixtures):
         "intent", "decision", "required_tools", "forbidden_tools", "tool_order",
         "tool_call_count", "model_requests", "safety", "final_status", "termination",
         "refused_calls", "rejections", "compaction", "trusted_identity", "safety_path",
-        "resource_limits", "no_leaks", "outcome_recorded",
+        "resource_limits", "no_leaks", "outcome_recorded", "write_boundary",
     }  # fmt: skip
 
 

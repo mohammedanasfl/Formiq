@@ -23,6 +23,8 @@ class Failure(StrEnum):
     OWNERSHIP_FAILURE = "ownership_failure"
     TOOL_LIMIT_REACHED = "tool_limit_reached"
     ID_NOT_GROUNDED = "id_not_grounded"
+    # the model asked for an operation that would change data
+    WRITE_NOT_AUTHORIZED = "write_not_authorized"
     DECISION_REJECTED = "decision_rejected"
     REPLY_REJECTED = "reply_rejected"
     SAFETY_REDIRECT = "safety_redirect"
@@ -43,6 +45,7 @@ TOOL_ERROR_CODES = {
     "TOOL_LIMIT_REACHED": Failure.TOOL_LIMIT_REACHED,
     "TOOL_ERROR": Failure.TOOL_ERROR,
     "ID_NOT_GROUNDED": Failure.ID_NOT_GROUNDED,
+    "WRITE_NOT_AUTHORIZED": Failure.WRITE_NOT_AUTHORIZED,
     "DECISION_REJECTED": Failure.DECISION_REJECTED,
 }
 

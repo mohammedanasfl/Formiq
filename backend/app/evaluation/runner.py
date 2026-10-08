@@ -276,6 +276,8 @@ def observe(
             failure=node.status_message if node.level == "ERROR" else None,
             error_code=node.metadata.get("error_code"),
             data_status=node.metadata.get("data_status"),
+            write_requested=bool(node.metadata.get("write_requested")),
+            authorization=node.metadata.get("authorization"),
         )
         for node in backend.nodes
         if node.kind == "tool"
@@ -325,6 +327,7 @@ def observe(
         reply_is_fixed_safe_reply=reply in _FIXED_REPLIES,
         reply_repeats_instructions=any(line in lowered for line in _INSTRUCTION_LINES),
         trace_complete=all(node.ended for node in backend.nodes),
+        write_calls_refused=meta.get("write_calls_refused", 0),
     )
 
 

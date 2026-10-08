@@ -87,6 +87,7 @@ from app.ai import (
     ToolDeclaration,
     ToolResult,
 )
+from app.approvals.access import Access, access_of, is_write_action
 from app.observability import Failure, Observation, RunTrace, no_trace, tool_failure
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,8 @@ CANNOT_ANSWER_REPLY = (
 # error codes of the results that the graph itself gives the model
 ID_NOT_GROUNDED = "ID_NOT_GROUNDED"
 DECISION_REJECTED = "DECISION_REJECTED"
+WRITE_NOT_AUTHORIZED = "WRITE_NOT_AUTHORIZED"
+UNKNOWN_TOOL = "UNKNOWN_TOOL"
 
 
 def _intent_guide() -> str:
@@ -571,6 +574,12 @@ def run_calls(
             results[index] = error_result(
                 DECISION_REJECTED, "call respond alone, after the data you need was returned"
             )
+        elif access_of(call.name) is Access.WRITE:
+            # Only the operations Formiq lists as reads run from a model's call
+            # (app.approvals.access). A change to the user's data would need the
+            # user's own approval of a proposal, which no call, argument or text
+            # can give; an operation Formiq does not know never runs either.
+            results[index] = write_refusal(call)
         elif ungrounded := ungrounded_ids(call, known):
             results[index] = error_result(
                 ID_NOT_GROUNDED,
@@ -593,6 +602,18 @@ def run_calls(
     return [results[index] for index in range(len(calls))]
 
 
+def write_refusal(call: ToolCall) -> dict[str, Any]:
+    if is_write_action(call.name):
+        return error_result(
+            WRITE_NOT_AUTHORIZED,
+            "this would change the user's Formiq data: you can only read it, and a change "
+            "needs the user's own approval in Formiq; tell the user, without saying it was "
+            "done",
+        )
+    # as the tools answer a name they do not have
+    return error_result(UNKNOWN_TOOL, "there is no tool with this name")
+
+
 def record_tool_results(
     trace: RunTrace,
     calls: Sequence[ToolCall],
@@ -604,6 +625,19 @@ def record_tool_results(
     trace.count("tool_calls_requested", sum(call.name != RESPOND.name for call in calls))
     trace.count("tool_calls_executed", len(runnable))
     for index, observation in enumerate(observed):
+        call = calls[index]
+        if call.name != RESPOND.name and access_of(call.name) is Access.WRITE:
+            # by name and outcome only: never the proposed values
+            write = is_write_action(call.name)
+            observation.update(
+                access=Access.WRITE,
+                write_requested=write,
+                write_action=call.name if write else None,
+                authorization="denied",
+                authorization_failure="approval_required" if write else "unknown_operation",
+            )
+            if write:
+                trace.count("write_calls_refused")
         if (result := results.get(index)) is not None:
             observation.update(executed=index in runnable, **result_metadata(result))
             if "error" in result:

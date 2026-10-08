@@ -145,6 +145,10 @@ class ToolRecord:
     failure: str | None = None
     error_code: str | None = None
     data_status: str | None = None
+    # for a call outside Formiq's reads: whether it named a write operation,
+    # and the graph's authorization ("denied")
+    write_requested: bool = False
+    authorization: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +193,8 @@ class ExecutionResult:
     reply_repeats_instructions: bool
     # every observation started was ended
     trace_complete: bool
+    # calls naming a write operation, refused by the graph
+    write_calls_refused: int = 0
 
     @property
     def tools_requested(self) -> tuple[str, ...]:
