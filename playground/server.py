@@ -43,7 +43,7 @@ from app.observability import Tracer
 
 # only this machine can reach the playground
 HOST = "127.0.0.1"
-DEFAULT_PORT = 8000
+DEFAULT_PORT = 2001
 COACH_PATH = "/coach/message"
 EXECUTION_HEADER = "X-Playground-Execution"
 REQUEST_ID_HEADER = "X-Playground-Request-Id"

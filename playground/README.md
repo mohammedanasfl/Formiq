@@ -53,13 +53,13 @@ playground/
    ```bash
    cd backend && .venv/bin/python ../playground/server.py
    ```
-   Use `--port 8001` if port 8000 is taken. The server listens on `127.0.0.1` only, and refuses to
+   It always uses port 2001 (`--port` overrides it). The server listens on `127.0.0.1` only, and refuses to
    start unless `APP_ENV` is `development`.
 3. The playground is already being served by the same process: no separate step.
-4. Open http://localhost:8000/playground/ (or http://localhost:8000/, which redirects there).
+4. Open http://localhost:2001/playground/ (or http://localhost:2001/, which redirects there).
 
 The coach reads the development database, so the user IDs you test with must exist there. For
-example, create users and profiles with the API at http://localhost:8000/docs.
+example, create users and profiles with the API at http://localhost:2001/docs.
 
 ## Using it
 
