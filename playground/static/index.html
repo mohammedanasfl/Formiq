@@ -9,8 +9,8 @@
   </head>
   <body>
     <header class="warning" role="alert">
-      <strong>LOCAL DEVELOPMENT ONLY — NOT AUTHENTICATED</strong>
-      <span>User ID is a development/test identity, not an authenticated identity.</span>
+      <strong>LOCAL DEVELOPMENT ONLY</strong>
+      <span>Sign in as a development user. The access token is kept in this page's memory only.</span>
     </header>
 
     <main class="layout">
@@ -19,14 +19,20 @@
         <p class="note">Developer test tool for <code>POST /coach/message</code>. Not the Formiq app.</p>
 
         <fieldset>
-          <legend>Development identity</legend>
-          <p class="identity">Current development user ID: <strong id="active-user">1</strong></p>
-          <label for="user-id">Development user ID</label>
+          <legend>Sign in</legend>
+          <p class="identity">Signed in as: <strong id="active-user">not signed in</strong></p>
+          <label for="email">Email</label>
+          <input id="email" type="email" autocomplete="off" />
+          <label for="password">Password</label>
+          <input id="password" type="password" autocomplete="off" />
           <div class="row">
-            <input id="user-id" type="text" inputmode="numeric" value="1" autocomplete="off" />
-            <button id="switch-user" type="button">Switch User</button>
+            <button id="login" type="button">Log in</button>
+            <button id="logout" type="button" disabled>Log out</button>
           </div>
-          <p class="note">Switching changes the development identity and clears the conversation.</p>
+          <p class="note">
+            Signing in, as anyone, or out clears the conversation. The coach acts for the signed-in
+            user only. Set a password with <code>python -m app.cli set-password USER_ID</code>.
+          </p>
         </fieldset>
 
         <fieldset>

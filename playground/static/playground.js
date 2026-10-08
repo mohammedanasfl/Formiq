@@ -2,47 +2,59 @@
 // kept, and what an error shows. Pure functions over plain objects, so they
 // run in the browser (window.Playground) and in Node's tests (require).
 //
-// The conversation lives only in memory: a reload or a closed tab clears it.
+// The conversation and the access token live only in memory: a reload or a
+// closed tab clears both. Nothing is written to storage or cookies.
 (function (root) {
   "use strict";
 
   const COACH_PATH = "/coach/message";
+  const LOGIN_PATH = "/auth/login";
   // the most earlier turns one request may carry (app.schemas.coach)
   const MAX_HISTORY_TURNS = 50;
 
-  // a development identity: chosen by hand, never authenticated
-  function parseUserId(text) {
-    const value = String(text).trim();
-    if (!/^[1-9][0-9]{0,9}$/.test(value)) return null;
-    const id = Number(value);
-    return id <= 2147483647 ? id : null;
+  // Signed out: no token, no conversation. email only labels the page.
+  function createSession() {
+    return { email: null, token: null, history: [], epoch: 0 };
   }
 
-  function createSession(userId) {
-    return { userId, history: [], epoch: 0 };
-  }
-
-  // A new development user starts with no conversation: nothing is carried
-  // over from the previous one. The epoch tells a late reply it belongs to a
+  // Signing in, as anyone, starts a new conversation: nothing is carried over
+  // from the previous user. The epoch tells a late reply it belongs to a
   // conversation that no longer exists.
-  function switchUser(session, userId) {
-    if (userId === session.userId) return session;
-    return { userId, history: [], epoch: session.epoch + 1 };
+  function signIn(session, email, token) {
+    return { email, token, history: [], epoch: session.epoch + 1 };
+  }
+
+  // Signing out forgets the token and the conversation.
+  function signOut(session) {
+    return { email: null, token: null, history: [], epoch: session.epoch + 1 };
   }
 
   function clearConversation(session) {
-    return { userId: session.userId, history: [], epoch: session.epoch + 1 };
+    return { ...session, history: [], epoch: session.epoch + 1 };
   }
 
-  // The request body, exactly as the API takes it: the user, the message and
-  // the earlier turns (only role and text), the most recent ones that fit.
+  // The login body, exactly as POST /auth/login takes it.
+  function buildLogin(email, password) {
+    return { email: String(email).trim(), password: String(password) };
+  }
+
+  // The coach request body, exactly as the API takes it: the message and the
+  // earlier turns (only role and text), the most recent ones that fit. Never a
+  // user: the backend takes the user from the access token.
   function buildRequest(session, message) {
     const turns = session.history.slice(-MAX_HISTORY_TURNS);
     return {
-      user_id: session.userId,
       message,
       history: turns.map((turn) => ({ role: turn.role, text: turn.text })),
     };
+  }
+
+  // The coach request's headers: the access token, when signed in. Without one
+  // the request is sent unauthenticated, to see the API refuse it.
+  function requestHeaders(session) {
+    const headers = { "Content-Type": "application/json" };
+    if (session.token) headers.Authorization = `Bearer ${session.token}`;
+    return headers;
   }
 
   // After a reply: the message and the reply join the history, in order.
@@ -70,7 +82,8 @@
   const MESSAGES = {
     0: "Could not reach the backend. Is the playground server running?",
     400: "Request could not be processed.",
-    404: "Development user not found.",
+    401: "Not signed in, or the session expired. Log in again.",
+    404: "Not found.",
     422: "Request could not be processed.",
     500: "The backend failed unexpectedly.",
     502: "Coach provider failed.",
@@ -93,6 +106,16 @@
     };
   }
 
+  // A failed login: one message for every wrong email or password, as the API
+  // gives one answer for all of them.
+  function describeLoginError(status) {
+    if (status === 401) return "Invalid email or password.";
+    if (status === 422) return "Enter an email and a password.";
+    if (status === 503) return "Authentication is not configured (AUTH_JWT_SECRET is not set).";
+    if (status === 0) return MESSAGES[0];
+    return `Login failed (HTTP ${status}).`;
+  }
+
   // The X-Playground-Execution header, or null when absent or unreadable.
   function parseExecution(header) {
     if (!header) return null;
@@ -106,15 +129,19 @@
 
   const Playground = {
     COACH_PATH,
+    LOGIN_PATH,
     MAX_HISTORY_TURNS,
-    parseUserId,
     createSession,
-    switchUser,
+    signIn,
+    signOut,
     clearConversation,
+    buildLogin,
     buildRequest,
+    requestHeaders,
     recordExchange,
     addTurn,
     describeError,
+    describeLoginError,
     parseExecution,
   };
 

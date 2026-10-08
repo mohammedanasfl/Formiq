@@ -22,13 +22,13 @@ from sqlalchemy.orm import Session
 from app.agent import SAFETY_POLICY, SafetyCategory
 from app.ai import GeminiProvider
 from app.api.dependencies import get_ai_provider, get_tracer
-from app.evaluation import create_fixtures
 from app.main import app
 from app.models import User, UserProfile, WorkoutPlan, WorkoutSession, WorkoutSet
 from app.observability import TRACING_OFF, Tracer
 from app.repositories import UserRepository
 from app.services import CoachService, UserProfileService
 from tests.auth import bearer
+from tests.integration.agent_fixtures import create_fixtures
 from tests.observability import FailingBackend
 from tests.reliability import (
     EchoModel,

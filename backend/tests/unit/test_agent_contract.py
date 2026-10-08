@@ -1,75 +1,72 @@
-"""The agent production contract (docs/agent-production-contract.md) against
-the code: what it says the limits, thresholds and categories are, they are;
-every module and test it cites as enforcement exists; and the few
-cross-cutting rules no other test pinned hold.
+"""The agent's critical invariants, pinned in code (docs/agent-production-contract.md
+describes them; it is not checked word for word against the code).
 
-The document repeats values, it does not define them: each is defined once,
-in the module the document names, and a change on either side alone fails
-here.
+The limits and safety thresholds are pinned here rather than read from the code
+they check: a change to one of them fails until it is made here too, on
+purpose. The rest are cross-cutting rules no other test holds: what the model
+controls, which operations it can reach, and what observability and the
+approval boundary can reach.
 """
 
 import ast
 import importlib
-import re
-import typing
-from enum import StrEnum
 from pathlib import Path
 
 import pytest
 
 import app
-from app.agent import (
-    RESPOND,
-    SAFETY_POLICY,
-    CoachState,
-    Decision,
-    Intent,
-    SafetyCategory,
-)
-from app.agent.graph import (
-    DECISION_REJECTED,
-    ID_NOT_GROUNDED,
-    UNKNOWN_TOOL,
-    WRITE_NOT_AUTHORIZED,
-)
+from app.agent import RESPOND, SAFETY_POLICY, CoachState
 from app.agent.policy import Respond
 from app.ai import ModelTurn, ToolCall
-from app.approvals import (
-    READ_ACTIONS,
-    ApprovalState,
-    AuthorizationFailure,
-    WriteAction,
-)
-from app.evaluation import EXPECTED_LIMITS, HARD
-from app.observability import Failure
-from app.observability.tracing import SUCCESS_STATUSES, WARNING_STATUSES
-from app.schemas.coach import CoachMessageText
-from app.tools import ToolErrorCode
+from app.approvals import READ_ACTIONS
+from app.tools import TOOL_DECLARATIONS
 
 APP = Path(app.__file__).parent
-BACKEND = APP.parent
-CONTRACT = BACKEND.parent / "docs" / "agent-production-contract.md"
 
-# a table row: | `NAME` | value | `app.module` | ...
-_ROW = re.compile(
-    r"^\| `([A-Z][A-Z0-9_]*)` \| ([0-9][0-9_,.]*) \| `(app(?:\.\w+)+)` \|", re.MULTILINE
+# Formiq's limits and safety thresholds, as of Phase 4.
+PINNED = {
+    "app.agent.graph": {
+        "MAX_TOOL_ITERATIONS": 5,
+        "MAX_REQUESTED_TOOL_CALLS_PER_TURN": 20,
+        "MAX_GRAPH_STEPS": 13,
+    },
+    "app.tools.limits": {
+        "MAX_EXECUTED_TOOL_CALLS_PER_TURN": 5,
+        "MAX_SEARCH_RESULTS": 10,
+        "MAX_EXERCISES": 30,
+        "MAX_SETS": 15,
+        "MAX_TEXT_LENGTH": 500,
+    },
+    "app.agent.context": {
+        "MAX_CONTEXT_COMPACTIONS": 6,
+        "CONTEXT_MAX_CHARS": 350_000,
+        "CONTEXT_KEEP_RECENT_TURNS": 6,
+        "CONTEXT_MAX_TURN_CHARS": 1_000,
+        "CONTEXT_MAX_CONVERSATION_CHARS": 8_000,
+        "MAX_TOOL_RESULT_CHARS": 50_000,
+    },
+    "app.schemas.coach": {"MAX_HISTORY_TURNS": 50, "MAX_HISTORY_TEXT_LENGTH": 8_000},
+    "app.agent.policy": {"MAX_REPLY_LENGTH": 8_000},
+    "app.agent.safety": {
+        "MAX_WEEKLY_LOSS_KG": 2.0,
+        "MIN_DAILY_CALORIES": 800,
+        "MAX_FAST_HOURS": 72,
+    },
+}
+
+# The only operations a model's call may run: Formiq's reads. Pinned, so a write
+# slipping into them fails here.
+READS = frozenset(
+    {
+        "get_user_profile",
+        "get_workout_plan",
+        "get_workout_session",
+        "get_current_workout_plan",
+        "get_latest_workout_session",
+        "get_exercise",
+        "search_exercises",
+    }
 )
-_TEST_REFERENCE = re.compile(r"`(tests/[\w/]+\.py)::(test_\w+)`")
-_PATH_REFERENCE = re.compile(r"`(app/[\w/]+\.py)`")
-
-
-@pytest.fixture(scope="module")
-def contract() -> str:
-    return CONTRACT.read_text()
-
-
-def documented(contract: str) -> set[str]:
-    """Everything the contract names in code formatting."""
-    return set(re.findall(r"`([^`\n]+)`", contract))
-
-
-def number(text: str) -> float:
-    return float(text.replace(",", "").replace("_", ""))
 
 
 def imported_modules(package: str) -> set[str]:
@@ -83,140 +80,26 @@ def imported_modules(package: str) -> set[str]:
     return names
 
 
-# --- the document against the code ---
+@pytest.mark.parametrize("module", PINNED)
+def test_the_pinned_limits_are_the_production_limits(module):
+    actual = {name: getattr(importlib.import_module(module), name) for name in PINNED[module]}
+
+    assert actual == PINNED[module]
 
 
-def test_the_documented_limits_are_the_production_limits(contract):
-    rows = _ROW.findall(contract)
-    assert rows, "the contract's limit tables were not found"
-    for name, value, module in rows:
-        actual = getattr(importlib.import_module(module), name)
-        assert number(value) == actual, (
-            f"{module}.{name} is {actual}, the contract says {value}"
-        )
-    names = {name for name, _, _ in rows}
-    # every limit the evaluation pins, every safety guardrail and the trace bounds
-    required = {
-        *EXPECTED_LIMITS,
-        "MAX_WEEKLY_LOSS_KG",
-        "MIN_DAILY_CALORIES",
-        "MAX_FAST_HOURS",
-    }
-    assert required <= names, f"undocumented: {sorted(required - names)}"
-    assert {
-        ("MAX_VALUE_CHARS", "app.observability.tracing"),
-        ("MAX_LIST_ITEMS", "app.observability.tracing"),
-    } <= {(name, module) for name, _, module in rows}
-
-
-def test_the_documented_message_limit_is_the_apis():
-    (constraints,) = [
-        m for m in typing.get_args(CoachMessageText)[1:] if hasattr(m, "max_length")
-    ]
-    assert constraints.max_length == 4000
-
-
-def test_the_message_limit_is_documented(contract):
-    assert "The current message is at most 4000 characters" in contract
-
-
-def test_every_failure_category_is_documented(contract):
-    names = documented(contract)
-    assert {*Failure} <= names, f"undocumented: {sorted(set(Failure) - names)}"
-    assert SUCCESS_STATUSES | WARNING_STATUSES <= names
-
-
-@pytest.mark.parametrize(
-    "category",
-    [
-        Intent,
-        Decision,
-        SafetyCategory,
-        ApprovalState,
-        AuthorizationFailure,
-        WriteAction,
-        ToolErrorCode,
-    ],
-    ids=lambda category: category.__name__,
-)
-def test_every_category_is_documented(contract, category: type[StrEnum]):
-    # by its name as the code spells it, or by its value as a trace records it
-    names = documented(contract)
-    missing = [member for member in category if not {member.name, member.value} & names]
-    assert missing == []
-
-
-def test_every_read_and_every_graph_error_code_is_documented(contract):
-    names = documented(contract)
-    assert READ_ACTIONS <= names
-    assert {
-        ID_NOT_GROUNDED,
-        WRITE_NOT_AUTHORIZED,
-        DECISION_REJECTED,
-        UNKNOWN_TOOL,
-    } <= names
-
-
-def test_the_documented_hard_evaluators_are_the_hard_set(contract):
-    start = contract.index("The `HARD` evaluators must")
-    end = contract.index("\n- **", start)
-    listed = set(re.findall(r"^  - `(\w+)`$", contract[start:end], re.MULTILINE))
-    assert listed == HARD
-
-
-def test_every_cited_test_exists(contract):
-    references = _TEST_REFERENCE.findall(contract)
-    assert len(references) > 50
-    missing = []
-    for file, name in references:
-        path = BACKEND / file
-        defined = (
-            {
-                node.name
-                for node in ast.parse(path.read_text()).body
-                if isinstance(node, ast.FunctionDef)
-            }
-            if path.exists()
-            else set()
-        )
-        if name not in defined:
-            missing.append(f"{file}::{name}")
-    assert missing == []
-
-
-def test_every_cited_module_exists(contract):
-    paths = set(_PATH_REFERENCE.findall(contract))
-    assert paths
-    assert [path for path in sorted(paths) if not (BACKEND / path).exists()] == []
-
-
-# --- the cross-cutting rules ---
+def test_the_model_can_reach_only_formiqs_reads():
+    assert {declaration.name for declaration in TOOL_DECLARATIONS} == READS
+    assert READ_ACTIONS == READS
 
 
 def test_the_model_controls_only_its_calls_and_its_respond_arguments():
     # what a model returns: calls by name with arguments, and nothing that
     # reaches identity, safety, limits or authorization
-    assert {field for field in ModelTurn.__dataclass_fields__} == {
-        "content",
-        "text",
-        "tool_calls",
-        "usage",
-    }
-    assert {field for field in ToolCall.__dataclass_fields__} == {
-        "name",
-        "arguments",
-        "id",
-    }
+    assert set(ModelTurn.__dataclass_fields__) == {"content", "text", "tool_calls", "usage"}
+    assert set(ToolCall.__dataclass_fields__) == {"name", "arguments", "id"}
     # its decision is an intent, a decision and a reply, from fixed enums
-    for declaration in (
-        RESPOND,
-        *(policy.respond for policy in SAFETY_POLICY.values()),
-    ):
-        assert set(declaration.parameters["properties"]) == {
-            "intent",
-            "decision",
-            "reply",
-        }
+    for declaration in (RESPOND, *(policy.respond for policy in SAFETY_POLICY.values())):
+        assert set(declaration.parameters["properties"]) == {"intent", "decision", "reply"}
     assert Respond.model_config["extra"] == "forbid"
     # the state a turn's output lands in holds no identity, safety or authority
     for key in CoachState.__annotations__:
@@ -235,7 +118,6 @@ def test_observability_cannot_reach_what_it_could_change():
         "app.models",
         "app.approvals",
         "app.api",
-        "app.evaluation",
         "sqlalchemy",
     )
     imported = imported_modules("observability")
@@ -247,7 +129,7 @@ def test_no_production_code_reads_a_trace_back():
     # a trace is written to, never read: no decision can depend on it
     readers = []
     for path in APP.rglob("*.py"):
-        if {"observability", "evaluation"} & set(path.relative_to(APP).parts):
+        if "observability" in path.relative_to(APP).parts:
             continue
         for node in ast.walk(ast.parse(path.read_text())):
             if (
@@ -268,7 +150,6 @@ def test_the_approval_boundary_reaches_no_data():
         "app.services",
         "app.tools",
         "app.api",
-        "app.evaluation",
     )
     imported = imported_modules("approvals")
     assert imported

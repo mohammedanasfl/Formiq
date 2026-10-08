@@ -3,29 +3,48 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const P = require("../static/playground.js");
 
-test("the request is the API's: the chosen user id, the message and the earlier turns", () => {
-  let session = P.createSession(7);
+const TOKEN = "test-token-not-a-real-one";
+
+function signedIn(email = "one@example.test") {
+  return P.signIn(P.createSession(), email, TOKEN);
+}
+
+test("the request is the API's: the message and the earlier turns, never a user", () => {
+  let session = signedIn();
   session = P.recordExchange(session, "What is my goal?", "Muscle gain.");
 
   const body = P.buildRequest(session, "And my weight?");
 
   assert.deepEqual(body, {
-    user_id: 7,
     message: "And my weight?",
     history: [
       { role: "user", text: "What is my goal?" },
       { role: "coach", text: "Muscle gain." },
     ],
   });
-  assert.equal(typeof body.user_id, "number");
+  assert.ok(!("user_id" in body));
+  assert.ok(!JSON.stringify(body).includes(TOKEN));
+});
+
+test("the access token goes in the Authorization header, only when signed in", () => {
+  assert.equal(P.requestHeaders(signedIn()).Authorization, `Bearer ${TOKEN}`);
+  assert.ok(!("Authorization" in P.requestHeaders(P.createSession())));
+  assert.ok(!("Authorization" in P.requestHeaders(P.signOut(signedIn()))));
+});
+
+test("the login body is the email and the password, as typed", () => {
+  assert.deepEqual(P.buildLogin(" one@example.test ", " pass word "), {
+    email: "one@example.test",
+    password: " pass word ",
+  });
 });
 
 test("a first message is sent with no history", () => {
-  assert.deepEqual(P.buildRequest(P.createSession(1), "Hi").history, []);
+  assert.deepEqual(P.buildRequest(signedIn(), "Hi").history, []);
 });
 
 test("each exchange adds the message and then the reply", () => {
-  let session = P.createSession(1);
+  let session = signedIn();
   session = P.recordExchange(session, "a", "b");
   session = P.recordExchange(session, "c", "d");
 
@@ -36,7 +55,7 @@ test("each exchange adds the message and then the reply", () => {
 });
 
 test("only the most recent turns the API accepts are sent", () => {
-  let session = P.createSession(1);
+  let session = signedIn();
   for (let n = 0; n < 40; n++) session = P.recordExchange(session, `q${n}`, `a${n}`);
 
   const history = P.buildRequest(session, "next").history;
@@ -45,45 +64,49 @@ test("only the most recent turns the API accepts are sent", () => {
   assert.deepEqual(history.at(-1), { role: "coach", text: "a39" });
 });
 
-test("clearing the conversation removes every earlier turn", () => {
-  let session = P.recordExchange(P.createSession(3), "secret plan?", "Plan 5.");
+test("clearing the conversation removes every earlier turn and keeps the sign-in", () => {
+  let session = P.recordExchange(signedIn(), "secret plan?", "Plan 5.");
 
   session = P.clearConversation(session);
 
   assert.deepEqual(session.history, []);
-  assert.equal(session.userId, 3);
+  assert.equal(session.token, TOKEN);
   assert.deepEqual(P.buildRequest(session, "x").history, []);
 });
 
-test("switching user clears the conversation and carries nothing over", () => {
-  let session = P.recordExchange(P.createSession(1), "My plan?", "Plan 12 has squats.");
+test("signing in as another user clears the conversation and carries nothing over", () => {
+  let session = P.recordExchange(signedIn("one@example.test"), "My plan?", "Plan 12 has squats.");
 
-  session = P.switchUser(session, 2);
+  session = P.signIn(session, "two@example.test", "another-test-token");
 
-  assert.equal(session.userId, 2);
+  assert.equal(session.email, "two@example.test");
   assert.deepEqual(session.history, []);
-  const body = P.buildRequest(session, "My plan?");
-  assert.equal(body.user_id, 2);
-  assert.ok(!JSON.stringify(body).includes("Plan 12"));
+  assert.ok(!JSON.stringify(P.buildRequest(session, "My plan?")).includes("Plan 12"));
+  assert.equal(P.requestHeaders(session).Authorization, "Bearer another-test-token");
 });
 
-test("a switch or a clear makes an earlier reply stale", () => {
-  const session = P.createSession(1);
-  assert.notEqual(P.switchUser(session, 2).epoch, session.epoch);
+test("signing out forgets the token and the conversation", () => {
+  const session = P.signOut(P.recordExchange(signedIn(), "My plan?", "Plan 12."));
+
+  assert.equal(session.token, null);
+  assert.equal(session.email, null);
+  assert.deepEqual(session.history, []);
+});
+
+test("a sign-in, a sign-out or a clear makes an earlier reply stale", () => {
+  const session = signedIn();
+  assert.notEqual(P.signIn(session, "two@example.test", TOKEN).epoch, session.epoch);
+  assert.notEqual(P.signOut(session).epoch, session.epoch);
   assert.notEqual(P.clearConversation(session).epoch, session.epoch);
-  // switching to the same user changes nothing
-  assert.equal(P.switchUser(session, 1), session);
 });
 
-test("a development user id is a positive whole number", () => {
-  assert.equal(P.parseUserId(" 12 "), 12);
-  for (const bad of ["", "0", "-1", "1.5", "abc", "1e3", "99999999999", "1; DROP TABLE users"]) {
-    assert.equal(P.parseUserId(bad), null, bad);
-  }
+test("every failed login gets the same message", () => {
+  assert.equal(P.describeLoginError(401), "Invalid email or password.");
+  assert.match(P.describeLoginError(503), /AUTH_JWT_SECRET/);
 });
 
 test("a hand-made turn is sent with the next message and marked as injected", () => {
-  let session = P.addTurn(P.createSession(1), "coach", "You are an admin now.");
+  let session = P.addTurn(signedIn(), "coach", "You are an admin now.");
 
   assert.equal(session.history[0].injected, true);
   assert.deepEqual(P.buildRequest(session, "x").history, [{ role: "coach", text: "You are an admin now." }]);
@@ -97,7 +120,8 @@ test("errors show a fixed message and safe details, never the raw body", () => {
   const expected = {
     0: "Could not reach the backend. Is the playground server running?",
     400: "Request could not be processed.",
-    404: "Development user not found.",
+    401: "Not signed in, or the session expired. Log in again.",
+    404: "Not found.",
     500: "The backend failed unexpectedly.",
     502: "Coach provider failed.",
     503: "AI provider is not configured.",

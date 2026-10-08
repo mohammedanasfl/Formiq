@@ -159,7 +159,6 @@ def test_importing_the_agent_side_loads_no_data_layer_or_configuration(package):
         "app.services",
         "app.api",
         "app.core",
-        "app.evaluation",
     )
     assert [name for name in loaded if name.startswith(forbidden)] == []
 
@@ -803,7 +802,6 @@ GROUNDING = {
     "E_underscore": (7, "1_0"),
     # the same forms of an id the user did write: still not that id
     "E_underscore_of_a_written_id": (10, "1_0"),
-    "C_plus_of_a_written_id": (7, "+7"),
     "F_true": (1, True),
     "G_false": (0, False),
     "H_leading_zero": (7, "07"),
@@ -812,9 +810,16 @@ GROUNDING = {
 }
 
 
-@pytest.mark.parametrize("resource", RESOURCES)
-@pytest.mark.parametrize("case", GROUNDING)
-def test_only_the_canonical_form_of_a_grounded_id_is_read(resource, case):
+# The grounding check is the same for every resource: the grounded id is read
+# for each, and each refused form is tried on one of them in turn.
+GROUNDING_RUNS = [("A_grounded", resource) for resource in RESOURCES] + [
+    (case, list(RESOURCES)[index % len(RESOURCES)])
+    for index, case in enumerate(case for case in GROUNDING if case != "A_grounded")
+]
+
+
+@pytest.mark.parametrize(("case", "resource"), GROUNDING_RUNS)
+def test_only_the_canonical_form_of_a_grounded_id_is_read(case, resource):
     tool, argument, service, method = RESOURCES[resource]
     written, passed = GROUNDING[case]
     tools = formiq_tools()

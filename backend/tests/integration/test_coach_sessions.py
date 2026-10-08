@@ -23,10 +23,10 @@ from sqlalchemy.orm import sessionmaker
 from app.agent import CoachContext
 from app.api.dependencies import get_ai_provider, get_tracer
 from app.db import database
-from app.evaluation import create_fixtures
 from app.main import app
 from app.services import UserProfileService
 from tests.auth import bearer
+from tests.integration.agent_fixtures import create_fixtures
 from tests.reliability import (
     EchoModel,
     TrackedSessions,

@@ -1,10 +1,11 @@
 """The playground launcher against the real application: the page is served,
-messages go to the existing POST /coach/message unchanged, the execution
-headers carry only safe trace metadata, errors keep their API status, and the
-production application is untouched.
+messages go to the existing POST /coach/message unchanged, signed in with an
+access token, the execution headers carry only safe trace metadata, errors keep
+their API status, and the production application is untouched.
 
-The route, CoachService, the coach graph and the tracer are real; the model is
-a fake and the database session a mock.
+The route, authentication, CoachService, the coach graph and the tracer are
+real; the model is a fake, the database session a mock, and tokens are signed
+with a test-only secret.
 """
 
 import ast
@@ -23,14 +24,20 @@ from fastapi.testclient import TestClient
 from google.genai import types
 
 from app.ai import AIProviderError, GeminiProvider, ModelTurn, ToolCall
-from app.api.dependencies import get_ai_provider
+from app.api.dependencies import get_access_tokens, get_ai_provider
 from app.core.config import settings
+from app.core.security import AccessTokens
 from app.db.database import get_db
 from app.models import User
 from app.observability import Tracer
 from app.observability.memory import MemoryBackend
 
 STATIC = server.PLAYGROUND / "static"
+TOKENS = AccessTokens("playground-test-only-signing-secret-0123456789")
+
+
+def bearer(user_id: int) -> dict[str, str]:
+    return {"Authorization": f"Bearer {TOKENS.issue(user_id)}"}
 
 
 def respond(
@@ -61,12 +68,26 @@ def client():
     return TestClient(server.app, raise_server_exceptions=False)
 
 
+@pytest.fixture(autouse=True)
+def tokens():
+    """Tokens are signed and verified with the test-only secret."""
+    server.app.dependency_overrides[get_access_tokens] = lambda: TOKENS
+    yield TOKENS
+    server.app.dependency_overrides.pop(get_access_tokens, None)
+
+
+def user(user_id: int) -> Mock:
+    found = Mock(spec=User)
+    found.id = user_id
+    return found
+
+
 @pytest.fixture
 def db():
     """A mock session: user 404 does not exist, every other user does."""
     session = Mock()
     session.get.side_effect = lambda model, user_id: (
-        None if user_id == 404 else Mock(spec=User)
+        None if user_id == 404 else user(user_id)
     )
     server.app.dependency_overrides[get_db] = lambda: session
     yield session
@@ -93,11 +114,9 @@ def test_the_page_loads_with_its_warnings(client):
     page = client.get("/playground/")
 
     assert page.status_code == 200
-    assert "LOCAL DEVELOPMENT ONLY — NOT AUTHENTICATED" in page.text
-    assert (
-        "User ID is a development/test identity, not an authenticated identity."
-        in page.text
-    )
+    assert "LOCAL DEVELOPMENT ONLY" in page.text
+    assert "The access token is kept in this page's memory only." in page.text
+    assert 'type="password"' in page.text
     for asset in ("playground.js", "app.js", "styles.css"):
         assert client.get(f"/playground/{asset}").status_code == 200
     assert client.get("/", follow_redirects=False).headers["location"] == "/playground/"
@@ -117,7 +136,7 @@ def test_only_the_static_folder_is_served(client):
 # --- the coach endpoint, unchanged ---
 
 
-def test_a_message_goes_to_the_existing_endpoint_for_the_chosen_user(client, db, model):
+def test_a_message_goes_to_the_existing_endpoint_for_the_signed_in_user(client, db, model):
     model.generate_turn.side_effect = [
         respond("Progressive overload is adding load over time.")
     ]
@@ -128,11 +147,8 @@ def test_a_message_goes_to_the_existing_endpoint_for_the_chosen_user(client, db,
 
     response = client.post(
         "/coach/message",
-        json={
-            "user_id": 7,
-            "message": "What is progressive overload?",
-            "history": history,
-        },
+        headers=bearer(7),
+        json={"message": "What is progressive overload?", "history": history},
     )
 
     assert response.status_code == 200
@@ -140,7 +156,8 @@ def test_a_message_goes_to_the_existing_endpoint_for_the_chosen_user(client, db,
     assert response.json() == {
         "reply": "Progressive overload is adding load over time."
     }
-    db.get.assert_called_once_with(User, 7)
+    # the user the token names, looked up to sign the request in and by the coach
+    assert {call.args for call in db.get.call_args_list} == {(User, 7)}
     sent = model.generate_turn.call_args.args[0][0].parts
     assert "Hello! How can I help?" in sent[0].text
     assert sent[-1].text == "What is progressive overload?"
@@ -160,8 +177,8 @@ def test_the_execution_headers_hold_metadata_never_content(client, db, model):
 
     response = client.post(
         "/coach/message",
+        headers=bearer(7),
         json={
-            "user_id": 7,
             "message": "SENTINEL-MESSAGE",
             "history": [{"role": "coach", "text": "SENTINEL-HISTORY"}],
         },
@@ -183,7 +200,7 @@ def test_a_flagged_request_shows_its_safety_category(client, db, model):
     ]
 
     response = client.post(
-        "/coach/message", json={"user_id": 7, "message": "I have sharp knee pain."}
+        "/coach/message", headers=bearer(7), json={"message": "I have sharp knee pain."}
     )
 
     run = execution(response)
@@ -194,26 +211,32 @@ def test_a_flagged_request_shows_its_safety_category(client, db, model):
     assert run["tools_used"] == []
 
 
-@pytest.mark.parametrize(
-    ("user_id", "failure", "status", "category"),
-    [
-        (7, AIProviderError("SENTINEL provider detail"), 502, "provider_error"),
-        (404, None, 404, "user_not_found"),
-    ],
-    ids=["provider_failure", "user_not_found"],
-)
-def test_errors_keep_their_api_status_and_show_only_their_category(
-    client, db, model, user_id, failure, status, category
-):
-    model.generate_turn.side_effect = failure
+def test_errors_keep_their_api_status_and_show_only_their_category(client, db, model):
+    model.generate_turn.side_effect = AIProviderError("SENTINEL provider detail")
 
     response = client.post(
-        "/coach/message", json={"user_id": user_id, "message": "What is my goal?"}
+        "/coach/message", headers=bearer(7), json={"message": "What is my goal?"}
     )
 
-    assert response.status_code == status
-    assert execution(response)["status"] == category
+    assert response.status_code == 502
+    assert execution(response)["status"] == "provider_error"
     assert "SENTINEL" not in response.text + json.dumps(dict(response.headers))
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"Authorization": "Bearer not-a-token"}, bearer(404)],
+    ids=["no_token", "bad_token", "unknown_user"],
+)
+def test_without_a_valid_token_the_coach_never_runs(client, db, model, headers):
+    response = client.post(
+        "/coach/message", headers=headers, json={"message": "What is my goal?"}
+    )
+
+    assert response.status_code == 401
+    model.generate_turn.assert_not_called()
+    # the coach never started, so there is no execution to show
+    assert server.EXECUTION_HEADER not in response.headers
 
 
 def test_an_unconfigured_provider_is_a_503(client, db):
@@ -222,7 +245,7 @@ def test_an_unconfigured_provider_is_a_503(client, db):
     )
     try:
         response = client.post(
-            "/coach/message", json={"user_id": 7, "message": "What is my goal?"}
+            "/coach/message", headers=bearer(7), json={"message": "What is my goal?"}
         )
     finally:
         server.app.dependency_overrides.pop(get_ai_provider, None)
@@ -232,7 +255,9 @@ def test_an_unconfigured_provider_is_a_503(client, db):
 
 
 def test_an_invalid_request_is_rejected_by_the_api_as_before(client, db, model):
-    response = client.post("/coach/message", json={"user_id": 0, "message": ""})
+    response = client.post(
+        "/coach/message", headers=bearer(7), json={"user_id": 7, "message": ""}
+    )
 
     assert response.status_code == 422
     model.generate_turn.assert_not_called()
@@ -258,7 +283,8 @@ def test_simultaneous_requests_each_get_their_own_metadata(client, db, model):
         history = [{"role": "user", "text": "earlier"}] * turns
         results[turns] = client.post(
             "/coach/message",
-            json={"user_id": 7, "message": f"m{turns}", "history": history},
+            headers=bearer(7),
+            json={"message": f"m{turns}", "history": history},
         )
 
     threads = [threading.Thread(target=ask, args=(turns,)) for turns in (0, 3)]
@@ -334,15 +360,18 @@ def test_the_playground_runs_only_locally_and_in_development(monkeypatch):
 
 def test_the_playground_holds_no_credentials_and_reaches_no_database():
     files = [*STATIC.iterdir(), server.PLAYGROUND / "server.py"]
+    # no key, no database URL, and nothing kept in storage or cookies: the
+    # access token lives in the page's memory only
     secret = re.compile(
         r"AIza[0-9A-Za-z_-]{10,}|sk-lf-|pk-lf-|postgres(ql)?://|localStorage|sessionStorage|"
-        r"document\.cookie|Authorization|password|Bearer ",
+        r"indexedDB|document\.cookie|eyJ[0-9A-Za-z_-]{10,}",
         re.IGNORECASE,
     )
     assert [path.name for path in files if secret.search(path.read_text())] == []
-    # the page calls one endpoint, on its own origin
+    # the page calls two endpoints, on its own origin, and never sends cookies
     script = (STATIC / "app.js").read_text()
-    assert re.findall(r"fetch\(([^,]+),", script) == ["P.COACH_PATH"]
+    assert re.findall(r"fetch\(([^,]+),", script) == ["P.COACH_PATH", "P.LOGIN_PATH"]
+    assert script.count('credentials: "omit"') == 2
     assert not re.search(r"https?://", script + (STATIC / "playground.js").read_text())
     # the launcher reaches data only through the application's API
     imported = set()

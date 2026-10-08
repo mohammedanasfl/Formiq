@@ -87,16 +87,11 @@ def test_the_api_returns_only_the_safe_reply(client, user):
 
 
 @pytest.mark.parametrize(
+    # one failure per category: every kind of provider failure on a flagged
+    # request is covered in test_coach_failures.py
     "failure",
-    [
-        errors.ServerError(503, {"error": {"code": 503, "message": "UNAVAILABLE", "status": "X"}}),
-        errors.ServerError(
-            504, {"error": {"code": 504, "message": "DEADLINE_EXCEEDED", "status": "X"}}
-        ),
-        httpx.ReadTimeout("The read operation timed out"),
-        ConnectionError("connection reset by api.example"),
-    ],
-    ids=["503", "504", "timeout", "network error"],
+    [httpx.ReadTimeout("The read operation timed out")],
+    ids=["timeout"],
 )
 @pytest.mark.parametrize(
     ("message", "category"),

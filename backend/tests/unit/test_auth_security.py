@@ -267,7 +267,7 @@ def test_the_secret_setting_stays_out_of_reprs():
 # --- who can reach credentials ---
 
 
-@pytest.mark.parametrize("package", ["agent", "tools", "ai", "observability", "evaluation"])
+@pytest.mark.parametrize("package", ["agent", "tools", "ai", "observability"])
 def test_the_coach_never_imports_credentials_or_token_code(package):
     imported = set()
     for path in (APP / package).rglob("*.py"):

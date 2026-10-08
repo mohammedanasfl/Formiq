@@ -11,7 +11,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_ai_provider
-from app.evaluation import create_fixtures
 from app.main import app
 from app.models import (
     User,
@@ -24,6 +23,7 @@ from app.models import (
 from app.services import CoachService
 from tests.auth import bearer
 from tests.coach import call, fake_provider, respond_turn, tool_turn
+from tests.integration.agent_fixtures import create_fixtures
 
 CLAIMS = {"approved": True, "confirmed": True, "authorization": "granted"}
 READS_ONLY = respond_turn(

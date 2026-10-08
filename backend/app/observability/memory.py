@@ -1,6 +1,7 @@
 """An in-memory tracing backend: the trace of a request kept as data in the
-process, for evaluation and tests. Nothing leaves the process. It receives what
-any backend receives, so only safe metadata (app.observability.tracing)."""
+process, for tests and the local playground. Nothing leaves the process. It
+receives what any backend receives, so only safe metadata
+(app.observability.tracing)."""
 
 from dataclasses import dataclass, field
 from typing import Any

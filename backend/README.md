@@ -8,10 +8,13 @@ The Formiq backend is written in Python and uses [FastAPI](https://fastapi.tiang
 
 ## Status
 
-Phase 2.5: a FastAPI application with a health check and an API for creating users and their
-onboarding profiles, stored in PostgreSQL through SQLAlchemy, with Alembic migrations and unit and
-integration tests (integration tests use a dedicated test database). Authentication, AI coaching,
-and other features are planned for later phases.
+Phase 4 complete: a FastAPI application with users and onboarding profiles, the exercise catalog,
+workout plans and workout sessions, email and password authentication with JWT access tokens, and
+a read-only AI coach (`POST /coach/message`: Gemini through LangGraph, with optional Langfuse
+tracing). Data is stored in PostgreSQL through SQLAlchemy, with Alembic migrations and unit and
+integration tests (integration tests use a dedicated test database). The coach's guarantees are in
+[the agent production contract](../docs/agent-production-contract.md). Phase 5 adds Formiq's
+fitness capabilities.
 
 ## Architecture
 
@@ -31,12 +34,19 @@ API route (app/api) → service (app/services) → repository (app/repositories)
 - `app/core/config.py`: application settings, read from environment variables and `.env`
 - `app/db/database.py`: SQLAlchemy engine, session factory, and the `get_db()` dependency
 - `app/db/base.py`: declarative base for the database models
-- `app/models/`: SQLAlchemy models (`User`, `UserProfile`)
+- `app/models/`: SQLAlchemy models
 - `app/schemas/`: Pydantic request and response schemas
-- `app/repositories/`: database access for users and profiles
+- `app/repositories/`: database access
 - `app/services/`: business logic and service-level errors
-- `app/api/dependencies.py`: the database session dependency for routes
-- `app/api/routes/`: `GET /health` and the `/users` endpoints
+- `app/api/dependencies.py`: route dependencies: the database session, the signed-in user, the
+  coach's model provider and tracer
+- `app/api/routes/`: the API's routes
+- `app/core/security.py`: password hashing and access tokens
+- `app/agent/`, `app/ai/`, `app/tools/`: the AI coach: its graph and policies, the Gemini provider,
+  and its read-only tools
+- `app/approvals/`: the write-approval boundary, for future writes (none exists yet)
+- `app/observability/`: the coach's tracing (Langfuse, or off)
+- `app/cli.py`: development commands (`python -m app.cli set-password USER_ID`)
 - `alembic.ini`, `migrations/`: Alembic configuration and migration scripts
 - `tests/`: unit tests (`tests/unit/`) and integration tests (`tests/integration/`)
 - `pytest.ini`: pytest configuration

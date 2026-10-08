@@ -1,10 +1,11 @@
-"""Formiq Agent Playground launcher. LOCAL DEVELOPMENT ONLY, NOT AUTHENTICATED.
+"""Formiq Agent Playground launcher. LOCAL DEVELOPMENT ONLY.
 
 Runs the existing Formiq FastAPI application, unchanged, on 127.0.0.1, and in
 this process only:
 
 - serves the playground page from the same origin (/playground/), so the
-  browser calls the existing POST /coach/message without any CORS change;
+  browser calls the existing POST /auth/login and POST /coach/message without
+  any CORS change;
 - records the coach's trace metadata as it is written (the same safe metadata
   Langfuse may receive: request id, statuses, categories, counts and tool
   names, never the message, history, reply, data or instructions) and returns
@@ -187,7 +188,7 @@ def main(argv: list[str] | None = None) -> None:
 
     install()
     print(f"Formiq Agent Playground: http://localhost:{args.port}/playground/")
-    print("LOCAL DEVELOPMENT ONLY — NOT AUTHENTICATED")
+    print("LOCAL DEVELOPMENT ONLY")
     uvicorn.run(app, host=HOST, port=args.port)
 
 

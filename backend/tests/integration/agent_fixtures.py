@@ -1,8 +1,8 @@
-"""The evaluation's fixture data: two made-up users and their plans and
-sessions, created through the services. No real person's data.
+"""Fixture data for the coach's end-to-end tests: two made-up users and their
+plans and sessions, created through the services. No real person's data.
 
-Cases refer to fixtures by name ("{plan_id}"); the ids are filled in when a
-case runs, since the database assigns them.
+Scenarios refer to fixtures by name ("{plan_id}"); the ids are filled in when
+a scenario runs, since the database assigns them.
 """
 
 from dataclasses import asdict, dataclass

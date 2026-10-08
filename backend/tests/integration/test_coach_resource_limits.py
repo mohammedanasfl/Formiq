@@ -25,7 +25,6 @@ from app.ai import ModelTurn, ToolResult
 from app.api import dependencies
 from app.api.dependencies import get_ai_provider, get_tracer
 from app.db import database
-from app.evaluation import create_fixtures
 from app.main import app
 from app.models import Exercise
 from app.schemas import (
@@ -38,6 +37,7 @@ from app.schemas.coach import MAX_HISTORY_TEXT_LENGTH, MAX_HISTORY_TURNS
 from app.services import UserProfileService, UserService, WorkoutPlanService
 from app.tools.limits import MAX_EXERCISES, MAX_TEXT_LENGTH
 from tests.auth import bearer
+from tests.integration.agent_fixtures import create_fixtures
 from tests.reliability import (
     EchoModel,
     TrackedSessions,

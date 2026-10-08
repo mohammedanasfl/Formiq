@@ -20,7 +20,7 @@ mismatched, pending, rejected, expired, used or stale approval, a changed
 proposal or a safety flag is a refusal, never a fallback to "approved".
 
 ApprovalStore keeps its records in memory, per instance: it is this phase's
-reference implementation of the contract, for evaluation and tests, not
+reference implementation of the contract, for tests, not
 production persistence. A real write path would keep proposals and
 approvals in the database with the same rules (and unique ids enforced there).
 """
