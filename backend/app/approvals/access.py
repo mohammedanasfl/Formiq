@@ -3,9 +3,9 @@ classification, by name, never the model's.
 
 Only the operations listed in READ_ACTIONS are reads, and only those in
 PROPOSAL_ACTIONS are proposals: they change nothing, but describe a write for
-the user to approve (app.approvals.store). Every other name, a write listed
-below or any name Formiq does not know, is treated as a write: it never runs
-from a model's call. The one write Formiq performs, creating a workout plan,
+the user to approve (app.services.plan_proposal_service). Every other name, a
+write listed below or any name Formiq does not know, is treated as a write: it
+never runs from a model's call. The one write Formiq performs, creating a workout plan,
 runs only from the user's own approval of a proposal; WriteAction also names
 the writes a later phase may add, so that a model asking for one is recognised
 and refused.

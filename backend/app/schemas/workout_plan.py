@@ -1,10 +1,10 @@
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from app.schemas.exercise import CatalogId
+from app.schemas.exercise import CatalogId, WorkoutSection
 
 # The integer columns are PostgreSQL integers, so larger values would fail in
 # the database. This is the column's limit, not a training limit.
@@ -24,23 +24,47 @@ class WorkoutPlanStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+# The part of the workout a planned exercise belongs to: the warm-up, the main
+# workout or the cool-down, the same sections a catalog exercise's uses name.
+PlanSection = WorkoutSection
+
+
+def check_set_target(reps: int | None, duration_seconds: int | None) -> None:
+    """Each set has one target: reps, or a duration (a timed activity, such as
+    an easy walk or a stretch held)."""
+    if (reps is None) == (duration_seconds is None):
+        raise ValueError("give each set one target: reps or duration_seconds, not both")
+
+
 class WorkoutPlanExerciseCreate(BaseModel):
     """An exercise to prescribe in a plan: target values, not performed ones."""
 
     exercise_id: CatalogId
     exercise_order: PositiveInteger
+    section: PlanSection = PlanSection.MAIN_WORKOUT
     sets: PositiveInteger
-    reps: PositiveInteger
+    reps: PositiveInteger | None = None
+    duration_seconds: PositiveInteger | None = None
     weight_kg: Weight | None = None
     rest_seconds: Seconds | None = None
     notes: Text | None = None
 
+    @model_validator(mode="after")
+    def check_target(self) -> Self:
+        check_set_target(self.reps, self.duration_seconds)
+        return self
+
 
 class WorkoutPlanExerciseUpdate(BaseModel):
+    """The fields to change. The result must still have one target per set
+    (checked by the service, which sees the stored values)."""
+
     exercise_id: CatalogId | None = None
     exercise_order: PositiveInteger | None = None
+    section: PlanSection | None = None
     sets: PositiveInteger | None = None
     reps: PositiveInteger | None = None
+    duration_seconds: PositiveInteger | None = None
     weight_kg: Weight | None = None
     rest_seconds: Seconds | None = None
     notes: Text | None = None
@@ -53,8 +77,11 @@ class WorkoutPlanExerciseResponse(BaseModel):
     workout_plan_id: int
     exercise_id: int
     exercise_order: int
+    section: PlanSection
     sets: int
-    reps: int
+    # one of them per set: reps, or seconds for a timed activity
+    reps: int | None
+    duration_seconds: int | None
     weight_kg: float | None
     rest_seconds: int | None
     notes: str | None
@@ -89,7 +116,7 @@ class WorkoutPlanResponse(BaseModel):
     description: str | None
     status: WorkoutPlanStatus
     scheduled_date: date | None
-    # ordered by exercise_order
+    # ordered by exercise_order; each in its section (warm-up, main, cool-down)
     exercises: list[WorkoutPlanExerciseResponse]
     created_at: datetime
     updated_at: datetime

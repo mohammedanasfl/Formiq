@@ -1,3 +1,4 @@
+import pathlib
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Annotated
@@ -7,7 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.ai import GeminiProvider
-from app.approvals import ApprovalStore
+from app.approvals import ProposalTerms
 from app.core.config import settings
 from app.core.security import AccessTokens
 from app.db.database import get_db
@@ -58,16 +59,27 @@ CoachTracer = Annotated[Tracer, Depends(get_tracer)]
 PROPOSAL_TTL = timedelta(minutes=30)
 
 
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 @lru_cache
-def get_approval_store() -> ApprovalStore:
-    """The workout plans the coach proposed, waiting for the user's approval:
-    one store for the process, shared by all requests. It is in memory, so a
-    proposal made before a restart, or in another process, is not found, and
-    approving it fails closed."""
-    return ApprovalStore(clock=lambda: datetime.now(UTC), ttl=PROPOSAL_TTL)
+def get_proposal_terms() -> ProposalTerms:
+    """Formiq's clock and how long a proposed workout plan waits for the
+    user's approval. The proposals themselves are kept in the database
+    (app.services.plan_proposal_service), so they outlive a restart."""
+    return ProposalTerms(clock=utc_now, ttl=PROPOSAL_TTL)
 
 
-Approvals = Annotated[ApprovalStore, Depends(get_approval_store)]
+Proposals = Annotated[ProposalTerms, Depends(get_proposal_terms)]
+
+
+def get_exercise_images_dir() -> pathlib.Path:
+    """Where the exercise images the API serves are kept (EXERCISE_IMAGES_DIR)."""
+    return settings.exercise_images_dir
+
+
+ExerciseImagesDir = Annotated[pathlib.Path, Depends(get_exercise_images_dir)]
 
 
 @lru_cache

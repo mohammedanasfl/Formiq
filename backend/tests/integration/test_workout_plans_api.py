@@ -137,6 +137,64 @@ def test_create_plan_with_exercises_returns_them_in_order(client, user_id, bench
     assert all(item["workout_plan_id"] == plan["id"] for item in plan["exercises"])
 
 
+def test_create_plan_without_sections_is_all_main_workout(client, user_id, make_plan):
+    # the request a client made before sections existed
+    plan = make_plan()
+
+    (item,) = plan["exercises"]
+    assert (item["section"], item["reps"], item["duration_seconds"]) == ("MAIN_WORKOUT", 8, None)
+
+
+def test_create_plan_with_a_warm_up_and_a_timed_cool_down(
+    client, user_id, bench_press, catalog_exercise_ids
+):
+    walk = catalog_exercise_ids["Brisk Walk"]
+    stretch = catalog_exercise_ids["Doorway Chest Stretch"]
+
+    response = client.post(
+        plans_url(user_id),
+        json={
+            "name": "Push Day",
+            "status": "PLANNED",
+            "scheduled_date": DATE,
+            "exercises": [
+                {**exercise_body(walk, 1, reps=None, duration_seconds=300), "section": "WARM_UP"},
+                exercise_body(bench_press, 2),
+                {
+                    **exercise_body(stretch, 3, sets=2, reps=None, duration_seconds=30),
+                    "section": "COOL_DOWN",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.json()
+    assert [
+        (item["section"], item["exercise_id"], item["sets"], item["reps"], item["duration_seconds"])
+        for item in response.json()["exercises"]
+    ] == [
+        ("WARM_UP", walk, 3, None, 300),
+        ("MAIN_WORKOUT", bench_press, 3, 8, None),
+        ("COOL_DOWN", stretch, 2, None, 30),
+    ]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"reps": None}, {"duration_seconds": 30}, {"section": "STRETCH"}],
+    ids=["no_target", "two_targets", "unknown_section"],
+)
+def test_create_plan_exercise_needs_one_target_and_a_known_section(
+    client, user_id, bench_press, change
+):
+    response = client.post(
+        plans_url(user_id),
+        json={"name": "Push Day", "exercises": [{**exercise_body(bench_press), **change}]},
+    )
+
+    assert response.status_code == 422
+
+
 def test_create_plan_for_another_or_a_missing_user_returns_404(client, user_id):
     response = client.post(
         plans_url(2_147_483_647), json={"name": "Push Day"}, headers=bearer(user_id)
@@ -546,6 +604,8 @@ def test_patch_exercise_changes_only_the_supplied_fields(client, user_id, make_p
     ("change", "status_code", "detail"),
     [
         ({"sets": None}, 400, "these fields cannot be null: sets"),
+        ({"section": None}, 400, "these fields cannot be null: section"),
+        ({"reps": None}, 400, "give each set one target: reps or duration_seconds"),
         ({"exercise_id": 2_147_483_647}, 400, "exercise 2147483647 does not exist"),
         ({"exercise_order": 2}, 409, "already has an exercise at exercise_order 2"),
     ],

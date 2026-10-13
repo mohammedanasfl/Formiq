@@ -3,6 +3,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from app.schemas.workout_plan import PlanSection
+
 # Surrounding whitespace is dropped, and a blank message is rejected. The limit
 # keeps one message, and the model request it becomes, a reasonable size.
 CoachMessageText = Annotated[
@@ -46,30 +48,39 @@ class CoachMessageRequest(BaseModel):
 
 class ProposedExerciseResponse(BaseModel):
     exercise_order: int
+    # the warm-up, the main workout or the cool-down
+    section: PlanSection
     exercise_id: int
     exercise_name: str
     # what the exercise needs, from the catalog; empty when nothing
     equipment: list[str]
     sets: int
-    reps: int
+    # each set's target: reps, or a duration in seconds (one of them)
+    reps: int | None
+    duration_seconds: int | None
     rest_seconds: int | None
     notes: str | None
 
 
 class WorkoutPlanProposalResponse(BaseModel):
-    """A workout plan the coach proposed to the signed-in user. It is not saved:
-    approving it, with POST /coach/proposals/{proposal_id}/approve and its
-    binding, saves it as a PLANNED plan."""
+    """A workout plan the coach proposed to the signed-in user: a warm-up, the
+    main workout and a cool-down. It is not saved: approving it, with POST
+    /coach/proposals/{proposal_id}/approve and its binding, saves all of it as
+    a PLANNED plan."""
 
     proposal_id: str
-    # the digest of this exact proposal: an approval must carry it
+    # the digest of this exact proposal, every section included: an approval
+    # must carry it
     binding: str
     expires_at: datetime
     name: str
     scheduled_date: date
-    # ordered by exercise_order
+    # ordered by exercise_order: the warm-up, the main workout, the cool-down
     exercises: list[ProposedExerciseResponse]
-    # Formiq's estimate of how long it takes
+    # Formiq's estimate of how long each section takes, and the whole workout
+    warm_up_minutes: int
+    main_minutes: int
+    cool_down_minutes: int
     estimated_minutes: int
 
 

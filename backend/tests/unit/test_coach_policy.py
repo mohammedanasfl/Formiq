@@ -317,6 +317,21 @@ def test_the_exercise_ids_of_a_proposed_plan_must_be_grounded():
     assert ungrounded_ids(proposal, {3, 9}) == ["exercise_id='3'"]
 
 
+def test_the_warm_up_and_cool_down_ids_of_a_proposed_plan_must_be_grounded():
+    proposal = ToolCall(
+        name="propose_workout_plan",
+        arguments={
+            "name": "Upper Body",
+            "warm_up": [{"exercise_id": 40, "sets": 1, "duration_seconds": 120}],
+            "exercises": [{"exercise_id": 3, "sets": 3, "reps": 8}],
+            "cool_down": [{"exercise_id": 41, "sets": 1, "duration_seconds": 30}],
+        },
+    )
+
+    assert ungrounded_ids(proposal, {3}) == ["exercise_id=40", "exercise_id=41"]
+    assert ungrounded_ids(proposal, {3, 40, 41}) == []
+
+
 # data status
 
 

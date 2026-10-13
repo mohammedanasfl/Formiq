@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Path, status
 
 from app.agent import ConversationTurn
 from app.ai import AIProviderError, AIProviderNotConfiguredError
-from app.api.dependencies import AIProvider, Approvals, CoachTracer, CurrentUser, DbSession
+from app.api.dependencies import AIProvider, CoachTracer, CurrentUser, DbSession, Proposals
 from app.schemas import (
     CoachMessageRequest,
     CoachMessageResponse,
@@ -36,12 +36,12 @@ def send_coach_message(
     db: DbSession,
     provider: AIProvider,
     tracer: CoachTracer,
-    approvals: Approvals,
+    proposals: Proposals,
 ):
     # The coach acts for the signed-in user only: its id is the one the access
     # token was issued for, and the body has no field that could name another.
     try:
-        answer = CoachService(db, provider, tracer, approvals).answer(
+        answer = CoachService(db, provider, tracer, proposals).answer(
             current_user.id,
             message_data.message,
             [ConversationTurn(turn.role, turn.text) for turn in message_data.history],
@@ -69,7 +69,16 @@ def send_coach_message(
             proposal_id=proposal.proposal_id,
             binding=proposal.binding(),
             **shown.model_dump(
-                include={"expires_at", "name", "scheduled_date", "exercises", "estimated_minutes"}
+                include={
+                    "expires_at",
+                    "name",
+                    "scheduled_date",
+                    "exercises",
+                    "warm_up_minutes",
+                    "main_minutes",
+                    "cool_down_minutes",
+                    "estimated_minutes",
+                }
             ),
         ),
     )
@@ -85,12 +94,12 @@ def approve_workout_plan_proposal(
     approval: ProposalApprovalRequest,
     current_user: CurrentUser,
     db: DbSession,
-    approvals: Approvals,
+    proposals: Proposals,
 ):
     """The signed-in user approves a workout plan the coach proposed to them,
     as it was shown (its binding): the plan is saved, once, and returned."""
     try:
-        return PlanProposalService(db, approvals).approve(
+        return PlanProposalService(db, proposals).approve(
             current_user.id, proposal_id, approval.binding
         )
     except ProposalNotFoundError as error:

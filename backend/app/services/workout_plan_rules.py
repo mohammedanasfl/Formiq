@@ -3,9 +3,10 @@
 from collections import Counter
 from datetime import date
 
-from app.models import WorkoutPlan
+from app.models import WorkoutPlan, WorkoutPlanExercise
 from app.repositories import ExerciseRepository, WorkoutPlanRepository
 from app.schemas import WorkoutPlanExerciseCreate, WorkoutPlanStatus
+from app.schemas.workout_plan import check_set_target
 from app.services.exceptions import (
     ExerciseNotFoundError,
     InactiveExerciseError,
@@ -30,7 +31,8 @@ ALLOWED_STATUS_CHANGES = {
 # Fields that are NOT NULL in the tables. The update schemas accept null for
 # every field, so an update must not set these to null.
 REQUIRED_PLAN_FIELDS = frozenset({"name", "status"})
-REQUIRED_PLAN_EXERCISE_FIELDS = frozenset({"exercise_id", "exercise_order", "sets", "reps"})
+# reps may be null when the set has a duration instead (check_target).
+REQUIRED_PLAN_EXERCISE_FIELDS = frozenset({"exercise_id", "exercise_order", "section", "sets"})
 
 
 def get_owned_plan(plans: WorkoutPlanRepository, user_id: int, plan_id: int) -> WorkoutPlan:
@@ -82,6 +84,14 @@ def check_no_null_required_fields(changes: dict, required_fields: frozenset[str]
     )
     if null_fields:
         raise InvalidWorkoutPlanError(f"these fields cannot be null: {', '.join(null_fields)}")
+
+
+def check_target(plan_exercise: WorkoutPlanExercise) -> None:
+    """After a change, each set still has one target: reps or a duration."""
+    try:
+        check_set_target(plan_exercise.reps, plan_exercise.duration_seconds)
+    except ValueError as error:
+        raise InvalidWorkoutPlanError(str(error)) from None
 
 
 def check_unique_orders(exercises: list[WorkoutPlanExerciseCreate]) -> None:

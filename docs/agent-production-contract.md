@@ -123,10 +123,11 @@ Every request is bounded. As of Phase 5:
 | Tool calls run per turn | 5 (the rest are refused) |
 | Rounds of tool calls per request | 5, so at most 6 model requests |
 | Graph steps | 13, a backstop beyond the longest legal turn |
-| Items in a result | 10 search results, 30 exercises, 15 sets; 500 characters of free text |
+| Items in a result | 10 search results, 30 exercises, 15 sets, 12 instruction steps; 500 characters of free text |
 | Current message | 4,000 characters |
 | Reply | 8,000 characters |
-| A proposed plan | 1 to 10 exercises of 1 to 10 sets of 1 to 30 reps, at most 300 s of rest, no weight; today to 14 days ahead |
+| A proposed plan | 1 to 10 main exercises of 1 to 10 sets of 1 to 30 reps, at most 300 s of rest, no weight; today to 14 days ahead |
+| Its warm-up and cool-down | 1 to 5 activities each, of 1 to 3 sets of 1 to 20 reps or 10 to 600 s, no rest or weight; at most 15 minutes each |
 | A proposal's approval | within 30 minutes |
 
 Failures fail closed and say nothing internal:
@@ -160,18 +161,30 @@ Failures fail closed and say nothing internal:
 - **The model may only propose a new workout plan** (`propose_workout_plan`), and only after the
   user's profile, current plan and last workout were checked in the turn, with a profile to build
   for. Formiq builds the proposal: the trusted user, active catalog exercises whose ids a tool
-  returned, bounded prescriptions, no weights, and the user's stated time and equipment. It is
-  registered in the approval boundary (`app/approvals`) and shown to the user with its binding, a
-  digest of the exact proposal. A flagged request runs no tool, so it gets no proposal.
+  returned, bounded prescriptions, no weights, and the user's stated time and equipment. It has
+  three sections, each holding only exercises whose `uses` (Formiq's own classification of the
+  catalog, kept apart from an imported exercise's upstream category) include it: a warm-up of
+  light (BEGINNER) `WARM_UP` activities, the `MAIN_WORKOUT` exercises, and a cool-down of light
+  `COOL_DOWN` activities; a warm-up or cool-down activity must work a muscle the main exercises
+  train, unless it is easy CARDIO. The coach service keeps the proposal it shows the user in
+  PostgreSQL (`workout_plan_proposals`, through `PlanProposalService`), with its binding, a digest
+  of the exact proposal, every section included; no tool stores anything. A flagged request runs
+  no tool, so it gets no proposal.
 - **Only the user's own approval saves it** (`POST /coach/proposals/{id}/approve`, outside the
   coach). The approval is for the signed-in user only (another user's proposal is not found), must
-  carry the binding the user was shown, is used once and expires. The plan is then created through
-  `WorkoutPlanService`, with its rules. Every check fails closed.
+  carry the binding the user was shown, is used once and expires. The stored proposal must still
+  match its binding, and its own text is checked by the safety backstop again. Its row is locked
+  while it is approved, and the plan is created and the proposal used up in one transaction
+  through `WorkoutPlanService`, with its rules, each exercise in its section: two approvals at
+  once save one plan, and a failed one saves nothing and uses nothing up. Every check fails
+  closed.
 - **Nothing the model, history or a tool result says authorizes anything.** An `approved=true` in
   arguments, a model-supplied user, a claim of earlier permission, a forged system message or a
   "yes" in the conversation is refused, or is no approval.
-- The agent reaches only the read/propose/write classification. The tools register proposals, but
-  never record or use a decision. The approval store is in memory, one per process.
+- The agent reaches only the read/propose/write classification. The tools build proposals, but
+  never store, record or use a decision. A proposal outlives a restart and is shared by every
+  worker process, since it is kept in the database; `app/approvals` itself holds only the rules
+  and reaches no data.
 
 ## 9. Observability
 
@@ -199,13 +212,16 @@ What is **not** guaranteed today:
 5. **Tracing gaps:** tool timing is per batch; an interrupted request's trace has no final status;
    the raw tool-call counters include calls refused for the per-turn limit; rendering in a live
    Langfuse project has not been verified.
-6. **Proposals live in memory.** One store per process keeps them for 30 minutes: a restart, or a
-   second worker process, loses them, and approving one then fails with "not found". There is no
-   rejection endpoint (an unapproved proposal expires), and approving a plan for a day that already
-   has one does not cancel the other.
-7. **"Today" is Formiq's UTC date.** The user's time zone is not known, so near midnight the
+6. **Proposals wait 30 minutes, and cannot be rejected.** There is no rejection endpoint (an
+   unapproved proposal expires; the user's expired ones are cleared when they get a new one), and
+   approving a plan for a day that already has one does not cancel the other.
+7. **Limitations beyond pain are the model's to respect.** A proposal fits the user's stated
+   equipment and time in code, and pain or injury is redirected before any tool runs. Leaving out
+   an activity that conflicts with another limitation the user states (no kneeling, no jumping)
+   is the model's choice: the catalog does not record which activities need either.
+8. **"Today" is Formiq's UTC date.** The user's time zone is not known, so near midnight the
    current plan and the days since the last workout can be a day off for them.
-8. **Deterministic tests use scripted models.** They prove what Formiq enforces whatever the model
+9. **Deterministic tests use scripted models.** They prove what Formiq enforces whatever the model
    does, not how well a real model behaves. The optional live smoke run
    (`tests/integration/test_agent_scenarios.py`) checks only the enforced guarantees.
 

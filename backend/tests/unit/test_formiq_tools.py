@@ -88,6 +88,9 @@ def exercise(exercise_id, name="Push-Up", **fields):
         description=None,
         difficulty="BEGINNER",
         movement_pattern="HORIZONTAL_PUSH",
+        instructions=[],
+        category=None,
+        uses=["MAIN_WORKOUT"],
         is_active=True,
         muscles=[SimpleNamespace(muscle_group=SimpleNamespace(name="Chest"), role="PRIMARY")],
         equipment=[],
@@ -321,8 +324,10 @@ def test_a_large_plan_is_truncated(tools, services):
             SimpleNamespace(
                 exercise_id=1,
                 exercise_order=order,
+                section="MAIN_WORKOUT",
                 sets=3,
                 reps=8,
+                duration_seconds=None,
                 weight_kg=None,
                 rest_seconds=None,
                 notes="n" * 2000,
@@ -429,4 +434,7 @@ def test_tools_call_only_read_methods_of_the_services():
         "get_latest_completed_session",
         "get_exercise_by_id",
         "list_exercises",
+        # to find a search's muscle group and equipment by name
+        "list_muscle_groups",
+        "list_equipment",
     }

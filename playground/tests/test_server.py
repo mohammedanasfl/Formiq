@@ -368,10 +368,12 @@ def test_the_playground_holds_no_credentials_and_reaches_no_database():
         re.IGNORECASE,
     )
     assert [path.name for path in files if secret.search(path.read_text())] == []
-    # the page calls two endpoints, on its own origin, and never sends cookies
+    # the page calls three endpoints, on its own origin, and never sends cookies:
+    # the coach, the approval of the coach's proposal, and the login
     script = (STATIC / "app.js").read_text()
-    assert re.findall(r"fetch\(([^,]+),", script) == ["P.COACH_PATH", "P.LOGIN_PATH"]
-    assert script.count('credentials: "omit"') == 2
+    assert re.findall(r"fetch\(([^,]+),", script) == ["P.COACH_PATH", "path", "P.LOGIN_PATH"]
+    assert "const path = P.approvalPath(proposal);" in script
+    assert script.count('credentials: "omit"') == 3
     assert not re.search(r"https?://", script + (STATIC / "playground.js").read_text())
     # the launcher reaches data only through the application's API
     imported = set()

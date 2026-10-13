@@ -9,28 +9,39 @@
 
   const COACH_PATH = "/coach/message";
   const LOGIN_PATH = "/auth/login";
+  // Formiq's proposal ids and bindings (app.api.routes.coach, app.schemas.coach)
+  const PROPOSAL_ID = /^[0-9a-f]{32}$/;
+  const BINDING = /^[0-9a-f]{64}$/;
   // the most earlier turns one request may carry (app.schemas.coach)
   const MAX_HISTORY_TURNS = 50;
+  // A workout's sections, in the order they are done
+  // (app.schemas.workout_plan.PlanSection), with the proposal's estimate of each.
+  const SECTIONS = [
+    { section: "WARM_UP", title: "Warm-up", minutes: "warm_up_minutes" },
+    { section: "MAIN_WORKOUT", title: "Main workout", minutes: "main_minutes" },
+    { section: "COOL_DOWN", title: "Cool-down", minutes: "cool_down_minutes" },
+  ];
 
-  // Signed out: no token, no conversation. email only labels the page.
+  // Signed out: no token, no conversation. email only labels the page. proposal
+  // is the workout plan the coach's latest reply proposed, if any.
   function createSession() {
-    return { email: null, token: null, history: [], epoch: 0 };
+    return { email: null, token: null, history: [], proposal: null, epoch: 0 };
   }
 
   // Signing in, as anyone, starts a new conversation: nothing is carried over
   // from the previous user. The epoch tells a late reply it belongs to a
   // conversation that no longer exists.
   function signIn(session, email, token) {
-    return { email, token, history: [], epoch: session.epoch + 1 };
+    return { email, token, history: [], proposal: null, epoch: session.epoch + 1 };
   }
 
   // Signing out forgets the token and the conversation.
   function signOut(session) {
-    return { email: null, token: null, history: [], epoch: session.epoch + 1 };
+    return { email: null, token: null, history: [], proposal: null, epoch: session.epoch + 1 };
   }
 
   function clearConversation(session) {
-    return { ...session, history: [], epoch: session.epoch + 1 };
+    return { ...session, history: [], proposal: null, epoch: session.epoch + 1 };
   }
 
   // The login body, exactly as POST /auth/login takes it.
@@ -57,8 +68,9 @@
     return headers;
   }
 
-  // After a reply: the message and the reply join the history, in order.
-  function recordExchange(session, message, reply) {
+  // After a reply: the message and the reply join the history, in order. The
+  // reply's proposal, if it has one, replaces any earlier one on the page.
+  function recordExchange(session, message, reply, proposal = null) {
     return {
       ...session,
       history: [
@@ -66,6 +78,67 @@
         { role: "user", text: message },
         { role: "coach", text: reply },
       ],
+      proposal: readProposal(proposal),
+    };
+  }
+
+  // A reply's proposal, or null when it has none or it is not one Formiq made.
+  // It is kept as received: its binding is sent back unchanged to approve it.
+  function readProposal(value) {
+    if (!value || typeof value !== "object") return null;
+    if (!PROPOSAL_ID.test(value.proposal_id) || !BINDING.test(value.binding)) return null;
+    if (!Array.isArray(value.exercises)) return null;
+    return { ...value, savedPlanId: null, savedCounts: null };
+  }
+
+  // A proposal's exercises by section, in order, each section with its
+  // estimated minutes.
+  function proposalSections(proposal) {
+    return SECTIONS.map(({ section, title, minutes }) => ({
+      section,
+      title,
+      minutes: proposal[minutes],
+      exercises: proposal.exercises.filter((exercise) => exercise.section === section),
+    }));
+  }
+
+  // An exercise's prescription as shown: "3 × 10, 60 s rest", or "2 × 30 s"
+  // for a timed one.
+  function prescription(exercise) {
+    const target =
+      exercise.duration_seconds == null ? `${exercise.reps}` : `${exercise.duration_seconds} s`;
+    const rest = exercise.rest_seconds == null ? "" : `, ${exercise.rest_seconds} s rest`;
+    return `${exercise.sets} × ${target}${rest}`;
+  }
+
+  // How many exercises a saved plan has in each section, as the API returned it.
+  function sectionCounts(plan) {
+    const counts = Object.fromEntries(SECTIONS.map(({ section }) => [section, 0]));
+    for (const exercise of Array.isArray(plan.exercises) ? plan.exercises : []) {
+      if (exercise && exercise.section in counts) counts[exercise.section] += 1;
+    }
+    return counts;
+  }
+
+  // The approval request, exactly as POST /coach/proposals/{id}/approve takes
+  // it: the binding of the proposal as it was shown, and nothing else.
+  function approvalPath(proposal) {
+    return `/coach/proposals/${encodeURIComponent(proposal.proposal_id)}/approve`;
+  }
+
+  function buildApproval(proposal) {
+    return { binding: proposal.binding };
+  }
+
+  // After the API saved the plan (201): the proposal shows the saved plan's id.
+  // Only for the proposal still on the page, and only with a real plan id.
+  function recordApproval(session, proposalId, plan) {
+    const proposal = session.proposal;
+    if (!proposal || proposal.proposal_id !== proposalId) return session;
+    if (!plan || !Number.isInteger(plan.id)) return session;
+    return {
+      ...session,
+      proposal: { ...proposal, savedPlanId: plan.id, savedCounts: sectionCounts(plan) },
     };
   }
 
@@ -116,6 +189,21 @@
     return `Login failed (HTTP ${status}).`;
   }
 
+  // A failed approval: a fixed message by status, never the raw body. Nothing
+  // was saved.
+  const APPROVAL_MESSAGES = {
+    404: "Not approved: this proposal was not found. It may have been lost in a server restart. Ask the coach again.",
+    409: "Not approved: this proposal expired, was already approved, or can no longer be saved. Ask the coach for a new one.",
+    422: "Not approved: the approval request could not be processed.",
+  };
+
+  function describeApprovalError(status) {
+    return {
+      message: APPROVAL_MESSAGES[status] || MESSAGES[status] || `Not approved (HTTP ${status}).`,
+      technical: { status },
+    };
+  }
+
   // The X-Playground-Execution header, or null when absent or unreadable.
   function parseExecution(header) {
     if (!header) return null;
@@ -139,8 +227,16 @@
     buildRequest,
     requestHeaders,
     recordExchange,
+    readProposal,
+    proposalSections,
+    prescription,
+    sectionCounts,
+    approvalPath,
+    buildApproval,
+    recordApproval,
     addTurn,
     describeError,
+    describeApprovalError,
     describeLoginError,
     parseExecution,
   };

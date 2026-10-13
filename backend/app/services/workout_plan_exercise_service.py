@@ -14,6 +14,7 @@ from app.services.workout_plan_rules import (
     check_exercise_available,
     check_no_null_required_fields,
     check_planned_plan,
+    check_target,
     get_owned_plan,
 )
 
@@ -70,6 +71,7 @@ class WorkoutPlanExerciseService:
 
             for field, value in changes.items():
                 setattr(plan_exercise, field, value)
+            check_target(plan_exercise)
             self.plan_exercises.update(plan_exercise)
             self.session.commit()
         except Exception:

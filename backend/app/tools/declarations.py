@@ -5,14 +5,22 @@ coach request, so the model cannot choose whose data it reads.
 """
 
 from app.ai import ToolDeclaration
-from app.schemas.exercise import Difficulty, MovementPattern
+from app.schemas.exercise import Difficulty, MovementPattern, WorkoutSection
 from app.tools.limits import (
+    MAX_ACTIVITY_REPS,
+    MAX_ACTIVITY_SECONDS,
+    MAX_ACTIVITY_SETS,
     MAX_PROPOSAL_DAYS_AHEAD,
     MAX_PROPOSED_EXERCISES,
     MAX_PROPOSED_REPS,
     MAX_PROPOSED_REST_SECONDS,
     MAX_PROPOSED_SETS,
+    MAX_SEARCH_EQUIPMENT,
     MAX_SEARCH_RESULTS,
+    MAX_SECTION_ACTIVITIES,
+    MAX_SECTION_MINUTES,
+    MAX_UNAVAILABLE_EQUIPMENT,
+    MIN_ACTIVITY_SECONDS,
 )
 
 ID = {"type": "integer", "minimum": 1}
@@ -32,8 +40,8 @@ GET_WORKOUT_PLAN = ToolDeclaration(
     name="get_workout_plan",
     description=(
         "Get one of the user's workout plans by its id: name, status, scheduled date and "
-        "the prescribed exercises (sets, reps, weight, rest). A plan is what was prescribed, "
-        "not what the user did: use get_workout_session for that."
+        "the prescribed exercises (section, sets, reps or duration, weight, rest). A plan is "
+        "what was prescribed, not what the user did: use get_workout_session for that."
     ),
     parameters={
         "type": "object",
@@ -82,18 +90,64 @@ GET_LATEST_WORKOUT_SESSION = ToolDeclaration(
     ),
 )
 
+def _activities(section: str, use: WorkoutSection) -> dict:
+    """A warm-up or cool-down section: light catalog activities, each for reps
+    or for a time."""
+    return {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": MAX_SECTION_ACTIVITIES,
+        "description": (
+            f"The {section}, in order: BEGINNER catalog activities whose uses include {use}. "
+            "An activity must work muscles the main exercises train, unless it is CARDIO "
+            f"(movement_pattern), which suits any workout. At most {MAX_SECTION_MINUTES} "
+            "minutes in all."
+        ),
+        "items": {
+            "type": "object",
+            "properties": {
+                "exercise_id": {**ID, "description": "The catalog activity's id."},
+                "sets": {"type": "integer", "minimum": 1, "maximum": MAX_ACTIVITY_SETS},
+                "reps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_ACTIVITY_REPS,
+                    "description": "Reps of each set; give reps or duration_seconds, not both.",
+                },
+                "duration_seconds": {
+                    "type": "integer",
+                    "minimum": MIN_ACTIVITY_SECONDS,
+                    "maximum": MAX_ACTIVITY_SECONDS,
+                    "description": (
+                        "How long each set lasts, such as a 30-second stretch or a "
+                        "5-minute walk; give reps or duration_seconds, not both."
+                    ),
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Short guidance, such as 'each side' or 'skip if it pinches'.",
+                },
+            },
+            "required": ["exercise_id", "sets"],
+        },
+    }
+
+
 PROPOSE_WORKOUT_PLAN = ToolDeclaration(
     name="propose_workout_plan",
     description=(
-        "Propose a new workout plan for the user to review. It saves nothing: Formiq "
-        "shows the proposal to the user, and only their own approval in Formiq saves it. "
-        "Use it when no planned workout suits the day, after get_user_profile, "
-        "get_current_workout_plan and get_latest_workout_session have returned. Each "
-        "exercise must be an active Formiq catalog exercise whose id a tool returned. "
-        "Give max_minutes when the user said how much time they have, and "
-        "unavailable_equipment for equipment they do not have or cannot use: Formiq "
-        "rejects a proposal that does not fit them. Returns the proposal, with each "
-        "exercise's equipment and an estimate of its duration."
+        "Propose a new workout for the user to review: a warm-up, the main exercises and a "
+        "cool-down. It saves nothing: Formiq shows the proposal to the user, and only their "
+        "own approval in Formiq saves it. Use it when no planned workout suits the day, "
+        "after get_user_profile, get_current_workout_plan and get_latest_workout_session "
+        "have returned. Every exercise and activity must be an active Formiq catalog "
+        "exercise whose id a tool returned, used for a section its uses include: main "
+        "exercises MAIN_WORKOUT, warm-up activities WARM_UP, cool-down activities COOL_DOWN "
+        "(search_exercises by use finds them). Give max_minutes when "
+        "the user said how much time they have, and unavailable_equipment for equipment "
+        "they do not have or cannot use: Formiq rejects a proposal that does not fit them, "
+        "warm-up and cool-down included. Returns the proposal, with each exercise's "
+        "equipment and an estimate of each section's duration."
     ),
     parameters={
         "type": "object",
@@ -109,11 +163,15 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
                     f"{MAX_PROPOSAL_DAYS_AHEAD} days later."
                 ),
             },
+            "warm_up": _activities("warm-up", WorkoutSection.WARM_UP),
             "exercises": {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": MAX_PROPOSED_EXERCISES,
-                "description": "The exercises, in the order to do them.",
+                "description": (
+                    "The main workout's exercises, in the order to do them: catalog exercises "
+                    "whose uses include MAIN_WORKOUT."
+                ),
                 "items": {
                     "type": "object",
                     "properties": {
@@ -138,28 +196,33 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
                     "required": ["exercise_id", "sets", "reps"],
                 },
             },
+            "cool_down": _activities("cool-down", WorkoutSection.COOL_DOWN),
             "max_minutes": {
                 "type": "integer",
                 "minimum": 10,
                 "maximum": 180,
-                "description": "The minutes the user has, when they said.",
+                "description": (
+                    "The minutes the user has, when they said: the whole workout, warm-up "
+                    "and cool-down included, must fit."
+                ),
             },
             "unavailable_equipment": {
                 "type": "array",
-                "maxItems": 10,
+                "maxItems": MAX_UNAVAILABLE_EQUIPMENT,
                 "items": {"type": "string"},
                 "description": "Equipment, as the catalog names it, that the user cannot use.",
             },
         },
-        "required": ["name", "exercises"],
+        "required": ["name", "warm_up", "exercises", "cool_down"],
     },
 )
 
 GET_EXERCISE = ToolDeclaration(
     name="get_exercise",
     description=(
-        "Get an exercise from the Formiq exercise catalog by its id: description, "
-        "difficulty, movement pattern, the muscles it trains and the equipment it needs."
+        "Get an exercise from the Formiq exercise catalog by its id: description and "
+        "instructions, difficulty, movement pattern, its source's category, the workout "
+        "sections Formiq uses it for, the muscles it trains and the equipment it needs."
     ),
     parameters={
         "type": "object",
@@ -173,12 +236,37 @@ SEARCH_EXERCISES = ToolDeclaration(
     description=(
         "Find active exercises in the Formiq exercise catalog that match every filter "
         "given. At least one filter is required. Returns at most "
-        f"{MAX_SEARCH_RESULTS} exercises, ordered by name. Use it to suggest exercises or "
-        "alternatives from the catalog."
+        f"{MAX_SEARCH_RESULTS} exercises, ordered by name, and how many match. Use it to "
+        "suggest exercises or alternatives from the catalog: use finds main exercises "
+        "(MAIN_WORKOUT) and warm-up (WARM_UP) and cool-down (COOL_DOWN) activities. Narrow it "
+        "with muscle and available_equipment, so the few results returned fit the user."
     ),
     parameters={
         "type": "object",
         "properties": {
+            "use": {
+                "type": "string",
+                "enum": [section.value for section in WorkoutSection],
+                "description": "A workout section Formiq uses the exercise for.",
+            },
+            "muscle": {
+                "type": "string",
+                "description": (
+                    "A muscle group the exercise trains, as Formiq names it, such as Chest, "
+                    "Upper Back, Lats, Shoulders, Biceps, Triceps, Core, Glutes, Quadriceps, "
+                    "Hamstrings or Calves."
+                ),
+            },
+            "available_equipment": {
+                "type": "array",
+                "maxItems": MAX_SEARCH_EQUIPMENT,
+                "items": {"type": "string"},
+                "description": (
+                    "The equipment the user has, as the catalog names it: only exercises that "
+                    "need nothing else are returned. An empty list returns only exercises that "
+                    "need no equipment."
+                ),
+            },
             "equipment_id": {**ID, "description": "The id of equipment the exercise needs."},
             "movement_pattern": {
                 "type": "string",

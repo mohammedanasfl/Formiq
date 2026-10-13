@@ -260,3 +260,35 @@ button:disabled {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   overflow-wrap: anywhere;
 }
+
+.proposal {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 12px;
+  background: var(--panel);
+}
+
+.proposal h2 {
+  margin-top: 0;
+}
+
+.proposal h3 {
+  margin: 10px 0 0;
+  font-size: 0.95rem;
+}
+
+.exercises {
+  margin: 8px 0;
+  padding-left: 1.4em;
+}
+
+.exercises li {
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}
+
+.saved {
+  margin: 8px 0 0;
+  font-weight: 600;
+}

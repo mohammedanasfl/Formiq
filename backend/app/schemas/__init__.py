@@ -10,10 +10,13 @@ from app.schemas.exercise import (
     Difficulty,
     ExerciseEquipmentResponse,
     ExerciseFilters,
+    ExerciseImageResponse,
     ExerciseMuscleResponse,
     ExerciseResponse,
+    ExerciseSource,
     MovementPattern,
     MuscleRole,
+    WorkoutSection,
 )
 from app.schemas.muscle_group import MuscleGroupResponse
 from app.schemas.user import UserCreate, UserResponse
@@ -23,6 +26,7 @@ from app.schemas.user_profile import (
     UserProfileUpdate,
 )
 from app.schemas.workout_plan import (
+    PlanSection,
     WorkoutPlanCreate,
     WorkoutPlanExerciseCreate,
     WorkoutPlanExerciseResponse,
@@ -55,13 +59,17 @@ __all__ = [
     "Difficulty",
     "MovementPattern",
     "MuscleRole",
+    "WorkoutSection",
+    "ExerciseSource",
     "ExerciseFilters",
+    "ExerciseImageResponse",
     "ExerciseMuscleResponse",
     "ExerciseEquipmentResponse",
     "ExerciseResponse",
     "MuscleGroupResponse",
     "EquipmentResponse",
     "WorkoutPlanStatus",
+    "PlanSection",
     "WorkoutPlanCreate",
     "WorkoutPlanUpdate",
     "WorkoutPlanResponse",

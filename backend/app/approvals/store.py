@@ -20,10 +20,9 @@ mismatched, pending, rejected, expired, used or stale approval, a changed
 proposal or a safety flag is a refusal, never a fallback to "approved".
 
 ApprovalStore keeps its records in memory, per instance. The coach's workout
-plan proposals use one store per process (app.api.dependencies): a proposal
-made in another process, or before a restart, is not found, so its approval
-fails closed. Durable, shared approvals would keep the same records in the
-database with the same rules (and unique ids enforced there).
+plan proposals no longer use it: they are kept in PostgreSQL, with the same
+rules, by app.services.plan_proposal_service. This general store is kept, and
+tested, but no application code uses it.
 """
 
 import threading

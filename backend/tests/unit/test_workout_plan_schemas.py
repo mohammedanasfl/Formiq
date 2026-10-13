@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from app.models import WorkoutPlan, WorkoutPlanExercise
 from app.schemas import (
+    PlanSection,
     WorkoutPlanCreate,
     WorkoutPlanExerciseCreate,
     WorkoutPlanExerciseUpdate,
@@ -19,8 +20,10 @@ TIMESTAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
 PLAN_EXERCISE = {
     "exercise_id": 1,
     "exercise_order": 1,
+    "section": "MAIN_WORKOUT",
     "sets": 3,
     "reps": 8,
+    "duration_seconds": None,
     "weight_kg": 50.0,
     "rest_seconds": 120,
     "notes": "Controlled tempo",
@@ -40,6 +43,9 @@ INVALID_PLAN_EXERCISE_VALUES = [
     ("weight_kg", float("nan")),
     ("rest_seconds", -1),
     ("notes", ""),
+    ("section", "warm_up"),
+    ("section", "STRETCH"),
+    ("duration_seconds", 0),
     ("sets", "three"),
     # beyond the integer column; not a training limit
     ("reps", 2_147_483_648),
@@ -108,6 +114,23 @@ def test_plan_exercise_create_optional_fields_default_to_none():
     exercise = WorkoutPlanExerciseCreate(exercise_id=1, exercise_order=1, sets=3, reps=8)
 
     assert (exercise.weight_kg, exercise.rest_seconds, exercise.notes) == (None, None, None)
+    # a plan made without sections is all main workout, as before sections existed
+    assert (exercise.section, exercise.duration_seconds) == (PlanSection.MAIN_WORKOUT, None)
+
+
+def test_section_values():
+    assert [section.value for section in PlanSection] == ["WARM_UP", "MAIN_WORKOUT", "COOL_DOWN"]
+
+
+def test_a_set_has_reps_or_a_duration_as_its_target():
+    timed = WorkoutPlanExerciseCreate.model_validate(
+        {**PLAN_EXERCISE, "section": "COOL_DOWN", "reps": None, "duration_seconds": 30}
+    )
+
+    assert (timed.section, timed.reps, timed.duration_seconds) == (PlanSection.COOL_DOWN, None, 30)
+    for target in ({"reps": None}, {"duration_seconds": 30}):
+        with pytest.raises(ValidationError, match="one target: reps or duration_seconds"):
+            WorkoutPlanExerciseCreate.model_validate({**PLAN_EXERCISE, **target})
 
 
 @pytest.mark.parametrize(("field", "value"), INVALID_PLAN_EXERCISE_VALUES)
@@ -215,8 +238,10 @@ def test_plan_response_includes_the_plan_exercises():
                 "workout_plan_id": 10,
                 "exercise_id": 1,
                 "exercise_order": 1,
+                "section": "MAIN_WORKOUT",
                 "sets": 3,
                 "reps": 8,
+                "duration_seconds": None,
                 "weight_kg": 50.0,
                 "rest_seconds": 120,
                 "notes": None,

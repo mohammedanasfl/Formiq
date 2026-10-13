@@ -20,7 +20,7 @@ from app.services import (
     WorkoutSessionService,
 )
 from app.tools import FormiqTools
-from app.tools.limits import MAX_SEARCH_RESULTS
+from app.tools.limits import MAX_INSTRUCTION_STEPS, MAX_SEARCH_RESULTS
 from tests.integration.catalog import add_equipment, add_exercise, add_muscle_group
 from tests.integration.workout_plans import add_plan, add_user
 from tests.integration.workout_sessions import add_session
@@ -194,8 +194,10 @@ def test_plan_with_its_prescribed_exercises(tools, db_session, user, catalog_exe
                     "exercise_id": bench,
                     "exercise_name": "Barbell Bench Press",
                     "exercise_order": 1,
+                    "section": "MAIN_WORKOUT",
                     "sets": 3,
                     "reps": 8,
+                    "duration_seconds": None,
                     "weight_kg": 20.0,
                     "rest_seconds": 90,
                     "notes": None,
@@ -204,8 +206,10 @@ def test_plan_with_its_prescribed_exercises(tools, db_session, user, catalog_exe
                     "exercise_id": push_up,
                     "exercise_name": "Push-Up",
                     "exercise_order": 2,
+                    "section": "MAIN_WORKOUT",
                     "sets": 3,
                     "reps": 8,
+                    "duration_seconds": None,
                     "weight_kg": None,
                     "rest_seconds": None,
                     "notes": "Slow tempo",
@@ -388,8 +392,12 @@ def test_exercise_from_the_catalog(tools, user, catalog_exercise_ids):
         "exercise_id": bench,
         "name": "Barbell Bench Press",
         "description": output["description"],
+        # Formiq's own exercise: a description, and no upstream steps or category
+        "instructions": [],
         "difficulty": "INTERMEDIATE",
         "movement_pattern": "HORIZONTAL_PUSH",
+        "category": None,
+        "uses": ["MAIN_WORKOUT"],
         "muscles": [
             {"name": "Chest", "role": "PRIMARY"},
             {"name": "Front Deltoid", "role": "SECONDARY"},
@@ -397,6 +405,7 @@ def test_exercise_from_the_catalog(tools, user, catalog_exercise_ids):
         ],
         "equipment": ["Barbell", "Bench"],
         "is_active": True,
+        "truncated": False,
     }
     assert output["description"].startswith("Lie on a bench")
 
@@ -446,6 +455,7 @@ def test_search_by_equipment(tools, db_session, user):
                 "name": "Test Goblet Squat",
                 "difficulty": "BEGINNER",
                 "movement_pattern": "SQUAT",
+                "uses": [],
                 "muscles": [],
                 "equipment": ["Test Kettlebell"],
             },
@@ -454,18 +464,20 @@ def test_search_by_equipment(tools, db_session, user):
                 "name": "Test Swing",
                 "difficulty": "BEGINNER",
                 "movement_pattern": "SQUAT",
+                "uses": [],
                 "muscles": ["Test Chest"],
                 "equipment": ["Test Kettlebell"],
             },
         ],
         "count": 2,
+        "total_matches": 2,
     }
 
 
 def test_search_by_movement_pattern(tools, user):
     result = run(tools, "search_exercises", user_id=user.id, movement_pattern="HORIZONTAL_PUSH")
 
-    assert names(result) == ["Barbell Bench Press", "Push-Up"]
+    assert names(result) == ["Barbell Bench Press", "Dumbbell Bench Press", "Push-Up"]
 
 
 def test_search_by_difficulty(tools, user):
@@ -475,10 +487,23 @@ def test_search_by_difficulty(tools, user):
         "Barbell Back Squat",
         "Barbell Bench Press",
         "Cable Woodchop",
+        "Kettlebell Swing",
+        "Pike Push-Up",
         "Pull-Up",
         "Romanian Deadlift",
     ]
-    assert result["output"]["count"] == 5
+    assert result["output"]["count"] == 7
+
+
+@pytest.mark.parametrize(
+    ("pattern", "count"), [("MOBILITY", 8), ("STRETCH", 10), ("CARDIO", 5)]
+)
+def test_search_finds_every_warm_up_and_cool_down_activity_of_a_kind(tools, user, pattern, count):
+    # each kind fits in one search, so the coach sees all of them
+    result = run(tools, "search_exercises", user_id=user.id, movement_pattern=pattern)
+
+    assert result["output"]["count"] == count <= MAX_SEARCH_RESULTS
+    assert {item["difficulty"] for item in result["output"]["exercises"]} == {"BEGINNER"}
 
 
 def test_search_with_combined_filters(tools, user):
@@ -490,7 +515,7 @@ def test_search_with_combined_filters(tools, user):
         difficulty="BEGINNER",
     )
 
-    assert names(result) == ["Push-Up"]
+    assert names(result) == ["Dumbbell Bench Press", "Push-Up"]
 
 
 def test_search_combines_equipment_with_the_other_filters(tools, db_session, user):
@@ -513,6 +538,8 @@ def test_search_returns_at_most_ten_exercises(tools, db_session, user):
     result = run(tools, "search_exercises", user_id=user.id, equipment_id=rack.id)
 
     assert result["output"]["count"] == MAX_SEARCH_RESULTS == 10
+    # and says how many match in all
+    assert result["output"]["total_matches"] == MAX_SEARCH_RESULTS + 2
     assert names(result) == [f"Test Rack Exercise {number:02}" for number in range(10)]
 
 
@@ -521,7 +548,7 @@ def test_search_without_matches(tools, db_session, user):
 
     result = run(tools, "search_exercises", user_id=user.id, equipment_id=unused.id)
 
-    assert result == {"output": {"exercises": [], "count": 0}}
+    assert result == {"output": {"exercises": [], "count": 0, "total_matches": 0}}
 
 
 def test_search_leaves_out_inactive_exercises(tools, db_session, user):
@@ -538,9 +565,103 @@ def test_search_without_filters_is_rejected(tools, user):
     result = run(tools, "search_exercises", user_id=user.id)
 
     assert result["error"]["code"] == "INVALID_INPUT"
-    assert "at least one of equipment_id, movement_pattern, difficulty" in (
-        result["error"]["message"]
+    assert (
+        "at least one of use, muscle, available_equipment, equipment_id, movement_pattern, "
+        "difficulty is required" in result["error"]["message"]
     )
+
+
+def test_search_by_use_finds_the_exercises_formiq_uses_for_that_section(tools, db_session, user):
+    # a muscle group of their own keeps the seeded catalog out of the results
+    muscle = add_muscle_group(db_session, "Test Use Muscle")
+    add_exercise(db_session, "Test Warm Drill", primary=[muscle], uses=["WARM_UP"])
+    add_exercise(
+        db_session, "Test Drill Both Ends", primary=[muscle], uses=["WARM_UP", "COOL_DOWN"]
+    )
+    add_exercise(db_session, "Test Main Only", primary=[muscle], uses=["MAIN_WORKOUT"])
+    add_exercise(db_session, "Test Not Classified", primary=[muscle])
+
+    def found(use):
+        result = run(tools, "search_exercises", user_id=user.id, use=use, muscle=muscle.name)
+        return {item["name"]: item["uses"] for item in result["output"]["exercises"]}
+
+    assert found("WARM_UP") == {
+        "Test Drill Both Ends": ["WARM_UP", "COOL_DOWN"],
+        "Test Warm Drill": ["WARM_UP"],
+    }
+    assert list(found("COOL_DOWN")) == ["Test Drill Both Ends"]
+    assert list(found("MAIN_WORKOUT")) == ["Test Main Only"]
+
+
+def test_search_by_muscle_name_and_the_equipment_the_user_has(tools, db_session, user):
+    glutes = add_muscle_group(db_session, "Test Glutes")
+    band = add_equipment(db_session, "Test Loop Band")
+    bar = add_equipment(db_session, "Test Bar")
+    add_exercise(db_session, "Test Bridge", primary=[glutes], uses=["MAIN_WORKOUT"])
+    add_exercise(db_session, "Test Band Walk", primary=[glutes], equipment=[band])
+    add_exercise(db_session, "Test Bar Thrust", primary=[glutes], equipment=[bar, band])
+
+    def found(**filters):
+        result = run(tools, "search_exercises", user_id=user.id, muscle="test glutes", **filters)
+        return names(result)
+
+    assert found() == ["Test Band Walk", "Test Bar Thrust", "Test Bridge"]
+    # an empty list: only what needs no equipment at all
+    assert found(available_equipment=[]) == ["Test Bridge"]
+    # only what needs nothing beyond what the user has, matched without case
+    assert found(available_equipment=["test loop band"]) == ["Test Band Walk", "Test Bridge"]
+    assert found(available_equipment=["Test Loop Band", "Test Bar"]) == [
+        "Test Band Walk",
+        "Test Bar Thrust",
+        "Test Bridge",
+    ]
+    assert found(available_equipment=[], use="MAIN_WORKOUT") == ["Test Bridge"]
+
+
+@pytest.mark.parametrize(
+    ("filters", "message"),
+    [
+        ({"muscle": "Pecs"}, "the catalog has no muscle group 'Pecs'; it has "),
+        (
+            {"available_equipment": ["Dumbbell", "Hover Board"]},
+            "no equipment 'Hover Board'; it has ",
+        ),
+        ({"use": "MAIN"}, "use: Input should be 'WARM_UP', 'MAIN_WORKOUT' or 'COOL_DOWN'"),
+    ],
+)
+def test_search_names_the_catalog_values_when_one_is_unknown(tools, user, filters, message):
+    result = run(tools, "search_exercises", user_id=user.id, **filters)
+
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert message in result["error"]["message"]
+
+
+def test_an_imported_exercise_shows_its_upstream_steps_and_category(tools, db_session, user):
+    steps = [f"Step {number}." for number in range(1, MAX_INSTRUCTION_STEPS + 3)]
+    imported = add_exercise(
+        db_session,
+        "Test Imported Stretch",
+        movement_pattern=None,
+        uses=["COOL_DOWN"],
+        source="FREE_EXERCISE_DB",
+        source_id="Test_Imported_Stretch",
+        source_record={
+            "id": "Test_Imported_Stretch",
+            "category": "stretching",
+            "instructions": steps,
+        },
+    )
+
+    output = run(tools, "get_exercise", user_id=user.id, exercise_id=imported.id)["output"]
+
+    assert (output["category"], output["uses"], output["movement_pattern"]) == (
+        "stretching",
+        ["COOL_DOWN"],
+        None,
+    )
+    # the steps in order, bounded
+    assert output["instructions"] == steps[:MAX_INSTRUCTION_STEPS]
+    assert output["truncated"] is True
 
 
 # read-only

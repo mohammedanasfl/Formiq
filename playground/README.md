@@ -5,7 +5,7 @@
 > the page's memory only. Never expose the playground beyond your own machine.
 
 A small, disposable web page for manually testing the existing coach endpoint,
-`POST /coach/message`, before the React Native app exists. It is not part of the Formiq product,
+`POST /coach/message`, and approving the workouts it proposes, before the React Native app exists. It is not part of the Formiq product,
 and nothing in `backend/app` depends on it. Delete the folder and Formiq is unchanged.
 
 ## What it is
@@ -23,8 +23,10 @@ playground/
 
 - **Same API.** The page signs in with the existing `POST /auth/login`, and sends
   `{message, history}` with `Authorization: Bearer <token>` to the existing
-  `POST /coach/message`, exactly as any client would. There is no second API, no database
-  access, and no special path around the coach's checks or authentication.
+  `POST /coach/message`, exactly as any client would. A proposal is approved with the existing
+  `POST /coach/proposals/{proposal_id}/approve`, sending the proposal's `binding` as received.
+  There is no second API, no database access, and no special path around the coach's checks,
+  the approval or authentication.
 - **Same origin.** `server.py` runs the unchanged Formiq application on `127.0.0.1` and serves the
   page at `/playground/`, so the browser needs no CORS. The production application has no CORS
   configuration, and none was added.
@@ -76,6 +78,15 @@ with the API while signed in.
   50 turns are sent, the API's limit. On success, the message and the reply join the history. On a
   failure, nothing joins it and the message stays in the box.
 - **Clear Conversation** empties the history.
+- **Proposed workout.** When a reply carries a `proposal`, the page shows its name, date,
+  estimated minutes (in all and per section), expiry, and its warm-up, main workout and cool-down,
+  each exercise with its sets and reps or duration, marked as not saved. **Approve and save**
+  sends its id and binding with the token. "Saved as workout plan N", with how many warm-up, main
+  and cool-down exercises the saved plan has, appears only after the API answers 201 with the
+  plan; any other answer (404, 409, 401, 422, no response) is shown as an error, and nothing is
+  marked saved. The next reply, a clear, a sign-in or a sign-out removes it from the
+  page (an unapproved proposal simply expires on the server after 30 minutes). The proposal is
+  kept in PostgreSQL, so it can still be approved after the server restarts.
 - **Quick tests** only fill the message box. You always send by hand.
 - **Add a turn to the history** puts a hand-made `user` or `coach` turn into the history, shown as
   injected, for history-poisoning tests. Any client can send such a history; the playground adds
@@ -105,9 +116,12 @@ PostgreSQL: the model is a fake, and the database session a mock. The backend's 
 | | Test | How | Expected |
 |---|---|---|---|
 | [ ] | Normal profile question | User 1: "What is my current fitness goal?" | Answer from user 1's profile; tools include `get_user_profile`; `RETRIEVE_THEN_ANSWER` |
-| [ ] | Daily recommendation | "What should I do today?" | `DAILY_WORKOUT`; tools include `get_user_profile`, `get_current_workout_plan`, `get_latest_workout_session`; today's planned exercises with their sets, reps and prescribed weights, or a plain "no plan" with a next step |
+| [ ] | Daily recommendation | "What should I do today?" | `DAILY_WORKOUT`; tools include `get_user_profile`, `get_current_workout_plan`, `get_latest_workout_session` (a read that found nothing, such as no workout yet, is not listed under *Tools used* but counts in *Tool calls executed*); today's planned exercises with their sets, reps and prescribed weights, or a plain "no plan" with a next step |
 | [ ] | Daily, with a constraint | The 20-minutes, tired and no-dumbbells quick tests | A shorter or lighter version of today's plan, or rest; no invented weights |
-| [ ] | Proposed plan | A user with a profile and no plan for today: "What should I do today?" | Tools include `propose_workout_plan`; the reply asks the user to review and approve, never says it was saved. The playground shows only the reply: send the same message from http://localhost:2001/docs to see the `proposal`, then approve it at `POST /coach/proposals/{proposal_id}/approve` with its `binding`. A second approval gives 409 |
+| [ ] | Proposed plan | A user with a profile and no plan for today: "What should I do today?" | Tools include `search_exercises` and `propose_workout_plan`; the reply asks the user to review and approve, never says it was saved. The *Proposed workout* panel shows a warm-up, a main workout and a cool-down, all from the catalog and fitting the user's constraints, with minutes that add up, marked not saved. **Approve and save** shows "Saved as workout plan N" with the same section counts, and the plan, each exercise with its `section`, is at `GET /users/{id}/workout-plans/N` in http://localhost:2001/docs. Typing "yes" in the chat saves nothing |
+| [ ] | Proposed plan, constrained | "I have 25 minutes, no equipment, and I can't kneel. What should I do today?" | The whole workout fits 25 minutes; no exercise needs equipment; no kneeling activity (such as Child's Pose, Cat-Cow, Cat Stretch, Kneeling Hip Flexor Stretch, Bird Dog, Hip Circles (prone)); every exercise from the catalog, with `uses` that include its section |
+| [ ] | Approval refused | Approve the same proposal again from /docs | 409: shown as "Not approved", never as saved |
+| [ ] | Approval after a restart | Get a proposal, restart the server, then **Approve and save** it (within 30 minutes) | 201: proposals are kept in PostgreSQL, so a restart loses none; approving it again is a 409 |
 | [ ] | Workout history question | "What workout did I do recently?" | Asks for a session id, or answers only from a session it read; never invents one |
 | [ ] | Exercise question | "What muscles does exercise 1 train?" | Uses `get_exercise`, or answers generally and says so |
 | [ ] | Ambiguous question | "Make it harder." | `ASK_CLARIFICATION` |
@@ -142,6 +156,7 @@ For every behavior that is not as expected, record:
 - **Local only.** It listens on `127.0.0.1` and refuses to start outside `APP_ENV=development`.
   Do not put it behind a proxy or tunnel.
 - **Execution metadata comes only from this launcher.** It exists only in the launcher's process.
-  The production API returns only `{"reply": ...}`.
+  The production API returns only `{"reply": ...}`, plus `proposal` when the coach proposed a
+  workout.
 - **A 500 has no metadata.** An unexpected server error (500) carries no execution headers: the
   application's error handler answers it outside the launcher's middleware.

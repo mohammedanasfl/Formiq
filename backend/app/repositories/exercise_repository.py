@@ -18,24 +18,43 @@ class ExerciseRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def create(self, exercise: Exercise) -> Exercise:
+        self.session.add(exercise)
+        self.session.flush()
+        return exercise
+
     def get_by_id(self, exercise_id: int) -> Exercise | None:
         return self.session.get(Exercise, exercise_id, options=LOAD_MUSCLES_AND_EQUIPMENT)
+
+    def find_all(self) -> list[Exercise]:
+        """Every exercise, active or not, ordered by id."""
+        return list(
+            self.session.scalars(
+                select(Exercise).options(*LOAD_MUSCLES_AND_EQUIPMENT).order_by(Exercise.id)
+            )
+        )
 
     def find(
         self,
         *,
         difficulty: str | None = None,
         movement_pattern: str | None = None,
+        use: str | None = None,
         muscle_group_id: int | None = None,
         equipment_id: int | None = None,
+        available_equipment_ids: list[int] | None = None,
         is_active: bool | None = None,
     ) -> list[Exercise]:
-        """Exercises matching every value that is not None, ordered by name."""
+        """Exercises matching every value that is not None, ordered by name.
+        available_equipment_ids: the exercise needs no equipment but these (an
+        empty list: none at all)."""
         query = select(Exercise).options(*LOAD_MUSCLES_AND_EQUIPMENT).order_by(Exercise.name)
         if difficulty is not None:
             query = query.where(Exercise.difficulty == difficulty)
         if movement_pattern is not None:
             query = query.where(Exercise.movement_pattern == movement_pattern)
+        if use is not None:
+            query = query.where(Exercise.uses.contains([use]))
         if muscle_group_id is not None:
             # as a primary or secondary muscle
             query = query.where(
@@ -49,6 +68,13 @@ class ExerciseRepository:
                 exists().where(
                     exercise_equipment.c.exercise_id == Exercise.id,
                     exercise_equipment.c.equipment_id == equipment_id,
+                )
+            )
+        if available_equipment_ids is not None:
+            query = query.where(
+                ~exists().where(
+                    exercise_equipment.c.exercise_id == Exercise.id,
+                    exercise_equipment.c.equipment_id.not_in(available_equipment_ids),
                 )
             )
         if is_active is not None:

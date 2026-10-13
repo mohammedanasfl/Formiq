@@ -92,6 +92,7 @@ def test_a_guessed_catalog_id_never_reaches_the_catalog(service_session, user):
     assert guess["error"]["code"] == "ID_NOT_GROUNDED"
     assert [item["name"] for item in search["output"]["exercises"]] == [
         "Barbell Bench Press",
+        "Dumbbell Bench Press",
         "Push-Up",
     ]
     assert reply == "Try the push-up."

@@ -17,6 +17,7 @@ ENV_EXAMPLE = Path(__file__).resolve().parents[2] / ".env.example"
 def no_gemini_environment(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("GEMINI_TEST_MODEL", raising=False)
     monkeypatch.delenv("GEMINI_TIMEOUT_SECONDS", raising=False)
 
 
@@ -34,6 +35,20 @@ def test_defaults_are_gemini_flash_without_a_key(no_gemini_environment):
     assert settings.gemini_model == "gemini-3.8-flash"
     assert settings.gemini_api_key is None
     assert settings.gemini_timeout_seconds == 30
+    # no test model unless one is configured: the live smoke test is then skipped
+    assert settings.gemini_test_model is None
+
+
+def test_the_test_model_is_configured_apart_from_the_applications(
+    no_gemini_environment, monkeypatch
+):
+    monkeypatch.setenv("GEMINI_TEST_MODEL", "gemini-3.5-flash-lite")
+
+    settings = Settings(_env_file=None, database_url="postgresql+psycopg://x")
+
+    assert settings.gemini_test_model == "gemini-3.5-flash-lite"
+    # the application's model is unchanged by it
+    assert settings.gemini_model == "gemini-3.8-flash"
 
 
 def test_key_model_and_timeout_come_from_the_environment(no_gemini_environment, monkeypatch):
@@ -57,6 +72,7 @@ def test_env_example_names_the_variables_without_a_key():
     assert "GEMINI_API_KEY=" in lines
     assert "GEMINI_MODEL=gemini-3.8-flash" in lines
     assert "GEMINI_TIMEOUT_SECONDS=30" in lines
+    assert "GEMINI_TEST_MODEL=" in lines
 
 
 @pytest.mark.parametrize("timeout", ["0", "-5", "inf", "nan", "soon"])
@@ -73,6 +89,7 @@ def test_provider_uses_the_configured_key_model_and_timeout(provider_cache, monk
         database_url="postgresql+psycopg://x",
         gemini_api_key="test-secret-key",
         gemini_model="gemini-other",
+        gemini_test_model="gemini-test-only",
         gemini_timeout_seconds=12.5,
     )
     monkeypatch.setattr(dependencies, "settings", configured)
@@ -80,6 +97,7 @@ def test_provider_uses_the_configured_key_model_and_timeout(provider_cache, monk
     with patch("app.ai.gemini.genai.Client") as client_class:
         provider = get_ai_provider()
 
+    # the application's model; the test model is for the live smoke test only
     assert provider.model == "gemini-other"
     client_class.assert_called_once_with(
         api_key="test-secret-key", http_options=types.HttpOptions(timeout=12_500)

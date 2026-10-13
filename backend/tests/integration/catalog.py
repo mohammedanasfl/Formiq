@@ -33,14 +33,17 @@ def add_exercise(
     secondary: Sequence[MuscleGroup] = (),
     equipment: Sequence[Equipment] = (),
     difficulty: str = "BEGINNER",
-    movement_pattern: str = "SQUAT",
+    movement_pattern: str | None = "SQUAT",
     is_active: bool = True,
+    **fields,
 ) -> Exercise:
+    """fields: any other Exercise column, such as uses or source_record."""
     exercise = Exercise(
         name=name,
         difficulty=difficulty,
         movement_pattern=movement_pattern,
         is_active=is_active,
+        **fields,
         muscles=[ExerciseMuscle(muscle_group=group, role="PRIMARY") for group in primary]
         + [ExerciseMuscle(muscle_group=group, role="SECONDARY") for group in secondary],
         equipment=list(equipment),

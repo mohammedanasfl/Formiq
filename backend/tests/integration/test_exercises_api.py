@@ -8,6 +8,8 @@ holds the seeded catalog.
 
 import pytest
 
+from app.api.dependencies import get_exercise_images_dir
+from app.main import app
 from app.schemas import EquipmentResponse, ExerciseResponse, MuscleGroupResponse
 from tests.integration.catalog import (
     add_equipment,
@@ -54,14 +56,23 @@ def test_list_exercises_returns_200_and_exercises_with_muscles_and_equipment(
         "id": press["id"],
         "name": "Test Press",
         "description": None,
+        "instructions": [],
         "difficulty": "INTERMEDIATE",
         "movement_pattern": "HORIZONTAL_PUSH",
+        "category": None,
+        "uses": [],
         # each muscle is its group's id and name, and its role; primary first
         "muscles": [
             {"id": press["chest"], "name": "Test Chest", "role": "PRIMARY"},
             {"id": press["triceps"], "name": "Test Triceps", "role": "SECONDARY"},
         ],
         "equipment": [{"id": press["barbell"], "name": "Test Barbell"}],
+        # no image: the fallback a client shows a placeholder for
+        "images": [],
+        # Formiq's own exercise
+        "source": "FORMIQ",
+        "source_id": None,
+        "source_version": None,
         "is_active": True,
     }
 
@@ -231,3 +242,124 @@ def test_list_reference_data_filters_inactive_rows_ordered_by_name(
 @pytest.mark.parametrize("path", ["/muscle-groups", "/equipment"])
 def test_list_reference_data_with_invalid_is_active_returns_422(catalog_client, path):
     assert catalog_client.get(path, params={"is_active": "maybe"}).status_code == 422
+
+
+def test_list_exercises_by_use(catalog_client, catalog_session):
+    muscle = add_muscle_group(catalog_session, "Test Use Muscle")
+    add_exercise(catalog_session, "Test Stretch", primary=[muscle], uses=["COOL_DOWN"])
+    add_exercise(catalog_session, "Test Drill", primary=[muscle], uses=["WARM_UP", "COOL_DOWN"])
+    add_exercise(catalog_session, "Test Lift", primary=[muscle], uses=["MAIN_WORKOUT"])
+
+    def listed(use):
+        response = catalog_client.get(
+            "/exercises", params={"use": use, "muscle_group_id": muscle.id}
+        )
+        assert response.status_code == 200
+        return names(response)
+
+    assert listed("COOL_DOWN") == ["Test Drill", "Test Stretch"]
+    assert listed("WARM_UP") == ["Test Drill"]
+    assert listed("MAIN_WORKOUT") == ["Test Lift"]
+    assert catalog_client.get("/exercises", params={"use": "MAIN"}).status_code == 422
+
+
+# GET /exercises/{exercise_id}/images/{position}
+
+JPEG = b"\xff\xd8\xff\xe0 test jpeg"
+PNG = b"\x89PNG\r\n\x1a\n test png"
+
+
+@pytest.fixture
+def images_dir(tmp_path):
+    """The images directory the API serves from, for these tests."""
+    root = tmp_path / "exercise-images"
+    (root / "Test_Curl").mkdir(parents=True)
+    (root / "Test_Curl" / "0.jpg").write_bytes(JPEG)
+    (root / "Test_Curl" / "1.png").write_bytes(PNG)
+    (tmp_path / "secret.jpg").write_bytes(b"not an exercise image")
+    app.dependency_overrides[get_exercise_images_dir] = lambda: root
+    try:
+        yield root
+    finally:
+        app.dependency_overrides.pop(get_exercise_images_dir, None)
+
+
+@pytest.fixture
+def curl(catalog_session, images_dir):
+    return add_exercise(
+        catalog_session,
+        "Test Curl",
+        movement_pattern=None,
+        image_paths=["Test_Curl/0.jpg", "Test_Curl/1.png", "Test_Curl/2.jpg"],
+    )
+
+
+def test_an_exercise_lists_its_images_as_api_urls(catalog_client, curl):
+    exercise = catalog_client.get(f"/exercises/{curl.id}").json()
+
+    assert exercise["images"] == [
+        {"position": 0, "url": f"/exercises/{curl.id}/images/0"},
+        {"position": 1, "url": f"/exercises/{curl.id}/images/1"},
+        {"position": 2, "url": f"/exercises/{curl.id}/images/2"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("position", "body", "media_type"), [(0, JPEG, "image/jpeg"), (1, PNG, "image/png")]
+)
+def test_an_image_is_served_by_its_position(catalog_client, curl, position, body, media_type):
+    # the client follows the URL the exercise gives
+    url = catalog_client.get(f"/exercises/{curl.id}").json()["images"][position]["url"]
+
+    response = catalog_client.get(url)
+
+    assert response.status_code == 200
+    assert response.content == body
+    assert response.headers["content-type"] == media_type
+    assert response.headers["cache-control"] == "public, max-age=86400"
+
+
+def test_a_missing_image_is_the_same_404_and_says_nothing_about_files(
+    catalog_client, curl, images_dir
+):
+    missing = [
+        f"/exercises/{curl.id}/images/2",  # listed, but its file is gone
+        f"/exercises/{curl.id}/images/3",  # no such position
+        "/exercises/2147483647/images/0",  # no such exercise
+    ]
+    for url in missing:
+        response = catalog_client.get(url)
+        assert (response.status_code, response.json()) == (404, {"detail": "image not found"}), url
+        assert str(images_dir) not in response.text
+
+
+def test_an_exercise_without_images_has_an_empty_list_and_no_image(catalog_client, press):
+    assert catalog_client.get(f"/exercises/{press['id']}").json()["images"] == []
+    assert catalog_client.get(f"/exercises/{press['id']}/images/0").status_code == 404
+
+
+def test_a_stored_path_outside_the_images_directory_is_never_served(
+    catalog_client, catalog_session, images_dir
+):
+    # paths the import would never store, written directly
+    exercise = add_exercise(
+        catalog_session,
+        "Test Bad Paths",
+        image_paths=["../secret.jpg", "/etc/passwd", "Test_Curl/../../secret.jpg"],
+    )
+    (images_dir / "Escape").symlink_to(images_dir.parent)
+    exercise.image_paths = [*exercise.image_paths, "Escape/0.jpg"]
+    catalog_session.flush()
+
+    for position in range(4):
+        response = catalog_client.get(f"/exercises/{exercise.id}/images/{position}")
+        assert response.status_code == 404
+        assert b"not an exercise image" not in response.content
+
+
+@pytest.mark.parametrize("position", ["-1", "1000", "0.5", "..%2F..%2Fsecret.jpg", "x"])
+def test_an_invalid_position_returns_422_or_404(catalog_client, curl, position):
+    response = catalog_client.get(f"/exercises/{curl.id}/images/{position}")
+
+    assert response.status_code in (404, 422)
+    assert b"not an exercise image" not in response.content

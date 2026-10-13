@@ -16,7 +16,10 @@
     <main class="layout">
       <section class="controls" aria-label="Controls">
         <h1>Formiq Agent Playground</h1>
-        <p class="note">Developer test tool for <code>POST /coach/message</code>. Not the Formiq app.</p>
+        <p class="note">
+          Developer test tool for <code>POST /coach/message</code> and approving its proposals. Not the
+          Formiq app.
+        </p>
 
         <fieldset>
           <legend>Sign in</legend>
@@ -75,6 +78,16 @@
         <h2>Conversation <span class="note" id="turn-count">(0 turns in memory)</span></h2>
         <div id="notice" class="notice" hidden></div>
         <ol id="conversation" class="conversation" aria-live="polite"></ol>
+
+        <section id="proposal" class="proposal" aria-label="Proposed workout" hidden>
+          <h2>Proposed workout <span class="note">(not saved until you approve it)</span></h2>
+          <dl id="proposal-facts" class="facts"></dl>
+          <div id="proposal-sections"></div>
+          <div class="row">
+            <button id="approve" type="button" class="primary">Approve and save</button>
+          </div>
+          <p id="proposal-saved" class="saved" role="status" hidden></p>
+        </section>
 
         <div id="error" class="error" hidden>
           <p id="error-message"></p>

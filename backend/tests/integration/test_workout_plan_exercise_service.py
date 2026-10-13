@@ -189,7 +189,7 @@ def test_update_exercise_can_clear_optional_fields(
     assert {key: stored[key] for key in nullable} == nullable
 
 
-@pytest.mark.parametrize("field", ["exercise_id", "exercise_order", "sets", "reps"])
+@pytest.mark.parametrize("field", ["exercise_id", "exercise_order", "section", "sets"])
 def test_update_exercise_rejects_null_for_required_fields(
     service, user, make_plan, test_engine, field
 ):
@@ -202,6 +202,41 @@ def test_update_exercise_rejects_null_for_required_fields(
         )
 
     assert stored_plan(test_engine, plan.id) == before
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"reps": None}, {"duration_seconds": 30}],
+    ids=["no_target", "two_targets"],
+)
+def test_update_exercise_keeps_one_target_per_set(service, user, make_plan, test_engine, change):
+    plan = make_plan()
+    before = stored_plan(test_engine, plan.id)
+
+    with pytest.raises(InvalidWorkoutPlanError, match="one target: reps or duration_seconds"):
+        service.update_exercise(
+            user.id, plan.id, plan.exercises[0].id, WorkoutPlanExerciseUpdate(**change)
+        )
+
+    assert stored_plan(test_engine, plan.id) == before
+
+
+def test_update_exercise_can_make_a_set_timed(service, user, make_plan, test_engine):
+    plan = make_plan()
+
+    service.update_exercise(
+        user.id,
+        plan.id,
+        plan.exercises[0].id,
+        WorkoutPlanExerciseUpdate(section="COOL_DOWN", reps=None, duration_seconds=30),
+    )
+
+    stored = stored_plan(test_engine, plan.id)["exercises"][0]
+    assert (stored["section"], stored["reps"], stored["duration_seconds"]) == (
+        "COOL_DOWN",
+        None,
+        30,
+    )
 
 
 def test_update_exercise_rejects_an_unknown_exercise(

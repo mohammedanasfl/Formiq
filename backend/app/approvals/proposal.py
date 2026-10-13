@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -243,6 +244,42 @@ def _frozen(value: Scalar | Records) -> Value:
     if isinstance(value, list):
         return tuple(tuple(sorted(record.items())) for record in value)
     return value
+
+
+@dataclass(frozen=True)
+class ProposalTerms:
+    """When a proposal is made, and how long it may wait for the user's
+    approval: Formiq's clock and the time to live, a product decision
+    (app.api.dependencies), given by the caller."""
+
+    clock: Callable[[], datetime]
+    ttl: timedelta
+
+
+def restore(
+    *,
+    proposal_id: str,
+    trusted_user_id: int,
+    action: WriteAction,
+    parameters: dict[str, Scalar | Records],
+    created_at: datetime,
+    expires_at: datetime,
+) -> WriteProposal:
+    """A stored new-resource proposal (no target id, no version), as propose()
+    made it: parameters are its values() as they were stored. Its binding is
+    the original's only if nothing about it changed, so a stored proposal that
+    was altered no longer matches the binding it was shown with."""
+    resource_type, _ = TARGETS[action]
+    return WriteProposal(
+        proposal_id=proposal_id,
+        trusted_user_id=trusted_user_id,
+        action=action,
+        target=ResourceRef(resource_type),
+        parameters=tuple(sorted((name, _frozen(value)) for name, value in parameters.items())),
+        resource_version=None,
+        created_at=created_at,
+        expires_at=expires_at,
+    )
 
 
 def safety_of(request: SafetyAssessment, texts: list[str]) -> SafetyAssessment:

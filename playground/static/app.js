@@ -1,5 +1,6 @@
 // The playground page: wires the controls to Playground (playground.js) and
-// to the existing POST /auth/login and POST /coach/message, on the same origin.
+// to the existing POST /auth/login, POST /coach/message and
+// POST /coach/proposals/{id}/approve, on the same origin.
 // Everything, the access token included, is held in memory; nothing is written
 // to storage or cookies, and the password is never kept.
 (function () {
@@ -74,6 +75,57 @@
     $("turn-count").textContent = `(${session.history.length} turns in memory)`;
     $("active-user").textContent = session.email || "not signed in";
     $("logout").disabled = busy || !session.token;
+    renderProposal();
+  }
+
+  // The latest reply's proposal, as the API returned it, section by section.
+  // The saved message appears only once the API answered 201 with the plan.
+  function renderProposal() {
+    const proposal = session.proposal;
+    $("proposal").hidden = !proposal;
+    if (!proposal) return;
+    renderFacts("proposal-facts", [
+      ["Name", proposal.name],
+      ["Date", proposal.scheduled_date],
+      [
+        "Estimated",
+        `${proposal.estimated_minutes} min (warm-up ${proposal.warm_up_minutes}, ` +
+          `main ${proposal.main_minutes}, cool-down ${proposal.cool_down_minutes})`,
+      ],
+      ["Approve before", new Date(proposal.expires_at).toLocaleString()],
+      ["Proposal", proposal.proposal_id],
+    ]);
+    const sections = $("proposal-sections");
+    sections.replaceChildren();
+    for (const part of P.proposalSections(proposal)) {
+      const heading = document.createElement("h3");
+      heading.textContent = `${part.title} · about ${part.minutes ?? "?"} min`;
+      const list = document.createElement("ol");
+      list.className = "exercises";
+      for (const exercise of part.exercises) {
+        const item = document.createElement("li");
+        const note = exercise.notes ? ` · ${exercise.notes}` : "";
+        const equipment = (exercise.equipment || []).join(", ") || "no equipment";
+        item.textContent =
+          `${exercise.exercise_name} (${equipment}): ${P.prescription(exercise)}${note}`;
+        list.append(item);
+      }
+      if (!part.exercises.length) {
+        const item = document.createElement("li");
+        item.textContent = "none";
+        list.append(item);
+      }
+      sections.append(heading, list);
+    }
+    const saved = proposal.savedPlanId !== null;
+    $("approve").hidden = saved;
+    $("approve").disabled = busy;
+    $("proposal-saved").hidden = !saved;
+    const counts = proposal.savedCounts;
+    $("proposal-saved").textContent = saved
+      ? `Saved as workout plan ${proposal.savedPlanId}: ${counts.WARM_UP} warm-up, ` +
+        `${counts.MAIN_WORKOUT} main and ${counts.COOL_DOWN} cool-down exercises.`
+      : "";
   }
 
   function renderFacts(id, facts) {
@@ -112,7 +164,7 @@
   function renderRequestInfo(info) {
     renderFacts("request-info", [
       ["Method", "POST"],
-      ["Endpoint", P.COACH_PATH],
+      ["Endpoint", info.endpoint || P.COACH_PATH],
       ["HTTP status", info.status || "no response"],
       ["Request ID", info.requestId],
       ["Response time", `${info.latencyMs.toFixed(0)} ms`],
@@ -144,7 +196,7 @@
 
   function setBusy(value) {
     busy = value;
-    for (const id of ["send", "login", "clear", "inject"]) $(id).disabled = value;
+    for (const id of ["send", "login", "clear", "inject", "approve"]) $(id).disabled = value;
     $("logout").disabled = value || !session.token;
   }
 
@@ -194,7 +246,7 @@
       return;
     }
     if (status === 200 && data && typeof data.reply === "string") {
-      session = P.recordExchange(session, message, data.reply);
+      session = P.recordExchange(session, message, data.reply, data.proposal);
       $("message").value = "";
       updateLength();
       renderConversation();
@@ -206,6 +258,60 @@
         renderConversation();
       }
       showError(P.describeError(status, data, execution));
+    }
+  }
+
+  async function approve() {
+    const proposal = session.proposal;
+    if (busy || !proposal || proposal.savedPlanId !== null) return;
+    const path = P.approvalPath(proposal);
+    const epoch = session.epoch;
+    hideError();
+    notice("");
+    setBusy(true);
+    const started = performance.now();
+    let status = 0;
+    let data = null;
+    try {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: P.requestHeaders(session),
+        body: JSON.stringify(P.buildApproval(proposal)),
+        credentials: "omit",
+        cache: "no-store",
+      });
+      status = response.status;
+      data = await response.json().catch(() => null);
+    } catch {
+      status = 0;
+    } finally {
+      setBusy(false);
+    }
+    renderRequestInfo({
+      status,
+      endpoint: path,
+      latencyMs: performance.now() - started,
+      email: session.email,
+    });
+    const saved = status === 201 && data && Number.isInteger(data.id);
+    if (epoch !== session.epoch) {
+      notice(
+        saved
+          ? `An approval finished after the conversation changed: workout plan ${data.id} was saved.`
+          : "An approval answered after the conversation changed; nothing was saved."
+      );
+      return;
+    }
+    if (saved) {
+      session = P.recordApproval(session, proposal.proposal_id, data);
+      renderConversation();
+      notice(`Saved: workout plan ${data.id}, "${data.name}", on ${data.scheduled_date ?? "no date"}.`);
+    } else {
+      if (status === 401 && session.token) {
+        session = P.signOut(session);
+        renderConversation();
+      }
+      showError(P.describeApprovalError(status));
     }
   }
 
@@ -308,6 +414,7 @@
     if (event.key === "Enter") login();
   });
   $("logout").addEventListener("click", logout);
+  $("approve").addEventListener("click", approve);
   $("clear").addEventListener("click", clear);
   $("inject").addEventListener("click", () => inject());
   $("inject-example").addEventListener("click", () => {

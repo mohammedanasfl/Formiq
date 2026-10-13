@@ -21,6 +21,10 @@ REVISION_BEFORE_CATALOG = "4e447bdd5061"
 # The revision that creates the catalog tables, before the seed data.
 CATALOG_TABLES_REVISION = "0d243d0e46b1"
 SEED_REVISION = "b84c61ea69bf"
+# the later seed: more exercises, and the warm-up and cool-down activities
+LATER_SEED_REVISION = "14d543e636a8"
+# exercise sources, uses and images, and the reference data imports map to
+SOURCE_REVISION = "620eafb9c204"
 
 TIMESTAMPTZ = "TIMESTAMP WITH TIME ZONE"
 REFERENCE_COLUMNS = {
@@ -41,11 +45,18 @@ CATALOG_TABLES = {
             "description": "TEXT",
             "difficulty": "VARCHAR(20)",
             "movement_pattern": "VARCHAR(30)",
+            "uses": "VARCHAR(20)[]",
+            "image_paths": "VARCHAR(255)[]",
+            "source": "VARCHAR(30)",
+            "source_id": "VARCHAR(100)",
+            "source_version": "VARCHAR(64)",
+            "source_record": "JSONB",
             "is_active": "BOOLEAN",
             "created_at": TIMESTAMPTZ,
             "updated_at": TIMESTAMPTZ,
         },
-        {"description"},
+        # an imported exercise may have no Formiq movement pattern
+        {"description", "movement_pattern", "source_id", "source_version", "source_record"},
         ["id"],
     ),
     "muscle_groups": (REFERENCE_COLUMNS, {"description"}, ["id"]),
@@ -116,6 +127,19 @@ def seed(alembic_config):
     return ScriptDirectory.from_config(alembic_config).get_revision(SEED_REVISION).module
 
 
+@pytest.fixture
+def later_seed(alembic_config):
+    """The later seed migration module, with its EQUIPMENT and EXERCISES."""
+    return ScriptDirectory.from_config(alembic_config).get_revision(LATER_SEED_REVISION).module
+
+
+@pytest.fixture
+def import_reference(alembic_config):
+    """The source migration module, with the MUSCLE_GROUPS and EQUIPMENT that
+    imported exercises map to."""
+    return ScriptDirectory.from_config(alembic_config).get_revision(SOURCE_REVISION).module
+
+
 def table_names(engine):
     return set(inspect(engine).get_table_names())
 
@@ -159,11 +183,19 @@ def test_catalog_table_has_expected_columns(alembic_config, test_engine, table_n
         assert defaults["is_active"] == "true"
 
 
-@pytest.mark.parametrize("table_name", ["exercises", "muscle_groups", "equipment"])
-def test_catalog_names_are_unique(alembic_config, test_engine, table_name):
+@pytest.mark.parametrize(
+    ("table_name", "unique"),
+    [
+        # and an upstream record is imported once
+        ("exercises", [["name"], ["source", "source_id"]]),
+        ("muscle_groups", [["name"]]),
+        ("equipment", [["name"]]),
+    ],
+)
+def test_catalog_names_are_unique(alembic_config, test_engine, table_name, unique):
     unique_constraints = inspect(test_engine).get_unique_constraints(table_name)
 
-    assert [c["column_names"] for c in unique_constraints] == [["name"]]
+    assert sorted(c["column_names"] for c in unique_constraints) == unique
 
 
 def test_link_tables_reference_the_catalog_with_deliberate_delete_rules(
@@ -192,14 +224,23 @@ def test_link_tables_index_the_second_key_column(alembic_config, test_engine, ta
     assert [(index["column_names"], index["unique"]) for index in indexes] == [([column], False)]
 
 
-def test_seed_adds_the_reference_data(alembic_config, seed, db_session):
+def test_seed_adds_the_reference_data(
+    alembic_config, seed, later_seed, import_reference, db_session
+):
     muscle_groups = db_session.scalars(select(MuscleGroup)).all()
     equipment = db_session.scalars(select(Equipment)).all()
     exercises = db_session.scalars(select(Exercise)).all()
 
-    # the catalog tests never commit, so the test database holds only the seed
-    assert {row.name: row.description for row in muscle_groups} == seed.MUSCLE_GROUPS
-    assert {row.name: row.description for row in equipment} == seed.EQUIPMENT
+    # the catalog tests never commit, so the test database holds only the seeds
+    assert {row.name: row.description for row in muscle_groups} == {
+        **seed.MUSCLE_GROUPS,
+        **import_reference.MUSCLE_GROUPS,
+    }
+    assert {row.name: row.description for row in equipment} == {
+        **seed.EQUIPMENT,
+        **later_seed.EQUIPMENT,
+        **import_reference.EQUIPMENT,
+    }
     assert {
         row.name: {
             "name": row.name,
@@ -212,7 +253,7 @@ def test_seed_adds_the_reference_data(alembic_config, seed, db_session):
         for row in exercises
     } == {
         exercise["name"]: {**exercise, "equipment": sorted(exercise["equipment"])}
-        for exercise in seed.EXERCISES
+        for exercise in seed.EXERCISES + later_seed.EXERCISES
     }
     assert all(row.is_active for row in [*muscle_groups, *equipment, *exercises])
 

@@ -15,11 +15,12 @@ from app.agent import (
     initial_state,
 )
 from app.ai import GeminiProvider
-from app.approvals import ApprovalStore, WriteProposal
+from app.approvals import ProposalTerms, WriteProposal
 from app.observability import TRACING_OFF, Failure, RunTrace, Tracer, classify
 from app.repositories import UserRepository
 from app.services.exceptions import UserNotFoundError
 from app.services.exercise_catalog_service import ExerciseCatalogService
+from app.services.plan_proposal_service import PlanProposalService
 from app.services.user_profile_service import UserProfileService
 from app.services.user_service import UserService
 from app.services.workout_plan_service import WorkoutPlanService
@@ -38,7 +39,7 @@ class CoachAnswer:
     reply: str
     # The workout plan the coach proposed in this turn, for the user to review
     # and approve, and how it was described: the last one, when the turn ended
-    # with an answer. Not saved.
+    # with an answer. Kept for the user's approval; not a saved plan.
     proposal: tuple[WriteProposal, ProposedWorkoutPlanOutput] | None = None
 
 
@@ -48,14 +49,14 @@ class CoachService:
         session: Session,
         provider: GeminiProvider,
         tracer: Tracer = TRACING_OFF,
-        approvals: ApprovalStore | None = None,
+        proposal_terms: ProposalTerms | None = None,
     ) -> None:
         self.session = session
         self.users = UserRepository(session)
         self.provider = provider
         self.tracer = tracer
-        # where proposed plans wait for the user's approval; None: none is proposed
-        self.approvals = approvals
+        # when proposals are made and how long they wait; None: none is proposed
+        self.proposal_terms = proposal_terms
 
     def reply(
         self, user_id: int, message: str, history: Sequence[ConversationTurn] = ()
@@ -88,6 +89,14 @@ class CoachService:
         ) as trace:
             try:
                 reply, decision, tools = self._reply(user_id, message, history, trace)
+                answered = (
+                    decision.decision in _ANSWERS and decision.safety is SafetyCategory.SAFE
+                )
+                proposal = tools.proposals[-1] if answered and tools.proposals else None
+                if proposal is not None:
+                    # Kept for the user's approval: only the proposal they are
+                    # shown. The coach saves no plan; only their approval does.
+                    PlanProposalService(self.session, self.proposal_terms).register(proposal[0])
             except Exception as error:
                 failure = (
                     Failure.USER_NOT_FOUND
@@ -107,10 +116,6 @@ class CoachService:
                 reply_chars=len(reply),
             )
             logger.info("Coach request %s ended: status=%s", request_id, status)
-            answered = (
-                decision.decision in _ANSWERS and decision.safety is SafetyCategory.SAFE
-            )
-            proposal = tools.proposals[-1] if answered and tools.proposals else None
             return CoachAnswer(reply, proposal)
 
     def _reply(
@@ -138,8 +143,8 @@ class CoachService:
         return state["final_response"], state["decision"], tools
 
     def _tools(self) -> FormiqTools:
-        """The coach's tools, reading through the services on this session and
-        proposing plans into the approval store."""
+        """The coach's tools, reading through the services on this session, and
+        proposing plans on the proposal terms."""
         return FormiqTools(
             users=UserService(self.session),
             profiles=UserProfileService(self.session),
@@ -147,7 +152,7 @@ class CoachService:
             sessions=WorkoutSessionService(self.session),
             catalog=ExerciseCatalogService(self.session),
             end_read=self.session.rollback,
-            approvals=self.approvals,
+            proposal_terms=self.proposal_terms,
         )
 
 

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -11,11 +11,13 @@ if TYPE_CHECKING:
 
 
 class WorkoutPlanExercise(Base):
-    """An exercise prescribed in a workout plan: the target sets, reps, weight
-    and rest, not the performed ones.
+    """An exercise prescribed in a workout plan: the target sets, reps (or
+    duration), weight and rest, not the performed ones.
 
-    The same exercise may appear more than once in a plan, at different
-    positions; each position (exercise_order) is used once per plan.
+    Each belongs to a section of the workout: the warm-up, the main workout or
+    the cool-down. The same exercise may appear more than once in a plan, at
+    different positions; each position (exercise_order) is used once per plan,
+    across the sections.
     """
 
     __tablename__ = "workout_plan_exercises"
@@ -34,8 +36,15 @@ class WorkoutPlanExercise(Base):
         ForeignKey("exercises.id", ondelete="RESTRICT"), index=True
     )
     exercise_order: Mapped[int]
+    # a PlanSection value (app.schemas.workout_plan), validated by the schemas;
+    # the exercises of plans made before sections existed are MAIN_WORKOUT
+    section: Mapped[str] = mapped_column(String(20), server_default="MAIN_WORKOUT")
     sets: Mapped[int]
-    reps: Mapped[int]
+    # Each set's target: reps, or a duration for a timed activity such as an
+    # easy walk or a stretch held. Exactly one of them, checked by the schemas
+    # and the services.
+    reps: Mapped[int | None]
+    duration_seconds: Mapped[int | None]
     weight_kg: Mapped[float | None]
     rest_seconds: Mapped[int | None]
     notes: Mapped[str | None] = mapped_column(Text)

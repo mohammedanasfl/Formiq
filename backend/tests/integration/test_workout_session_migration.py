@@ -9,7 +9,7 @@ in test_users_migration.py.
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
@@ -194,7 +194,11 @@ def test_downgrade_keeps_users_and_plans_and_upgrade_recreates_the_tables(
     assert not set(WORKOUT_SESSION_TABLES) & table_names(test_engine)
     with Session(test_engine) as session:
         assert session.get(User, user_id) is not None
-        assert len(session.get(WorkoutPlan, plan_id).exercises) == 1
+        # read as rows: the models have columns that later migrations add
+        assert session.scalar(
+            text("SELECT count(*) FROM workout_plan_exercises WHERE workout_plan_id = :id"),
+            {"id": plan_id},
+        ) == 1
 
     command.upgrade(alembic_config, "head")
     assert set(WORKOUT_SESSION_TABLES) <= table_names(test_engine)

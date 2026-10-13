@@ -43,15 +43,19 @@ WORKOUT_PLAN_TABLES = {
             "workout_plan_id": "INTEGER",
             "exercise_id": "INTEGER",
             "exercise_order": "INTEGER",
+            # section and duration_seconds, and reps becoming nullable, come
+            # from the sections migration (c062e4afd0b0)
+            "section": "VARCHAR(20)",
             "sets": "INTEGER",
             "reps": "INTEGER",
+            "duration_seconds": "INTEGER",
             "weight_kg": "DOUBLE PRECISION",
             "rest_seconds": "INTEGER",
             "notes": "TEXT",
             "created_at": TIMESTAMPTZ,
             "updated_at": TIMESTAMPTZ,
         },
-        {"weight_kg", "rest_seconds", "notes"},
+        {"reps", "duration_seconds", "weight_kg", "rest_seconds", "notes"},
         ["id"],
     ),
 }
@@ -147,14 +151,22 @@ def test_downgrade_keeps_users_and_the_catalog_and_upgrade_recreates_the_tables(
     service_session.commit()
     with Session(test_engine) as session:
         exercises = session.scalar(select(func.count()).select_from(Exercise))
+    first_seed = ScriptDirectory.from_config(alembic_config).get_revision(
+        REVISION_BEFORE_WORKOUT_PLANS
+    )
 
     command.downgrade(alembic_config, REVISION_BEFORE_WORKOUT_PLANS)
     assert not set(WORKOUT_PLAN_TABLES) & table_names(test_engine)
     with Session(test_engine) as session:
         assert session.get(User, user_id).profile.first_name == profile_fields["first_name"]
-        assert session.scalar(select(func.count()).select_from(Exercise)) == exercises
+        # the catalog as the first seed left it: the later seed's exercises
+        # went with the later seed's downgrade
+        assert session.scalar(select(func.count()).select_from(Exercise)) == len(
+            first_seed.module.EXERCISES
+        )
 
     command.upgrade(alembic_config, "head")
     assert set(WORKOUT_PLAN_TABLES) <= table_names(test_engine)
     with Session(test_engine) as session:
         assert session.get(User, user_id).profile.first_name == profile_fields["first_name"]
+        assert session.scalar(select(func.count()).select_from(Exercise)) == exercises

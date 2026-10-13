@@ -32,11 +32,15 @@ def alembic_config(test_alembic_config):
     command.upgrade(test_alembic_config, "head")
 
 
-def test_the_credentials_migration_is_the_head_after_the_workout_sessions(alembic_config):
+def test_the_credentials_migration_follows_the_workout_sessions(alembic_config):
     script = ScriptDirectory.from_config(alembic_config)
+    head = script.get_current_head()
 
-    assert script.get_current_head() == CREDENTIALS_REVISION
     assert script.get_revision(CREDENTIALS_REVISION).down_revision == REVISION_BEFORE_CREDENTIALS
+    # later migrations build on it: it is in the history of the one head
+    assert CREDENTIALS_REVISION in {
+        revision.revision for revision in script.iterate_revisions(head, "base")
+    }
 
 
 def test_the_table_holds_one_hash_per_user(alembic_config, test_engine):

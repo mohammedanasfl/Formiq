@@ -1,7 +1,11 @@
+from pathlib import Path
 from typing import Annotated, Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# backend/: the default images directory is inside it, wherever the process runs
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 # A signing secret is at least as long as its algorithm's hash (RFC 7518,
 # section 3.2): `openssl rand -hex 32` prints 64 characters, enough for all three.
@@ -21,6 +25,9 @@ class Settings(BaseSettings):
     # reprs and logs.
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.8-flash"
+    # The model the opt-in live smoke test uses (tests/integration/
+    # test_gemini_live.py); never the application's. Unset: that test is skipped.
+    gemini_test_model: str | None = None
     # How long a Gemini request may take; a slower one fails like any other
     # provider error.
     gemini_timeout_seconds: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 30.0
@@ -39,6 +46,8 @@ class Settings(BaseSettings):
     auth_jwt_secret: SecretStr | None = None
     auth_jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
     auth_access_token_expire_minutes: Annotated[int, Field(gt=0, le=1440)] = 30
+    # The exercise images the API serves (backend/data/exercise-images/README.md).
+    exercise_images_dir: Path = BACKEND_DIR / "data" / "exercise-images"
 
     @field_validator("auth_jwt_secret")
     @classmethod

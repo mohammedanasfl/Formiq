@@ -30,25 +30,7 @@ class WorkoutPlanService:
     def create_plan(self, user_id: int, plan_data: WorkoutPlanCreate) -> WorkoutPlan:
         """Creates the plan and, if given, its exercises, in one transaction."""
         try:
-            if self.users.get_by_id(user_id) is None:
-                raise UserNotFoundError(f"user {user_id} does not exist")
-            check_unique_orders(plan_data.exercises)
-            check_planned_plan(
-                plan_data.status, plan_data.scheduled_date, len(plan_data.exercises)
-            )
-            for exercise in plan_data.exercises:
-                check_exercise_available(self.exercises, exercise.exercise_id)
-
-            plan = self.plans.create(
-                WorkoutPlan(
-                    user_id=user_id,
-                    **plan_data.model_dump(exclude={"exercises"}),
-                    exercises=[
-                        WorkoutPlanExercise(**exercise.model_dump())
-                        for exercise in plan_data.exercises
-                    ],
-                )
-            )
+            plan = self.add_plan(user_id, plan_data)
             self.session.commit()
         except Exception:
             self.session.rollback()
@@ -56,6 +38,29 @@ class WorkoutPlanService:
 
         self.session.refresh(plan)
         return plan
+
+    def add_plan(self, user_id: int, plan_data: WorkoutPlanCreate) -> WorkoutPlan:
+        """Adds the plan and its exercises to the session's transaction, after
+        the same checks as create_plan, without committing it: for a caller
+        whose own change must be saved with the plan, or not at all
+        (app.services.plan_proposal_service)."""
+        if self.users.get_by_id(user_id) is None:
+            raise UserNotFoundError(f"user {user_id} does not exist")
+        check_unique_orders(plan_data.exercises)
+        check_planned_plan(plan_data.status, plan_data.scheduled_date, len(plan_data.exercises))
+        for exercise in plan_data.exercises:
+            check_exercise_available(self.exercises, exercise.exercise_id)
+
+        return self.plans.create(
+            WorkoutPlan(
+                user_id=user_id,
+                **plan_data.model_dump(exclude={"exercises"}),
+                exercises=[
+                    WorkoutPlanExercise(**exercise.model_dump())
+                    for exercise in plan_data.exercises
+                ],
+            )
+        )
 
     def list_plans(self, user_id: int, filters: WorkoutPlanFilters) -> list[WorkoutPlan]:
         if self.users.get_by_id(user_id) is None:

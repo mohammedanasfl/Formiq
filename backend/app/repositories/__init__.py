@@ -5,6 +5,7 @@ from app.repositories.user_credential_repository import UserCredentialRepository
 from app.repositories.user_profile_repository import UserProfileRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.workout_plan_exercise_repository import WorkoutPlanExerciseRepository
+from app.repositories.workout_plan_proposal_repository import WorkoutPlanProposalRepository
 from app.repositories.workout_plan_repository import WorkoutPlanRepository
 from app.repositories.workout_session_exercise_repository import (
     WorkoutSessionExerciseRepository,
@@ -21,6 +22,7 @@ __all__ = [
     "EquipmentRepository",
     "WorkoutPlanRepository",
     "WorkoutPlanExerciseRepository",
+    "WorkoutPlanProposalRepository",
     "WorkoutSessionRepository",
     "WorkoutSessionExerciseRepository",
     "WorkoutSetRepository",

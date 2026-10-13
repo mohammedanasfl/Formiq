@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_access_tokens
+from app.catalog.free_exercise_db import load_records
 from app.core.config import settings
 from app.db import database
 from app.db.database import get_db
@@ -25,6 +26,12 @@ from app.models import (
 from app.schemas.workout_plan import MAX_INTEGER
 from tests.auth import TEST_ACCESS_TOKENS, bearer
 from tests.integration.database import check_test_database_url
+from tests.integration.imported_catalog import (
+    PRESENT_IMAGES,
+    ImportedCatalog,
+    run_import,
+    snapshot,
+)
 
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 
@@ -265,3 +272,38 @@ def profile_fields():
         "activity_level": "moderate",
         "sleep_hours": 7.5,
     }
+
+
+@pytest.fixture(scope="module")
+def imported_catalog(test_engine, tmp_path_factory):
+    """The catalog with the pinned free-exercise-db dataset imported, once per
+    test module, in a transaction that is rolled back after the module, so the
+    test database keeps only the seeds. The images directory holds three of
+    the images the records list, so the import registers those and reports the
+    rest as missing."""
+    images_dir = tmp_path_factory.mktemp("exercise-images")
+    for path in PRESENT_IMAGES:
+        (images_dir / path).parent.mkdir(exist_ok=True)
+        (images_dir / path).write_bytes(b"\xff\xd8\xff test image")
+    records = load_records()
+    with test_engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+                formiq_before = snapshot(session, "FORMIQ")
+                summary = run_import(session, records, images_dir)
+            yield ImportedCatalog(connection, records, summary, images_dir, formiq_before)
+        finally:
+            transaction.rollback()
+
+
+@pytest.fixture
+def imported_session(imported_catalog):
+    """A session on the imported catalog; what the test changes is rolled back."""
+    savepoint = imported_catalog.connection.begin_nested()
+    session = Session(bind=imported_catalog.connection, join_transaction_mode="create_savepoint")
+    try:
+        yield session
+    finally:
+        session.close()
+        savepoint.rollback()
