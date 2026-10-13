@@ -1,28 +1,45 @@
-"""The coach's read-only tools.
+"""The coach's tools.
 
 Each tool is an adapter around the existing services: it reads through them,
 never through repositories or the database, and turns what they return into a
-compact output for the model. No tool writes.
+compact output for the model. No tool writes: propose_workout_plan only
+registers a proposal, which the user's own approval may later save
+(app.services.plan_proposal_service).
 """
 
 import logging
+import math
 from collections.abc import Callable, Iterable, Sequence
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
+from app.agent.safety import SAFE
 from app.ai import ToolCall
+from app.approvals import (
+    PROPOSAL_ACTIONS,
+    ApprovalStore,
+    ProposalDraft,
+    SafetyBlocked,
+    WriteProposal,
+    propose,
+)
 from app.schemas.exercise import ExerciseFilters
 from app.tools.declarations import TOOL_DECLARATIONS
 from app.tools.errors import ToolError, ToolErrorCode
 from app.tools.limits import (
+    DEFAULT_REST_SECONDS,
     MAX_EXECUTED_TOOL_CALLS_PER_TURN,
     MAX_EXERCISES,
+    MAX_PROPOSAL_DAYS_AHEAD,
     MAX_SEARCH_RESULTS,
     MAX_SETS,
     MAX_TEXT_LENGTH,
+    SET_SECONDS,
 )
 from app.tools.schemas import (
+    CurrentWorkoutPlanOutput,
     ExerciseOutput,
     ExerciseSummaryOutput,
     GetCurrentWorkoutPlanInput,
@@ -31,9 +48,13 @@ from app.tools.schemas import (
     GetUserProfileInput,
     GetWorkoutPlanInput,
     GetWorkoutSessionInput,
+    LatestWorkoutSessionOutput,
     MuscleOutput,
     PlanExerciseOutput,
     ProfileOutput,
+    ProposedExerciseOutput,
+    ProposedWorkoutPlanOutput,
+    ProposeWorkoutPlanInput,
     SearchExercisesInput,
     SearchExercisesOutput,
     SessionExerciseOutput,
@@ -69,11 +90,22 @@ def error_result(code: ToolErrorCode, message: str) -> dict[str, Any]:
     return {"error": {"code": code.value, "message": message}}
 
 
+def utc_today() -> date:
+    """Formiq's date: today in UTC. The user's own time zone is not known."""
+    return datetime.now(UTC).date()
+
+
 class FormiqTools:
     """Runs the model's tool calls for one coach request.
 
     User-scoped tools read only the data of the user given to run(), which
-    comes from the coach request: the model cannot name another user.
+    comes from the coach request: the model cannot name another user. The
+    current plan and the last workout are found relative to today, the
+    request's date unless one is given.
+
+    Proposed plans are registered in approvals, the store the user's approval
+    goes through, and kept in proposals for the coach's reply. Without a store,
+    no plan can be proposed.
     """
 
     declarations = TOOL_DECLARATIONS
@@ -87,12 +119,18 @@ class FormiqTools:
         sessions: "WorkoutSessionService",
         catalog: "ExerciseCatalogService",
         end_read: Callable[[], None],
+        today: date | None = None,
+        approvals: ApprovalStore | None = None,
     ) -> None:
         self.users = users
         self.profiles = profiles
         self.plans = plans
         self.sessions = sessions
         self.catalog = catalog
+        self.today = today if today is not None else utc_today()
+        self.approvals = approvals
+        # the plans proposed in this request, in order, with what the model was told
+        self.proposals: list[tuple[WriteProposal, ProposedWorkoutPlanOutput]] = []
         # Called after each batch of calls to end the read transaction, so no
         # database connection is held while the model answers.
         self.end_read = end_read
@@ -105,6 +143,7 @@ class FormiqTools:
                 GetLatestWorkoutSessionInput,
                 self.get_latest_workout_session,
             ),
+            "propose_workout_plan": (ProposeWorkoutPlanInput, self.propose_workout_plan),
             "get_exercise": (GetExerciseInput, self.get_exercise),
             "search_exercises": (SearchExercisesInput, self.search_exercises),
         }
@@ -180,19 +219,31 @@ class FormiqTools:
             )
         return self._plan_output(plan)
 
-    def get_current_workout_plan(self, request: GetCurrentWorkoutPlanInput) -> WorkoutPlanOutput:
-        plan = self.plans.get_current_plan(request.user_id)
+    def get_current_workout_plan(
+        self, request: GetCurrentWorkoutPlanInput
+    ) -> CurrentWorkoutPlanOutput:
+        plan = self.plans.get_current_plan(request.user_id, self.today)
         if plan is None:
             raise ToolError(
                 ToolErrorCode.RESOURCE_NOT_FOUND,
                 "the user has no current workout plan (no PLANNED plan); there is no id to ask for",
             )
-        return self._plan_output(plan)
+        return self._plan_output(
+            plan,
+            CurrentWorkoutPlanOutput,
+            today=self.today,
+            days_from_today=(plan.scheduled_date - self.today).days
+            if plan.scheduled_date is not None
+            else None,
+        )
 
-    def _plan_output(self, plan: Any) -> WorkoutPlanOutput:
+    def _plan_output(
+        self, plan: Any, output: type[WorkoutPlanOutput] = WorkoutPlanOutput, **fields: Any
+    ) -> WorkoutPlanOutput:
         items = plan.exercises[:MAX_EXERCISES]
         names = self._exercise_names(item.exercise_id for item in items)
-        return WorkoutPlanOutput(
+        return output(
+            **fields,
             plan_id=plan.id,
             name=plan.name,
             status=plan.status,
@@ -225,19 +276,31 @@ class FormiqTools:
 
     def get_latest_workout_session(
         self, request: GetLatestWorkoutSessionInput
-    ) -> WorkoutSessionOutput:
+    ) -> LatestWorkoutSessionOutput:
         workout_session = self.sessions.get_latest_completed_session(request.user_id)
         if workout_session is None:
             raise ToolError(
                 ToolErrorCode.RESOURCE_NOT_FOUND,
                 "the user has no completed workout session yet; there is no id to ask for",
             )
-        return self._session_output(workout_session)
+        done = workout_session.completed_at or workout_session.started_at
+        return self._session_output(
+            workout_session,
+            LatestWorkoutSessionOutput,
+            today=self.today,
+            days_ago=(self.today - done.astimezone(UTC).date()).days,
+        )
 
-    def _session_output(self, workout_session: Any) -> WorkoutSessionOutput:
+    def _session_output(
+        self,
+        workout_session: Any,
+        output: type[WorkoutSessionOutput] = WorkoutSessionOutput,
+        **fields: Any,
+    ) -> WorkoutSessionOutput:
         items = workout_session.exercises[:MAX_EXERCISES]
         names = self._exercise_names(item.exercise_id for item in items)
-        return WorkoutSessionOutput(
+        return output(
+            **fields,
             session_id=workout_session.id,
             workout_plan_id=workout_session.workout_plan_id,
             status=workout_session.status,
@@ -265,6 +328,95 @@ class FormiqTools:
             truncated=len(workout_session.exercises) > MAX_EXERCISES
             or any(len(item.sets) > MAX_SETS for item in items),
         )
+
+    def propose_workout_plan(self, request: ProposeWorkoutPlanInput) -> ProposedWorkoutPlanOutput:
+        """Registers the plan as a proposal for the user to approve, once it is
+        made of active catalog exercises and fits the date and the user's stated
+        time and equipment. It saves nothing."""
+        if self.approvals is None:
+            raise ToolError(ToolErrorCode.TOOL_ERROR, "a plan cannot be proposed here")
+        scheduled = request.scheduled_date or self.today
+        days = (scheduled - self.today).days
+        if not 0 <= days <= MAX_PROPOSAL_DAYS_AHEAD:
+            raise ToolError(
+                ToolErrorCode.INVALID_INPUT,
+                f"scheduled_date must be today or up to {MAX_PROPOSAL_DAYS_AHEAD} days later",
+            )
+        unavailable = {name.casefold() for name in request.unavailable_equipment}
+        exercises = []
+        for order, item in enumerate(request.exercises, start=1):
+            exercise = self.catalog.get_exercise_by_id(item.exercise_id)
+            if exercise is None or not exercise.is_active:
+                raise ToolError(
+                    ToolErrorCode.INVALID_INPUT,
+                    f"exercise {item.exercise_id} is not an active Formiq catalog exercise",
+                )
+            equipment = [equipment.name for equipment in exercise.equipment]
+            if needed := [name for name in equipment if name.casefold() in unavailable]:
+                raise ToolError(
+                    ToolErrorCode.INVALID_INPUT,
+                    f"exercise {item.exercise_id} needs {', '.join(needed)}, which the user "
+                    "cannot use: choose another exercise",
+                )
+            exercises.append(
+                ProposedExerciseOutput(
+                    exercise_order=order,
+                    exercise_id=exercise.id,
+                    exercise_name=exercise.name,
+                    equipment=equipment,
+                    sets=item.sets,
+                    reps=item.reps,
+                    rest_seconds=item.rest_seconds,
+                    notes=item.notes,
+                )
+            )
+        minutes = estimated_minutes(exercises)
+        if request.max_minutes is not None and minutes > request.max_minutes:
+            raise ToolError(
+                ToolErrorCode.INVALID_INPUT,
+                f"this plan takes about {minutes} minutes, more than the {request.max_minutes} "
+                "the user has: use fewer sets or exercises, or shorter rests",
+            )
+
+        draft = ProposalDraft(
+            action=PROPOSAL_ACTIONS["propose_workout_plan"],
+            parameters={
+                "name": request.name,
+                "scheduled_date": scheduled.isoformat(),
+                "exercises": [
+                    item.model_dump(exclude={"exercise_name", "equipment"}, exclude_none=True)
+                    for item in exercises
+                ],
+            },
+        )
+        try:
+            # tools run only for requests the safety backstop did not flag
+            # (app.agent.graph); the proposal's own text is checked here
+            proposal = propose(
+                draft,
+                trusted_user_id=request.user_id,
+                request=SAFE,
+                resource_version=None,
+                now=self.approvals.clock(),
+                ttl=self.approvals.ttl,
+            )
+        except SafetyBlocked:
+            raise ToolError(
+                ToolErrorCode.INVALID_INPUT,
+                "the proposal's name or notes raise a safety concern: leave that out",
+            ) from None
+        if not isinstance(self.approvals.register(proposal), str):
+            raise ToolError(ToolErrorCode.TOOL_ERROR, "the proposal could not be registered")
+        output = ProposedWorkoutPlanOutput(
+            name=request.name,
+            scheduled_date=scheduled,
+            days_from_today=days,
+            exercises=exercises,
+            estimated_minutes=minutes,
+            expires_at=proposal.expires_at,
+        )
+        self.proposals.append((proposal, output))
+        return output
 
     def get_exercise(self, request: GetExerciseInput) -> ExerciseOutput:
         # inactive exercises stay readable by id, as in the catalog API
@@ -321,6 +473,16 @@ class FormiqTools:
             if exercise is not None:
                 names[exercise_id] = exercise.name
         return names
+
+
+def estimated_minutes(exercises: Iterable[ProposedExerciseOutput]) -> int:
+    """How long the exercises take, roughly: each set and the rest after it."""
+    seconds = sum(
+        item.sets
+        * (SET_SECONDS + (DEFAULT_REST_SECONDS if item.rest_seconds is None else item.rest_seconds))
+        for item in exercises
+    )
+    return math.ceil(seconds / 60)
 
 
 def describe(error: ValidationError) -> str:

@@ -6,13 +6,19 @@ never ORM objects, internal ids beyond the resource's own, or audit timestamps.
 """
 
 from datetime import date, datetime
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.schemas.exercise import Difficulty, MovementPattern, MuscleRole
 from app.schemas.workout_plan import MAX_INTEGER, PositiveInteger, WorkoutPlanStatus
 from app.schemas.workout_session import WorkoutSessionStatus
+from app.tools.limits import (
+    MAX_PROPOSED_EXERCISES,
+    MAX_PROPOSED_REPS,
+    MAX_PROPOSED_REST_SECONDS,
+    MAX_PROPOSED_SETS,
+)
 
 # A resource id from the model, in its one canonical form (as
 # app.agent.policy.is_canonical_id): a positive JSON integer within the
@@ -49,6 +55,42 @@ class GetCurrentWorkoutPlanInput(UserScopedInput):
 
 class GetLatestWorkoutSessionInput(UserScopedInput):
     pass
+
+
+# A proposed plan's prescription, within Formiq's coaching bounds; strict, like
+# ResourceId, so 3.0, true or "3" is never coerced into a count.
+ProposedSets = Annotated[int, Field(strict=True, ge=1, le=MAX_PROPOSED_SETS)]
+ProposedReps = Annotated[int, Field(strict=True, ge=1, le=MAX_PROPOSED_REPS)]
+ProposedRest = Annotated[int, Field(strict=True, ge=0, le=MAX_PROPOSED_REST_SECONDS)]
+AvailableMinutes = Annotated[int, Field(strict=True, ge=10, le=180)]
+PlanName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=150)]
+ShortNote = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+EquipmentName = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)
+]
+
+
+class ProposedExerciseInput(ToolInput):
+    """An exercise of a proposed plan: a catalog exercise and its prescription.
+    No weight: the coach does not prescribe loads it cannot know."""
+
+    exercise_id: ResourceId
+    sets: ProposedSets
+    reps: ProposedReps
+    rest_seconds: ProposedRest | None = None
+    notes: ShortNote | None = None
+
+
+class ProposeWorkoutPlanInput(UserScopedInput):
+    name: PlanName
+    # today when not given
+    scheduled_date: date | None = None
+    exercises: Annotated[
+        list[ProposedExerciseInput], Field(min_length=1, max_length=MAX_PROPOSED_EXERCISES)
+    ]
+    # the user's own constraints, which the proposal must fit
+    max_minutes: AvailableMinutes | None = None
+    unavailable_equipment: Annotated[list[EquipmentName], Field(max_length=10)] = []
 
 
 class GetExerciseInput(ToolInput):
@@ -125,6 +167,15 @@ class WorkoutPlanOutput(BaseModel):
     truncated: bool
 
 
+class CurrentWorkoutPlanOutput(WorkoutPlanOutput):
+    """The current plan, placed relative to today (Formiq's date, in UTC), so
+    the model does not work out dates itself."""
+
+    today: date
+    # scheduled_date - today, in days: 0 today, 1 tomorrow, -1 yesterday
+    days_from_today: int | None
+
+
 class WorkoutSetOutput(BaseModel):
     """A set as performed."""
 
@@ -154,6 +205,41 @@ class WorkoutSessionOutput(BaseModel):
     exercises: list[SessionExerciseOutput]
     # true when exercises or sets beyond the tool's limits were left out
     truncated: bool
+
+
+class LatestWorkoutSessionOutput(WorkoutSessionOutput):
+    """The last workout, placed relative to today (Formiq's date, in UTC)."""
+
+    today: date
+    # today - the day it was completed (or started), in days: 0 today, 1 yesterday
+    days_ago: int
+
+
+class ProposedExerciseOutput(BaseModel):
+    exercise_order: int
+    exercise_id: int
+    exercise_name: str
+    # what the exercise needs, from the catalog; empty when nothing
+    equipment: list[str]
+    sets: int
+    reps: int
+    rest_seconds: int | None
+    notes: str | None
+
+
+class ProposedWorkoutPlanOutput(BaseModel):
+    """A workout plan Formiq has proposed to the user. Not saved: only the
+    user's own approval in Formiq saves it."""
+
+    status: Literal["awaiting_user_approval"] = "awaiting_user_approval"
+    name: str
+    scheduled_date: date
+    days_from_today: int
+    # ordered by exercise_order
+    exercises: list[ProposedExerciseOutput]
+    # Formiq's estimate: each set and its rest
+    estimated_minutes: int
+    expires_at: datetime
 
 
 class MuscleOutput(BaseModel):

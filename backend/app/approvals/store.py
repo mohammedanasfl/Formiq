@@ -19,10 +19,11 @@ run only after consume() allows it. Every check fails closed: a missing,
 mismatched, pending, rejected, expired, used or stale approval, a changed
 proposal or a safety flag is a refusal, never a fallback to "approved".
 
-ApprovalStore keeps its records in memory, per instance: it is this phase's
-reference implementation of the contract, for tests, not
-production persistence. A real write path would keep proposals and
-approvals in the database with the same rules (and unique ids enforced there).
+ApprovalStore keeps its records in memory, per instance. The coach's workout
+plan proposals use one store per process (app.api.dependencies): a proposal
+made in another process, or before a restart, is not found, so its approval
+fails closed. Durable, shared approvals would keep the same records in the
+database with the same rules (and unique ids enforced there).
 """
 
 import threading
@@ -130,7 +131,8 @@ class ApprovalStore:
 
     clock gives the current time and ttl how long a proposal may wait: both
     are given by the caller, so expiry is a product decision, not a constant
-    here. Expiry is applied when an approval is next used; nothing runs in the
+    here. Expiry is applied when an approval is next used, and an expired
+    record is forgotten when a new proposal is registered; nothing runs in the
     background. Safe to share between threads.
     """
 
@@ -146,9 +148,10 @@ class ApprovalStore:
     def register(self, proposal: WriteProposal) -> Authorization | str:
         """Starts the proposal's approval as PENDING; returns its approval id,
         or the refusal. A proposal id is registered once."""
-        if any(reserved_name(name) for name, _ in proposal.parameters):
+        if any(reserved_name(name) for name in proposal.names()):
             return refused(AuthorizationFailure.MALFORMED_PROPOSAL)
         with self._lock:
+            self._forget_expired()
             if proposal.proposal_id in self._by_proposal:
                 return refused(AuthorizationFailure.PROPOSAL_ALREADY_REGISTERED)
             approval_id = uuid.uuid4().hex
@@ -184,6 +187,15 @@ class ApprovalStore:
                 else ApprovalState.REJECTED
             )
             return Authorization(event.decision is UserDecision.APPROVE, approval.state)
+
+    def find(self, proposal_id: str) -> tuple[str, WriteProposal] | None:
+        """The registered proposal with this id and its approval id, or None.
+        Finding it authorizes nothing: record() and consume() check the rest."""
+        with self._lock:
+            approval_id = self._by_proposal.get(proposal_id)
+            if approval_id is None:
+                return None
+            return approval_id, self._approvals[approval_id].proposal
 
     def state(self, approval_id: str) -> ApprovalState | None:
         with self._lock:
@@ -270,6 +282,16 @@ class ApprovalStore:
         if safety_of(request, approval.proposal.text_values()).enforced:
             return refused(AuthorizationFailure.SAFETY_BLOCKED, state)
         return Authorization(True, state)
+
+    def _forget_expired(self) -> None:
+        """Drops the records whose proposal has expired, whatever their state:
+        none can authorize anything any more, and an unknown proposal is
+        refused as surely as an expired one."""
+        now = self.clock()
+        for approval_id, approval in list(self._approvals.items()):
+            if now >= approval.proposal.expires_at:
+                del self._approvals[approval_id]
+                del self._by_proposal[approval.proposal.proposal_id]
 
     def _expire(self, approval: _Approval) -> None:
         if approval.state in (ApprovalState.PENDING, ApprovalState.APPROVED) and (

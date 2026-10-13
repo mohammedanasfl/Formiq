@@ -1,12 +1,14 @@
 """Which operations read Formiq data and which would change it: Formiq's own
 classification, by name, never the model's.
 
-Only the operations listed in READ_ACTIONS are reads. Every other name, a write
-listed below or any name Formiq does not know, is treated as a write: it never
-runs from a model's call, and running it would need the user's explicit
-approval of a proposal (app.approvals.store). Formiq has no write operations
-yet; WriteAction names the ones a later phase may add, so that a model asking
-for one is recognised and refused.
+Only the operations listed in READ_ACTIONS are reads, and only those in
+PROPOSAL_ACTIONS are proposals: they change nothing, but describe a write for
+the user to approve (app.approvals.store). Every other name, a write listed
+below or any name Formiq does not know, is treated as a write: it never runs
+from a model's call. The one write Formiq performs, creating a workout plan,
+runs only from the user's own approval of a proposal; WriteAction also names
+the writes a later phase may add, so that a model asking for one is recognised
+and refused.
 
 This module imports nothing from the rest of Formiq, so the coach graph can
 check every call against it.
@@ -17,6 +19,7 @@ from enum import StrEnum
 
 class Access(StrEnum):
     READ = "read"
+    PROPOSE = "propose"
     WRITE = "write"
 
 
@@ -35,7 +38,8 @@ READ_ACTIONS = frozenset(
 
 
 class WriteAction(StrEnum):
-    """Operations that would change the user's data. None is implemented."""
+    """Operations that would change the user's data. Only CREATE_WORKOUT_PLAN
+    is implemented, and only behind the user's approval."""
 
     CREATE_WORKOUT_PLAN = "create_workout_plan"
     MODIFY_WORKOUT_PLAN = "modify_workout_plan"
@@ -48,11 +52,18 @@ class WriteAction(StrEnum):
 
 WRITE_ACTIONS = frozenset(WriteAction)
 
+# the coach's proposals (app.tools), and the write each one proposes
+PROPOSAL_ACTIONS = {"propose_workout_plan": WriteAction.CREATE_WORKOUT_PLAN}
+
 
 def access_of(name: str) -> Access:
-    """READ only for the operations Formiq lists as reads; anything else would
-    have to be treated as a write."""
-    return Access.READ if name in READ_ACTIONS else Access.WRITE
+    """READ for the operations Formiq lists as reads, PROPOSE for its proposals;
+    anything else would have to be treated as a write."""
+    if name in READ_ACTIONS:
+        return Access.READ
+    if name in PROPOSAL_ACTIONS:
+        return Access.PROPOSE
+    return Access.WRITE
 
 
 def is_write_action(name: str) -> bool:

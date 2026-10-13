@@ -62,6 +62,27 @@ class WorkoutPlanRepository:
             query = query.limit(limit)
         return list(self.session.scalars(query))
 
+    def find_first_scheduled_from(
+        self, user_id: int, *, status: str, scheduled_from: date
+    ) -> WorkoutPlan | None:
+        """The user's plan with this status scheduled on or after the date: the
+        earliest scheduled, then the most recently created; None if there is none."""
+        return self.session.scalars(
+            select(WorkoutPlan)
+            .options(*LOAD_EXERCISES)
+            .where(
+                WorkoutPlan.user_id == user_id,
+                WorkoutPlan.status == status,
+                WorkoutPlan.scheduled_date >= scheduled_from,
+            )
+            .order_by(
+                WorkoutPlan.scheduled_date,
+                WorkoutPlan.created_at.desc(),
+                WorkoutPlan.id.desc(),
+            )
+            .limit(1)
+        ).first()
+
     def update(self, plan: WorkoutPlan) -> WorkoutPlan:
         self.session.add(plan)
         self.session.flush()

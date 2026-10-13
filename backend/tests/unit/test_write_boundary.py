@@ -4,7 +4,8 @@ proposal through Formiq's own interaction boundary, the approval is unused and
 unexpired, the target has not changed since, and safety still allows it.
 Everything else fails closed, with its reason.
 
-No write exists yet: these tests check the gate a future write must pass. The
+Creating a workout plan is the one write that goes through it
+(app.services.plan_proposal_service); these tests check the gate itself. The
 clock is a fake, so expiry needs no waiting.
 """
 
@@ -582,3 +583,105 @@ def test_no_approval_state_is_shared_between_stores(clock):
     assert refused(gate(second, proposal, approval_id), AuthorizationFailure.PROPOSAL_NOT_FOUND)
     assert second.state(approval_id) is None
     assert SafetyCategory.SAFE == SAFE.category
+
+
+# --- a new workout plan: its exercises as a list of records ---
+
+PLAN = {
+    "name": "Upper Body",
+    "scheduled_date": "2026-10-08",
+    "exercises": [
+        {"exercise_id": 2, "exercise_order": 1, "reps": 10, "sets": 3},
+        {"exercise_id": 8, "exercise_order": 2, "notes": "slow", "reps": 12, "sets": 3},
+    ],
+}
+
+
+def plan_draft(**parameters) -> ProposalDraft:
+    return ProposalDraft(action=WriteAction.CREATE_WORKOUT_PLAN, parameters={**PLAN, **parameters})
+
+
+def plan_proposal(store, user=A, **parameters):
+    return proposal_for(store, user=user, change=plan_draft(**parameters), version=None)
+
+
+def test_a_new_plan_with_its_exercises_is_approved_once(store):
+    proposal, approval_id = plan_proposal(store)
+
+    assert proposal.values() == PLAN
+    assert store.find(proposal.proposal_id) == (approval_id, proposal)
+    assert decide(store, proposal, approval_id).allowed
+    uses = [gate(store, proposal, approval_id, version=None, consume=True) for _ in range(2)]
+    assert [use.allowed for use in uses] == [True, False]
+
+
+@pytest.mark.parametrize("change", ["sets", "exercise", "order", "added"])
+def test_a_changed_exercise_is_not_covered_by_the_plans_approval(store, change):
+    proposal, approval_id = plan_proposal(store)
+    assert decide(store, proposal, approval_id).allowed
+    exercises = [dict(item) for item in PLAN["exercises"]]
+    if change == "sets":
+        exercises[0]["sets"] = 5
+    elif change == "exercise":
+        exercises[0]["exercise_id"] = 6
+    elif change == "order":
+        exercises.reverse()
+    else:
+        exercises.append({"exercise_id": 1, "exercise_order": 3, "reps": 1, "sets": 1})
+    other = propose(
+        plan_draft(exercises=exercises),
+        trusted_user_id=A,
+        request=SAFE,
+        resource_version=None,
+        now=NOW,
+        ttl=TTL,
+    )
+    changed = dataclasses.replace(proposal, parameters=other.parameters)
+
+    assert changed.binding() != proposal.binding()
+    assert refused(
+        gate(store, changed, approval_id, version=None, consume=True),
+        AuthorizationFailure.PROPOSAL_CHANGED,
+    )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{"user_id": 2}, {"approved": True}, {"Sets": 3}, {"notes": "x" * 501}, {"nested": {"a": 1}}],
+    ids=["user", "approval", "name", "long_text", "nested"],
+)
+def test_a_record_claiming_authority_or_breaking_the_rules_is_malformed(record):
+    with pytest.raises(MalformedProposal):
+        draft_from_call(
+            ToolCall("create_workout_plan", {"exercises": [{"exercise_id": 1, **record}]})
+        )
+
+
+def test_a_plan_has_at_most_twenty_records():
+    with pytest.raises(MalformedProposal):
+        draft_from_call(ToolCall("create_workout_plan", {"exercises": [{"sets": 1}] * 21}))
+
+
+def test_a_plan_whose_exercise_notes_are_flagged_gets_no_proposal():
+    with pytest.raises(SafetyBlocked):
+        propose(
+            plan_draft(exercises=[{"exercise_id": 1, "notes": "push through the pain"}]),
+            trusted_user_id=A,
+            request=SAFE,
+            resource_version=None,
+            now=NOW,
+            ttl=TTL,
+        )
+
+
+def test_expired_proposals_are_forgotten_when_another_is_registered(store, clock):
+    old, old_approval = plan_proposal(store)
+    clock.now += TTL
+
+    new, _ = plan_proposal(store)
+
+    assert store.find(old.proposal_id) is None
+    assert store.find(new.proposal_id) is not None
+    assert refused(
+        gate(store, old, old_approval, version=None), AuthorizationFailure.PROPOSAL_NOT_FOUND
+    )

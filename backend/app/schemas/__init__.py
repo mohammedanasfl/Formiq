@@ -1,5 +1,10 @@
 from app.schemas.auth import AccessTokenResponse, LoginRequest
-from app.schemas.coach import CoachMessageRequest, CoachMessageResponse
+from app.schemas.coach import (
+    CoachMessageRequest,
+    CoachMessageResponse,
+    ProposalApprovalRequest,
+    WorkoutPlanProposalResponse,
+)
 from app.schemas.equipment import EquipmentResponse
 from app.schemas.exercise import (
     Difficulty,
@@ -79,4 +84,6 @@ __all__ = [
     "AccessTokenResponse",
     "CoachMessageRequest",
     "CoachMessageResponse",
+    "ProposalApprovalRequest",
+    "WorkoutPlanProposalResponse",
 ]

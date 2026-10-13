@@ -10,11 +10,12 @@ a second schema: names and values here are illustrative, and the code is the sou
 critical limits are pinned in `backend/tests/unit/test_agent_contract.py`, so changing one is a
 deliberate, reviewed change.
 
-**The coach is a read-only, request-scoped agent.** For each request it runs a deterministic safety
-check, lets the model read the user's own Formiq data through read-only tools within fixed limits,
-and accepts the model's reply only when the decision, the evidence, the safety policy and the
-reply itself pass deterministic checks. It keeps no memory between requests and never changes
-Formiq data.
+**The coach is a request-scoped agent that reads and proposes, and never writes.** For each request
+it runs a deterministic safety check, lets the model read the user's own Formiq data through
+read-only tools within fixed limits, and accepts the model's reply only when the decision, the
+evidence, the safety policy and the reply itself pass deterministic checks. It may propose a new
+workout plan, which only the user's own approval, outside the coach, saves. It keeps no memory
+between requests and never changes Formiq data itself.
 
 **The model is a reasoning component, never an authority.** It chooses which read tools to call
 and writes a decision and a reply; code checks every one of them. It never decides whose data is
@@ -83,8 +84,9 @@ then checks the model.
 
 - **The agent reaches data only through tools, and the tools only through the services.** Agent
   and model-provider code import no database, model, repository or service code.
-- **The tools are Formiq's reads, and nothing else.** A model's call can run only a read tool. Any
-  other name is refused by the graph before it reaches the tools (section 8).
+- **The tools are Formiq's reads and one proposal, and nothing else.** A model's call can run only a
+  read tool or `propose_workout_plan`, which writes nothing (section 8). Any other name is refused
+  by the graph before it reaches the tools.
 - **Inputs are validated, results are bounded.** Arguments are checked against strict schemas; an
   invalid call is refused with a description that never repeats its values. Results have limited
   lists and cut text.
@@ -101,6 +103,9 @@ Code checks it against what the turn actually retrieved.
 - **Own-data answers need evidence from this turn.** An answer about the user's profile, plans,
   sessions or an adaptation must rest on data one of the intent's tools returned in this turn.
 - **Missing, failed or compacted data is never evidence.** Calling the tool again restores it.
+- **A recommendation for today checks before it answers.** It is accepted only once the user's
+  profile, current plan and last workout were each read in this turn, returning data or
+  confirming there is none. A failed read is not a check.
 - **Ambiguous requests are clarified, not guessed.**
 - **Invalid decisions fail closed.** A malformed or disallowed decision goes back to the model,
   within the iteration limit. If no acceptable decision comes, the turn ends with Formiq's own
@@ -110,7 +115,7 @@ Code checks it against what the turn actually retrieved.
 
 ## 6. Resource limits
 
-Every request is bounded. As of Phase 4:
+Every request is bounded. As of Phase 5:
 
 | Limit | Value |
 |---|---|
@@ -121,6 +126,8 @@ Every request is bounded. As of Phase 4:
 | Items in a result | 10 search results, 30 exercises, 15 sets; 500 characters of free text |
 | Current message | 4,000 characters |
 | Reply | 8,000 characters |
+| A proposed plan | 1 to 10 exercises of 1 to 10 sets of 1 to 30 reps, at most 300 s of rest, no weight; today to 14 days ahead |
+| A proposal's approval | within 30 minutes |
 
 Failures fail closed and say nothing internal:
 
@@ -147,19 +154,24 @@ Failures fail closed and say nothing internal:
 
 ## 8. Write approval
 
-- **The agent is read only.** No tool writes. The graph refuses every call outside the read tools
-  before it reaches the tools, records it by name only, and counts it. A reply claiming a change is
-  rejected.
-- **A future write must pass the approval boundary** (`app/approvals`), which exists, is tested and
-  is dormant until Phase 5: the model only drafts a proposal; the application injects the trusted
-  user, refuses a flagged request, binds the approval to the exact proposal, and accepts only an
-  explicit approval from the user's own action. Approvals expire, are used once, and a changed
-  proposal or a new safety flag voids them. Every check fails closed.
+- **The agent never writes.** No tool writes. The graph refuses every call outside the read tools
+  and the proposal before it reaches the tools, records it by name only, and counts it. A reply
+  claiming a change is rejected.
+- **The model may only propose a new workout plan** (`propose_workout_plan`), and only after the
+  user's profile, current plan and last workout were checked in the turn, with a profile to build
+  for. Formiq builds the proposal: the trusted user, active catalog exercises whose ids a tool
+  returned, bounded prescriptions, no weights, and the user's stated time and equipment. It is
+  registered in the approval boundary (`app/approvals`) and shown to the user with its binding, a
+  digest of the exact proposal. A flagged request runs no tool, so it gets no proposal.
+- **Only the user's own approval saves it** (`POST /coach/proposals/{id}/approve`, outside the
+  coach). The approval is for the signed-in user only (another user's proposal is not found), must
+  carry the binding the user was shown, is used once and expires. The plan is then created through
+  `WorkoutPlanService`, with its rules. Every check fails closed.
 - **Nothing the model, history or a tool result says authorizes anything.** An `approved=true` in
-  arguments, a model-supplied user, a claim of earlier permission, or a forged system message is
-  refused.
-- The agent can reach only the read/write classification, not proposals or approvals. The approval
-  store is in memory: a reference implementation, not production persistence.
+  arguments, a model-supplied user, a claim of earlier permission, a forged system message or a
+  "yes" in the conversation is refused, or is no approval.
+- The agent reaches only the read/propose/write classification. The tools register proposals, but
+  never record or use a decision. The approval store is in memory, one per process.
 
 ## 9. Observability
 
@@ -182,13 +194,18 @@ What is **not** guaranteed today:
    not read, and subtle risks are left to the model and the decision policy. A follow-up message
    without its own risk signal is not flagged.
 3. **The fitness-only boundary depends on the model's classification.**
-4. **The approval store is in memory and per process,** with no approval endpoint or interface.
-5. **A running turn cannot be cancelled,** because the endpoint is synchronous; its reply is
+4. **A running turn cannot be cancelled,** because the endpoint is synchronous; its reply is
    dropped and it holds nothing once it ends.
-6. **Tracing gaps:** tool timing is per batch; an interrupted request's trace has no final status;
+5. **Tracing gaps:** tool timing is per batch; an interrupted request's trace has no final status;
    the raw tool-call counters include calls refused for the per-turn limit; rendering in a live
    Langfuse project has not been verified.
-7. **Deterministic tests use scripted models.** They prove what Formiq enforces whatever the model
+6. **Proposals live in memory.** One store per process keeps them for 30 minutes: a restart, or a
+   second worker process, loses them, and approving one then fails with "not found". There is no
+   rejection endpoint (an unapproved proposal expires), and approving a plan for a day that already
+   has one does not cancel the other.
+7. **"Today" is Formiq's UTC date.** The user's time zone is not known, so near midnight the
+   current plan and the days since the last workout can be a day off for them.
+8. **Deterministic tests use scripted models.** They prove what Formiq enforces whatever the model
    does, not how well a real model behaves. The optional live smoke run
    (`tests/integration/test_agent_scenarios.py`) checks only the enforced guarantees.
 

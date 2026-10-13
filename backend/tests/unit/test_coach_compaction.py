@@ -3,7 +3,7 @@ the earlier conversation and the fitting of a model request to its budget.
 Pure functions: no graph, no model, no database."""
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -37,10 +37,10 @@ from app.tools.limits import (
     MAX_TEXT_LENGTH,
 )
 from app.tools.schemas import (
+    CurrentWorkoutPlanOutput,
+    LatestWorkoutSessionOutput,
     PlanExerciseOutput,
     SessionExerciseOutput,
-    WorkoutPlanOutput,
-    WorkoutSessionOutput,
     WorkoutSetOutput,
 )
 from tests.coach import call, tool_turn
@@ -372,8 +372,14 @@ def test_whatever_the_turn_holds_a_fitting_request_is_within_the_budget():
 # the budget against the tools' limits
 
 
+# the discovery tools' outputs: the plan or session output, and their place
+# relative to today
+
+
 def largest_session():
-    return WorkoutSessionOutput(
+    return LatestWorkoutSessionOutput(
+        today=date.max,
+        days_ago=-(10**6),
         session_id=2**31 - 1,
         workout_plan_id=2**31 - 1,
         status="COMPLETED",
@@ -399,7 +405,9 @@ def largest_session():
 
 
 def largest_plan():
-    return WorkoutPlanOutput(
+    return CurrentWorkoutPlanOutput(
+        today=date.max,
+        days_from_today=-(10**6),
         plan_id=2**31 - 1,
         name="P" * 150,
         status="PLANNED",

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Annotated
 
@@ -6,6 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.ai import GeminiProvider
+from app.approvals import ApprovalStore
 from app.core.config import settings
 from app.core.security import AccessTokens
 from app.db.database import get_db
@@ -51,6 +53,21 @@ def get_tracer() -> Tracer:
 
 
 CoachTracer = Annotated[Tracer, Depends(get_tracer)]
+
+# how long a workout plan the coach proposed waits for the user's approval
+PROPOSAL_TTL = timedelta(minutes=30)
+
+
+@lru_cache
+def get_approval_store() -> ApprovalStore:
+    """The workout plans the coach proposed, waiting for the user's approval:
+    one store for the process, shared by all requests. It is in memory, so a
+    proposal made before a restart, or in another process, is not found, and
+    approving it fails closed."""
+    return ApprovalStore(clock=lambda: datetime.now(UTC), ttl=PROPOSAL_TTL)
+
+
+Approvals = Annotated[ApprovalStore, Depends(get_approval_store)]
 
 
 @lru_cache

@@ -34,6 +34,7 @@ class Intent(StrEnum):
     WORKOUT_HISTORY = "WORKOUT_HISTORY"
     EXERCISE = "EXERCISE"
     ADAPTATION = "ADAPTATION"
+    DAILY_WORKOUT = "DAILY_WORKOUT"
     SAFETY_SENSITIVE = "SAFETY_SENSITIVE"
     AMBIGUOUS = "AMBIGUOUS"
     # not about fitness: Formiq is a fitness coach, not a general assistant
@@ -72,6 +73,10 @@ class IntentPolicy:
     # from at least one of them, returned in this turn.
     data_tools: frozenset[str]
     decisions: frozenset[Decision]
+    # The tools RETRIEVE_THEN_ANSWER requires to have been checked in this turn,
+    # each one: it returned data, or that there is none. A failed or compacted
+    # result is not a check, so nothing is assumed about what it would hold.
+    checked_tools: frozenset[str] = frozenset()
 
 
 # ASK_CLARIFICATION, SAFE_REDIRECT and CANNOT_ANSWER answer nothing from data, so
@@ -124,6 +129,17 @@ POLICY: dict[Intent, IntentPolicy] = {
         "or progress.",
         _USER_DATA_TOOLS,
         frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
+    ),
+    Intent.DAILY_WORKOUT: IntentPolicy(
+        "What the user should do today or in their next workout: their planned workout, "
+        "a shorter or lighter version of it, or rest, including around limited time, "
+        "tiredness or a missed workout. Answering it needs their profile, current plan and "
+        "last workout checked in this turn, together.",
+        _USER_DATA_TOOLS,
+        frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
+        checked_tools=frozenset(
+            {"get_user_profile", "get_current_workout_plan", "get_latest_workout_session"}
+        ),
     ),
     Intent.SAFETY_SENSITIVE: IntentPolicy(
         "Pain or injury, medical conditions, diagnosis or treatment, potentially "
@@ -306,8 +322,32 @@ def data_status(result: dict[str, Any]) -> DataStatus:
     return DataStatus.UNEXPECTED
 
 
+# what a check of a tool may find: its data, or that there is none
+_CHECKED = frozenset({DataStatus.AVAILABLE, DataStatus.INCOMPLETE, DataStatus.MISSING})
+
+
 def has_data(result: ToolResult) -> bool:
     return data_status(result.result) in (DataStatus.AVAILABLE, DataStatus.INCOMPLETE)
+
+
+def check_proposal(results: Sequence[ToolResult]) -> str | None:
+    """Why a workout plan cannot be proposed yet, given the tool results of the
+    turn so far; None when it can. Like a recommendation for today, a proposal
+    rests on the profile, current plan and last workout checked in this turn, so
+    a suitable plan is seen before another is made; and it needs the profile's
+    data, which the plan is built for."""
+    checked = {result.call.name for result in results if data_status(result.result) in _CHECKED}
+    if unchecked := POLICY[Intent.DAILY_WORKOUT].checked_tools - checked:
+        return (
+            f"check {', '.join(sorted(unchecked))} before proposing a plan: a suitable "
+            "planned workout is recommended, not duplicated"
+        )
+    if not any(result.call.name == "get_user_profile" and has_data(result) for result in results):
+        return (
+            "the user has no fitness profile to build a plan for: ask about their "
+            "experience and equipment, or suggest they set up their profile"
+        )
+    return None
 
 
 def tools_used(results: Iterable[ToolResult]) -> tuple[str, ...]:
@@ -323,6 +363,15 @@ def check_decision(
     if decision not in policy.decisions:
         allowed = ", ".join(sorted(policy.decisions))
         return f"{decision} is not a decision for a {intent} request; use one of: {allowed}"
+    if decision is Decision.RETRIEVE_THEN_ANSWER and (
+        unchecked := policy.checked_tools
+        - {result.call.name for result in results if data_status(result.result) in _CHECKED}
+    ):
+        return (
+            f"a {intent} answer needs {', '.join(sorted(unchecked))} checked in this turn, "
+            "and they were not: call them, together, then decide; if a call failed, use "
+            "ASK_CLARIFICATION or CANNOT_ANSWER"
+        )
     if decision is Decision.RETRIEVE_THEN_ANSWER and not any(
         has_data(result) for result in results if result.call.name in policy.data_tools
     ):
@@ -393,16 +442,29 @@ def is_canonical_id(value: Any) -> bool:
 
 
 def ungrounded_ids(call: ToolCall, known: set[int]) -> list[str]:
-    """The call's resource id arguments that neither the user nor a tool gave:
-    an id that is not canonical, or a canonical one that is not known. An id
-    left out (None) is not one.
+    """The call's resource id arguments, those in a list of records (such as a
+    proposed plan's exercises) included, that neither the user nor a tool
+    gave: an id that is not canonical, or a canonical one that is not known. An
+    id left out (None) is not one.
 
     user_id is not one of them: the tools reject it outright.
     """
     ungrounded = []
-    for name, value in call.arguments.items():
-        if not name.endswith("_id") or name == "user_id" or value is None:
+    for name, value in _id_arguments(call.arguments):
+        if name == "user_id" or value is None:
             continue
         if not is_canonical_id(value) or value not in known:
             ungrounded.append(f"{name}={value!r}")
     return ungrounded
+
+
+def _id_arguments(arguments: dict[str, Any]) -> list[tuple[str, Any]]:
+    found = []
+    for name, value in arguments.items():
+        if name.endswith("_id"):
+            found.append((name, value))
+        elif isinstance(value, list):
+            for record in value:
+                if isinstance(record, dict):
+                    found += _id_arguments(record)
+    return found

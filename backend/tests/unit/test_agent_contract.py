@@ -10,6 +10,7 @@ approval boundary can reach.
 
 import ast
 import importlib
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ import app
 from app.agent import RESPOND, SAFETY_POLICY, CoachState
 from app.agent.policy import Respond
 from app.ai import ModelTurn, ToolCall
-from app.approvals import READ_ACTIONS
+from app.approvals import PROPOSAL_ACTIONS, READ_ACTIONS, WriteAction
 from app.tools import TOOL_DECLARATIONS
 
 APP = Path(app.__file__).parent
@@ -52,10 +53,13 @@ PINNED = {
         "MIN_DAILY_CALORIES": 800,
         "MAX_FAST_HOURS": 72,
     },
+    # a proposed plan waits this long for the user's approval
+    "app.api.dependencies": {"PROPOSAL_TTL": timedelta(minutes=30)},
 }
 
-# The only operations a model's call may run: Formiq's reads. Pinned, so a write
-# slipping into them fails here.
+# The only operations a model's call may run: Formiq's reads, and its one
+# proposal, which saves nothing. Pinned, so a write slipping into them fails here.
+PROPOSALS = {"propose_workout_plan": WriteAction.CREATE_WORKOUT_PLAN}
 READS = frozenset(
     {
         "get_user_profile",
@@ -87,9 +91,10 @@ def test_the_pinned_limits_are_the_production_limits(module):
     assert actual == PINNED[module]
 
 
-def test_the_model_can_reach_only_formiqs_reads():
-    assert {declaration.name for declaration in TOOL_DECLARATIONS} == READS
+def test_the_model_can_reach_only_formiqs_reads_and_its_proposal():
+    assert {declaration.name for declaration in TOOL_DECLARATIONS} == READS | set(PROPOSALS)
     assert READ_ACTIONS == READS
+    assert PROPOSAL_ACTIONS == PROPOSALS
 
 
 def test_the_model_controls_only_its_calls_and_its_respond_arguments():

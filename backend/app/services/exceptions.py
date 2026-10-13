@@ -128,3 +128,13 @@ class SessionExerciseOrderTakenError(WorkoutSessionConflictError):
 
 class SetNumberTakenError(WorkoutSessionConflictError):
     """Another set of the session exercise already has this set_number."""
+
+
+class ProposalNotFoundError(ServiceError):
+    """The user has no workout plan proposal with this id: it never existed, is
+    another user's, or has expired and been forgotten."""
+
+
+class ProposalNotApprovableError(ServiceError):
+    """The approval was refused: it was for something other than the proposal
+    as shown, or the proposal was already approved, or has expired."""

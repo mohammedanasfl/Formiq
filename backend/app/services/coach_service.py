@@ -1,6 +1,7 @@
 import logging
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
@@ -14,6 +15,7 @@ from app.agent import (
     initial_state,
 )
 from app.ai import GeminiProvider
+from app.approvals import ApprovalStore, WriteProposal
 from app.observability import TRACING_OFF, Failure, RunTrace, Tracer, classify
 from app.repositories import UserRepository
 from app.services.exceptions import UserNotFoundError
@@ -23,25 +25,52 @@ from app.services.user_service import UserService
 from app.services.workout_plan_service import WorkoutPlanService
 from app.services.workout_session_service import WorkoutSessionService
 from app.tools import FormiqTools
+from app.tools.schemas import ProposedWorkoutPlanOutput
 
 logger = logging.getLogger(__name__)
+
+# the decisions that answer the user, and so may show them a proposed plan
+_ANSWERS = frozenset({Decision.ANSWER, Decision.RETRIEVE_THEN_ANSWER})
+
+
+@dataclass(frozen=True)
+class CoachAnswer:
+    reply: str
+    # The workout plan the coach proposed in this turn, for the user to review
+    # and approve, and how it was described: the last one, when the turn ended
+    # with an answer. Not saved.
+    proposal: tuple[WriteProposal, ProposedWorkoutPlanOutput] | None = None
 
 
 class CoachService:
     def __init__(
-        self, session: Session, provider: GeminiProvider, tracer: Tracer = TRACING_OFF
+        self,
+        session: Session,
+        provider: GeminiProvider,
+        tracer: Tracer = TRACING_OFF,
+        approvals: ApprovalStore | None = None,
     ) -> None:
         self.session = session
         self.users = UserRepository(session)
         self.provider = provider
         self.tracer = tracer
+        # where proposed plans wait for the user's approval; None: none is proposed
+        self.approvals = approvals
 
     def reply(
         self, user_id: int, message: str, history: Sequence[ConversationTurn] = ()
     ) -> str:
-        """The coach's reply to the user's message, from the coach graph. history
-        is the earlier conversation the client sent, oldest first: the graph
-        sees it compacted to its bound, and it is stored nowhere.
+        """The coach's reply to the user's message (answer() without the
+        proposal)."""
+        return self.answer(user_id, message, history).reply
+
+    def answer(
+        self, user_id: int, message: str, history: Sequence[ConversationTurn] = ()
+    ) -> CoachAnswer:
+        """The coach's reply to the user's message, from the coach graph, and the
+        workout plan it proposed, if any. history is the earlier conversation the
+        client sent, oldest first: the graph sees it compacted to its bound, and
+        it is stored nowhere.
 
         Raises AIProviderNotConfiguredError when no API key is set, and
         AIProviderError when the model cannot answer.
@@ -58,7 +87,7 @@ class CoachService:
             conversation_turns=len(history),
         ) as trace:
             try:
-                reply, decision = self._reply(user_id, message, history, trace)
+                reply, decision, tools = self._reply(user_id, message, history, trace)
             except Exception as error:
                 failure = (
                     Failure.USER_NOT_FOUND
@@ -78,7 +107,11 @@ class CoachService:
                 reply_chars=len(reply),
             )
             logger.info("Coach request %s ended: status=%s", request_id, status)
-            return reply
+            answered = (
+                decision.decision in _ANSWERS and decision.safety is SafetyCategory.SAFE
+            )
+            proposal = tools.proposals[-1] if answered and tools.proposals else None
+            return CoachAnswer(reply, proposal)
 
     def _reply(
         self,
@@ -86,7 +119,7 @@ class CoachService:
         message: str,
         history: Sequence[ConversationTurn],
         trace: RunTrace,
-    ) -> tuple[str, CoachDecision]:
+    ) -> tuple[str, CoachDecision, FormiqTools]:
         if self.users.get_by_id(user_id) is None:
             raise UserNotFoundError(f"user {user_id} does not exist")
         # End the read transaction, so its connection goes back to the pool
@@ -96,17 +129,17 @@ class CoachService:
 
         # The user goes into the run's context, never into the state: the model
         # cannot choose or change whose data the tools read.
+        tools = self._tools()
         state = coach_graph.invoke(
             initial_state(message, history),
-            context=CoachContext(
-                user_id=user_id, provider=self.provider, tools=self._tools(), trace=trace
-            ),
+            context=CoachContext(user_id=user_id, provider=self.provider, tools=tools, trace=trace),
         )
         trace.update(iterations=state["iteration_count"], compactions=state["context_compactions"])
-        return state["final_response"], state["decision"]
+        return state["final_response"], state["decision"], tools
 
     def _tools(self) -> FormiqTools:
-        """The coach's read-only tools, reading through the services on this session."""
+        """The coach's tools, reading through the services on this session and
+        proposing plans into the approval store."""
         return FormiqTools(
             users=UserService(self.session),
             profiles=UserProfileService(self.session),
@@ -114,6 +147,7 @@ class CoachService:
             sessions=WorkoutSessionService(self.session),
             catalog=ExerciseCatalogService(self.session),
             end_read=self.session.rollback,
+            approvals=self.approvals,
         )
 
 

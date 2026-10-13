@@ -36,6 +36,7 @@ from app.tools.schemas import (
     GetUserProfileInput,
     GetWorkoutPlanInput,
     GetWorkoutSessionInput,
+    ProposeWorkoutPlanInput,
     SearchExercisesInput,
     UserScopedInput,
 )
@@ -48,6 +49,7 @@ INPUTS = {
     "get_workout_session": GetWorkoutSessionInput,
     "get_current_workout_plan": GetCurrentWorkoutPlanInput,
     "get_latest_workout_session": GetLatestWorkoutSessionInput,
+    "propose_workout_plan": ProposeWorkoutPlanInput,
     "get_exercise": GetExerciseInput,
     "search_exercises": SearchExercisesInput,
 }
@@ -96,7 +98,7 @@ def exercise(exercise_id, name="Push-Up", **fields):
 # declarations
 
 
-def test_there_are_seven_read_only_tools():
+def test_there_are_seven_reads_and_one_proposal():
     assert [tool.name for tool in TOOL_DECLARATIONS] == list(INPUTS)
 
 

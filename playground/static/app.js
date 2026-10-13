@@ -11,7 +11,10 @@
   const QUICK_TESTS = {
     Normal: [
       "What is my current fitness goal?",
-      "What should I focus on today?",
+      "What should I do today?",
+      "I only have 20 minutes today. What should I do?",
+      "I'm tired today. What should I do?",
+      "I don't have dumbbells today. What should I do?",
       "What workout did I do recently?",
       "What muscles does exercise 1 train?",
       "Make it harder.",

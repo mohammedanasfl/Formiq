@@ -25,6 +25,12 @@ from app.ai import ToolCall
 from app.approvals.access import WriteAction
 
 Scalar = bool | int | float | str
+# A list of flat records, such as the exercises of a new workout plan: one
+# level of nesting, under the same name and size rules as the parameters.
+Records = list[dict[str, Scalar]]
+# a parameter value as a WriteProposal holds it: a records value is frozen into
+# a tuple of each record's sorted (name, value) pairs
+Value = Scalar | tuple[tuple[tuple[str, Scalar], ...], ...]
 
 
 class ResourceType(StrEnum):
@@ -81,6 +87,7 @@ RESERVED = frozenset(
 )
 
 MAX_PARAMETERS = 20
+MAX_RECORDS = 20
 MAX_VALUE_CHARS = 500
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,40}")
 
@@ -111,7 +118,7 @@ class ProposalDraft(BaseModel):
 
     action: WriteAction
     target_id: Annotated[int, Field(ge=1, le=2_147_483_647)] | None = None
-    parameters: dict[str, Scalar] = Field(default_factory=dict, max_length=MAX_PARAMETERS)
+    parameters: dict[str, Scalar | Records] = Field(default_factory=dict, max_length=MAX_PARAMETERS)
 
     @model_validator(mode="after")
     def check(self) -> Self:
@@ -121,13 +128,25 @@ class ProposalDraft(BaseModel):
         if not names_a_resource and self.target_id is not None:
             raise ValueError(f"{self.action} does not change an existing resource")
         for name, value in self.parameters.items():
-            if not _NAME.fullmatch(name):
-                raise ValueError("a parameter name must be lower_snake_case")
-            if reserved_name(name):
-                raise ValueError(f"{name} is set by Formiq, never in a proposal")
-            if isinstance(value, str) and len(value) > MAX_VALUE_CHARS:
-                raise ValueError(f"{name} is longer than {MAX_VALUE_CHARS} characters")
+            _check_parameter(name, value)
+            if isinstance(value, list):
+                if len(value) > MAX_RECORDS:
+                    raise ValueError(f"{name} has more than {MAX_RECORDS} records")
+                for record in value:
+                    if len(record) > MAX_PARAMETERS:
+                        raise ValueError(f"a record of {name} has too many values")
+                    for key, item in record.items():
+                        _check_parameter(key, item)
         return self
+
+
+def _check_parameter(name: str, value: Any) -> None:
+    if not _NAME.fullmatch(name):
+        raise ValueError("a parameter name must be lower_snake_case")
+    if reserved_name(name):
+        raise ValueError(f"{name} is set by Formiq, never in a proposal")
+    if isinstance(value, str) and len(value) > MAX_VALUE_CHARS:
+        raise ValueError(f"{name} is longer than {MAX_VALUE_CHARS} characters")
 
 
 def draft_from_call(call: ToolCall) -> ProposalDraft:
@@ -162,7 +181,7 @@ class WriteProposal:
     action: WriteAction
     target: ResourceRef
     # sorted (name, value) pairs
-    parameters: tuple[tuple[str, Scalar], ...]
+    parameters: tuple[tuple[str, Value], ...]
     # the version of the target the change was based on, when it has one
     resource_version: str | None
     created_at: datetime
@@ -184,12 +203,46 @@ class WriteProposal:
         return hashlib.sha256(text.encode()).hexdigest()
 
     def text_values(self) -> list[str]:
-        return [value for _, value in self.parameters if isinstance(value, str)]
+        return _texts(self.parameters)
+
+    def names(self) -> list[str]:
+        """Every parameter name, the records' own included."""
+        return [name for name, _ in _pairs(self.parameters)]
+
+    def values(self) -> dict[str, Any]:
+        """The parameters as plain data, records as lists of dicts."""
+        return {
+            name: [dict(record) for record in value] if isinstance(value, tuple) else value
+            for name, value in self.parameters
+        }
 
 
-def _typed(value: Scalar) -> list[Any]:
+def _pairs(parameters: tuple[tuple[str, Value], ...]) -> list[tuple[str, Scalar]]:
+    """Every (name, value) pair, the records' own included."""
+    pairs: list[tuple[str, Scalar]] = []
+    for name, value in parameters:
+        if isinstance(value, tuple):
+            pairs += [pair for record in value for pair in record]
+        else:
+            pairs.append((name, value))
+    return pairs
+
+
+def _texts(parameters: tuple[tuple[str, Value], ...]) -> list[str]:
+    return [value for _, value in _pairs(parameters) if isinstance(value, str)]
+
+
+def _typed(value: Value) -> list[Any]:
     # 1, 1.0 and True compare equal in Python: their types keep them apart
+    if isinstance(value, tuple):
+        return ["records", [[[key, _typed(item)] for key, item in record] for record in value]]
     return [type(value).__name__, value]
+
+
+def _frozen(value: Scalar | Records) -> Value:
+    if isinstance(value, list):
+        return tuple(tuple(sorted(record.items())) for record in value)
+    return value
 
 
 def safety_of(request: SafetyAssessment, texts: list[str]) -> SafetyAssessment:
@@ -217,8 +270,8 @@ def propose(
     the user's message. SafetyBlocked when it or the change is flagged;
     MalformedProposal when a change to an existing resource has no version."""
     resource_type, names_a_resource = TARGETS[draft.action]
-    parameters = tuple(sorted(draft.parameters.items()))
-    flagged = safety_of(request, [v for _, v in parameters if isinstance(v, str)])
+    parameters = tuple(sorted((name, _frozen(value)) for name, value in draft.parameters.items()))
+    flagged = safety_of(request, _texts(parameters))
     if flagged.enforced:
         raise SafetyBlocked(flagged)
     if names_a_resource and resource_version is None:

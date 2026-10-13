@@ -2,8 +2,9 @@
 last workout are found without an id, for the trusted user only, and the
 existing lookups by id work as before.
 
-The current plan is the user's PLANNED plan with the latest scheduled date;
-the last workout is their most recently started COMPLETED session.
+The current plan is the user's PLANNED plan scheduled for today, or else the
+next one, or else the latest before today; the last workout is their most
+recently started COMPLETED session. Both say where they are relative to today.
 
 They require the local PostgreSQL container to be running. Test data is only
 flushed in db_session, which is rolled back after each test.
@@ -27,6 +28,10 @@ from tests.integration.workout_plans import add_plan, add_user
 from tests.integration.workout_sessions import add_session
 
 DAY = datetime(2026, 10, 1, 7, 0, tzinfo=UTC)
+# the request's date, fixed for these tests
+TODAY = date(2026, 10, 8)
+# what the discovery tools add to the output of the lookup by id
+RELATIVE_TO_TODAY = ("today", "days_from_today", "days_ago")
 
 
 @pytest.fixture
@@ -39,6 +44,7 @@ def tools(db_session):
         catalog=ExerciseCatalogService(db_session),
         # ending the read would roll back the flushed test data
         end_read=Mock(),
+        today=TODAY,
     )
 
 
@@ -62,6 +68,28 @@ def run(tools, name, *, user_id, **arguments):
     return result
 
 
+def by_id_output(result):
+    """The discovery result as the lookup by id returns it."""
+    return {
+        "output": {
+            key: value
+            for key, value in result["output"].items()
+            if key not in RELATIVE_TO_TODAY
+        }
+    }
+
+
+def planned(db_session, user, name, day, exercise_id, status="PLANNED"):
+    return add_plan(
+        db_session,
+        user,
+        name,
+        exercise_ids=[exercise_id],
+        status=status,
+        scheduled_date=TODAY + timedelta(days=day),
+    )
+
+
 def session_on(db_session, user, day, status, exercise_id):
     return add_session(
         db_session,
@@ -78,56 +106,56 @@ def session_on(db_session, user, day, status, exercise_id):
 # --- the current workout plan ---
 
 
-def test_the_current_plan_is_the_latest_scheduled_planned_plan(
+def test_the_current_plan_is_the_planned_plan_for_today(
     tools, db_session, user, other_user, exercise_id
 ):
-    add_plan(
-        db_session,
-        user,
-        "Old",
-        exercise_ids=[exercise_id],
-        status="PLANNED",
-        scheduled_date=date(2026, 10, 1),
-    )
-    current = add_plan(
-        db_session,
-        user,
-        "Current",
-        exercise_ids=[exercise_id],
-        status="PLANNED",
-        scheduled_date=date(2026, 10, 10),
-    )
+    planned(db_session, user, "Yesterday", -1, exercise_id)
+    today = planned(db_session, user, "Today", 0, exercise_id)
+    planned(db_session, user, "Tomorrow", 1, exercise_id)
     # never current: not ready, not to be done, or another user's
-    add_plan(
-        db_session,
-        user,
-        "Draft",
-        exercise_ids=[exercise_id],
-        status="DRAFT",
-        scheduled_date=date(2026, 10, 20),
-    )
-    add_plan(
-        db_session,
-        user,
-        "Gone",
-        exercise_ids=[exercise_id],
-        status="CANCELLED",
-        scheduled_date=date(2026, 10, 30),
-    )
-    add_plan(
-        db_session,
-        other_user,
-        "Theirs",
-        exercise_ids=[exercise_id],
-        status="PLANNED",
-        scheduled_date=date(2026, 11, 1),
-    )
+    planned(db_session, user, "Draft", 0, exercise_id, status="DRAFT")
+    planned(db_session, user, "Gone", 0, exercise_id, status="CANCELLED")
+    planned(db_session, other_user, "Theirs", 0, exercise_id)
 
     result = run(tools, "get_current_workout_plan", user_id=user.id)
 
-    assert result["output"]["plan_id"] == current.id
-    # the same output as the lookup by id, which still works
-    assert result == run(tools, "get_workout_plan", user_id=user.id, plan_id=current.id)
+    assert result["output"]["plan_id"] == today.id
+    assert result["output"]["today"] == TODAY.isoformat()
+    assert result["output"]["days_from_today"] == 0
+    # otherwise the same output as the lookup by id, which still works
+    assert by_id_output(result) == run(
+        tools, "get_workout_plan", user_id=user.id, plan_id=today.id
+    )
+
+
+def test_without_a_plan_for_today_the_current_plan_is_the_next_one(
+    tools, db_session, user, other_user, exercise_id
+):
+    planned(db_session, user, "Past", -3, exercise_id)
+    later = planned(db_session, user, "Later", 2, exercise_id)
+    planned(db_session, user, "Much later", 12, exercise_id)
+    planned(db_session, user, "Draft", 1, exercise_id, status="DRAFT")
+    planned(db_session, other_user, "Theirs", 1, exercise_id)
+
+    result = run(tools, "get_current_workout_plan", user_id=user.id)
+
+    assert result["output"]["plan_id"] == later.id
+    assert result["output"]["days_from_today"] == 2
+
+
+def test_without_a_plan_today_or_later_the_current_plan_is_the_latest_before(
+    tools, db_session, user, other_user, exercise_id
+):
+    planned(db_session, user, "Older", -7, exercise_id)
+    latest = planned(db_session, user, "Latest", -3, exercise_id)
+    planned(db_session, user, "Gone", 1, exercise_id, status="CANCELLED")
+    planned(db_session, other_user, "Theirs", 0, exercise_id)
+
+    result = run(tools, "get_current_workout_plan", user_id=user.id)
+
+    # in the past: the coach can see it was missed if no workout followed it
+    assert result["output"]["plan_id"] == latest.id
+    assert result["output"]["days_from_today"] == -3
 
 
 def test_without_a_planned_plan_there_is_no_current_plan(
@@ -166,8 +194,11 @@ def test_the_last_workout_is_the_most_recently_started_completed_session(
     result = run(tools, "get_latest_workout_session", user_id=user.id)
 
     assert result["output"]["session_id"] == last.id
-    # the same output as the lookup by id, which still works
-    assert result == run(
+    # completed on October 5, three days before TODAY
+    assert result["output"]["today"] == TODAY.isoformat()
+    assert result["output"]["days_ago"] == 3
+    # otherwise the same output as the lookup by id, which still works
+    assert by_id_output(result) == run(
         tools, "get_workout_session", user_id=user.id, session_id=last.id
     )
 

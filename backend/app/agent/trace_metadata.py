@@ -15,6 +15,7 @@ _USER_SCOPED = frozenset(
         "get_workout_session",
         "get_current_workout_plan",
         "get_latest_workout_session",
+        "propose_workout_plan",
     }
 )
 

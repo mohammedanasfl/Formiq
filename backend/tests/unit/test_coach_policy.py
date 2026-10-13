@@ -15,6 +15,7 @@ from app.agent.policy import (
     DataStatus,
     Respond,
     check_decision,
+    check_proposal,
     data_status,
     is_canonical_id,
     known_ids,
@@ -46,6 +47,7 @@ def test_the_intents_and_decisions():
         "WORKOUT_HISTORY",
         "EXERCISE",
         "ADAPTATION",
+        "DAILY_WORKOUT",
         "SAFETY_SENSITIVE",
         "AMBIGUOUS",
         "OUT_OF_SCOPE",
@@ -91,10 +93,12 @@ def test_questions_about_the_users_data_name_the_tools_that_hold_it():
         "get_current_workout_plan",
         "get_latest_workout_session",
     }
+    assert POLICY[Intent.DAILY_WORKOUT].data_tools == POLICY[Intent.ADAPTATION].data_tools
     # a decision answered from data needs a tool to get it from
     for policy in POLICY.values():
         if Decision.RETRIEVE_THEN_ANSWER in policy.decisions:
             assert policy.data_tools
+        assert policy.checked_tools <= policy.data_tools
 
 
 def test_safety_sensitive_and_ambiguous_requests_have_one_way_out():
@@ -209,6 +213,108 @@ def test_check_decision_is_deterministic_and_changes_nothing():
 
     assert len(outcomes) == 1
     assert results == before
+
+
+# the daily recommendation
+
+DAILY_CHECKS = ("get_user_profile", "get_current_workout_plan", "get_latest_workout_session")
+
+
+def daily(*statuses):
+    """The three checks' results, in DAILY_CHECKS order."""
+    return [result(name, value) for name, value in zip(DAILY_CHECKS, statuses, strict=True)]
+
+
+def test_only_the_daily_recommendation_requires_its_reads_checked():
+    checked = {intent: policy.checked_tools for intent, policy in POLICY.items()}
+
+    assert {intent: tools for intent, tools in checked.items() if tools} == {
+        Intent.DAILY_WORKOUT: set(DAILY_CHECKS)
+    }
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        daily(DATA, DATA, DATA),
+        # no plan and no workout yet, confirmed: answered honestly from the profile
+        daily(DATA, error("RESOURCE_NOT_FOUND"), error("RESOURCE_NOT_FOUND")),
+        # no profile, but a plan
+        daily(error("PROFILE_NOT_FOUND"), DATA, error("RESOURCE_NOT_FOUND")),
+    ],
+    ids=["all_data", "no_plan_no_history", "no_profile"],
+)
+def test_a_daily_recommendation_is_accepted_once_its_reads_are_checked(results):
+    assert check_decision(Intent.DAILY_WORKOUT, Decision.RETRIEVE_THEN_ANSWER, results) is None
+
+
+@pytest.mark.parametrize(
+    ("results", "reason"),
+    [
+        # recommending from the profile alone, without looking at the plan or history
+        ([result("get_user_profile")], "get_current_workout_plan, get_latest_workout_session"),
+        (daily(DATA, DATA, DATA)[:2], "get_latest_workout_session checked"),
+        # a failed read is not a check: nothing is assumed about what it would hold
+        (daily(DATA, error("TOOL_ERROR"), DATA), "get_current_workout_plan checked"),
+        (daily(DATA, DATA, error("TOOL_LIMIT_REACHED")), "get_latest_workout_session checked"),
+        # every read checked, nothing found: not an answer from data
+        (
+            daily(
+                error("PROFILE_NOT_FOUND"),
+                error("RESOURCE_NOT_FOUND"),
+                error("RESOURCE_NOT_FOUND"),
+            ),
+            "none was returned",
+        ),
+    ],
+    ids=["profile_only", "history_not_read", "plan_failed", "history_refused", "nothing_found"],
+)
+def test_a_daily_recommendation_is_rejected_until_its_reads_are_checked(results, reason):
+    assert reason in check_decision(Intent.DAILY_WORKOUT, Decision.RETRIEVE_THEN_ANSWER, results)
+
+
+def test_the_daily_checks_do_not_hold_back_a_question_or_cannot_answer():
+    for decision in (Decision.ASK_CLARIFICATION, Decision.CANNOT_ANSWER):
+        assert check_decision(Intent.DAILY_WORKOUT, decision, []) is None
+    assert "not a decision" in check_decision(Intent.DAILY_WORKOUT, Decision.ANSWER, [])
+
+
+# a proposed plan
+
+
+def test_a_plan_is_proposed_only_after_the_daily_reads_and_with_a_profile():
+    missing = error("RESOURCE_NOT_FOUND")
+
+    assert "check get_current_workout_plan, get_latest_workout_session" in check_proposal(
+        [result("get_user_profile")]
+    )
+    # a failed read is not a check
+    assert "check get_latest_workout_session" in check_proposal(
+        daily(DATA, DATA, error("TOOL_ERROR"))
+    )
+    assert "no fitness profile" in check_proposal(
+        daily(error("PROFILE_NOT_FOUND"), missing, missing)
+    )
+    # no plan and no workout yet: a plan is proposed from the profile
+    assert check_proposal(daily(DATA, missing, missing)) is None
+    assert check_proposal(daily(DATA, DATA, DATA)) is None
+
+
+def test_the_exercise_ids_of_a_proposed_plan_must_be_grounded():
+    proposal = ToolCall(
+        name="propose_workout_plan",
+        arguments={
+            "name": "Upper Body",
+            "exercises": [
+                {"exercise_id": 3, "sets": 3, "reps": 8},
+                {"exercise_id": 9, "sets": 3, "reps": 8},
+                {"exercise_id": "3", "sets": 3, "reps": 8},
+            ],
+        },
+    )
+
+    assert ungrounded_ids(proposal, {3}) == ["exercise_id=9", "exercise_id='3'"]
+    assert ungrounded_ids(proposal, {3, 9}) == ["exercise_id='3'"]
 
 
 # data status

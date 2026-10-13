@@ -602,6 +602,8 @@ class CannedTools:
     """Tools that answer with the scenario's outputs, within the real per-turn limit."""
 
     declarations = TOOL_DECLARATIONS
+    # as FormiqTools records the plans it proposed: canned outputs propose none
+    proposals = ()
 
     def __init__(self, outputs: dict[str, dict], users: list[int]) -> None:
         self.outputs, self.users = outputs, users

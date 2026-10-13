@@ -37,6 +37,7 @@ from app.agent.context import ConversationContext
 from app.agent.policy import CoachDecision
 from app.ai import AIModelOutputError, ModelTurn, ToolCall, ToolResult
 from app.approvals import (
+    PROPOSAL_ACTIONS,
     READ_ACTIONS,
     WRITE_ACTIONS,
     MalformedProposal,
@@ -333,7 +334,7 @@ def sent_bodies(message=SAFE_MESSAGE, turns=None):
     return bodies
 
 
-def test_gemini_is_offered_only_formiqs_reads_and_respond():
+def test_gemini_is_offered_only_formiqs_reads_its_proposal_and_respond():
     (body,) = sent_bodies()
 
     # one Tool, holding function declarations only: no code execution, search,
@@ -341,7 +342,7 @@ def test_gemini_is_offered_only_formiqs_reads_and_respond():
     (tool,) = body["tools"]
     assert set(tool) == {"functionDeclarations"}
     names = [declaration["name"] for declaration in tool["functionDeclarations"]]
-    assert sorted(names) == sorted(READ_ACTIONS | {"respond"})
+    assert sorted(names) == sorted(READ_ACTIONS | set(PROPOSAL_ACTIONS) | {"respond"})
     assert len(names) == len(set(names))
     allowed = body["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"]
     assert sorted(allowed) == sorted(names)

@@ -1,3 +1,4 @@
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -43,5 +44,44 @@ class CoachMessageRequest(BaseModel):
     history: list[CoachHistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
 
 
+class ProposedExerciseResponse(BaseModel):
+    exercise_order: int
+    exercise_id: int
+    exercise_name: str
+    # what the exercise needs, from the catalog; empty when nothing
+    equipment: list[str]
+    sets: int
+    reps: int
+    rest_seconds: int | None
+    notes: str | None
+
+
+class WorkoutPlanProposalResponse(BaseModel):
+    """A workout plan the coach proposed to the signed-in user. It is not saved:
+    approving it, with POST /coach/proposals/{proposal_id}/approve and its
+    binding, saves it as a PLANNED plan."""
+
+    proposal_id: str
+    # the digest of this exact proposal: an approval must carry it
+    binding: str
+    expires_at: datetime
+    name: str
+    scheduled_date: date
+    # ordered by exercise_order
+    exercises: list[ProposedExerciseResponse]
+    # Formiq's estimate of how long it takes
+    estimated_minutes: int
+
+
 class CoachMessageResponse(BaseModel):
     reply: str
+    # only when the coach proposed a workout plan in this reply
+    proposal: WorkoutPlanProposalResponse | None = None
+
+
+class ProposalApprovalRequest(BaseModel):
+    """The user's approval of a proposed plan, as it was shown to them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    binding: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]

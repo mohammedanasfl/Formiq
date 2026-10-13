@@ -1,6 +1,7 @@
 """The coach's side of the write boundary: no call from the model ever runs an
-operation that is not one of Formiq's reads, whatever it claims and whatever
-the tools could do, and nothing the coach runs with can reach approval state.
+operation that is not one of Formiq's reads or its plan proposal, whatever it
+claims and whatever the tools could do, and nothing the coach runs with can
+approve anything.
 
 The model and tools are fakes: no test calls Gemini or touches the database.
 """
@@ -24,7 +25,13 @@ from app.agent import (
     initial_state,
 )
 from app.ai import ToolDeclaration
-from app.approvals import READ_ACTIONS, WRITE_ACTIONS, ApprovalStore, WriteAction
+from app.approvals import (
+    PROPOSAL_ACTIONS,
+    READ_ACTIONS,
+    WRITE_ACTIONS,
+    ApprovalStore,
+    WriteAction,
+)
 from app.main import app as fastapi_app
 from app.observability import Tracer
 from app.observability.memory import MemoryBackend
@@ -183,12 +190,12 @@ def test_a_flagged_request_never_runs_a_write_and_gets_the_safe_reply(message):
 # --- what the coach runs with ---
 
 
-def test_the_coach_is_offered_and_can_run_only_formiqs_reads():
-    assert {tool.name for tool in TOOL_DECLARATIONS} == READ_ACTIONS
+def test_the_coach_is_offered_and_can_run_only_formiqs_reads_and_its_proposal():
+    assert {tool.name for tool in TOOL_DECLARATIONS} == READ_ACTIONS | set(PROPOSAL_ACTIONS)
     tools = FormiqTools(
         users=Mock(), profiles=Mock(), plans=Mock(), sessions=Mock(), catalog=Mock(), end_read=Mock()
     )
-    assert set(tools._tools) == READ_ACTIONS
+    assert set(tools._tools) == READ_ACTIONS | set(PROPOSAL_ACTIONS)
     assert not any(action in tools._tools for action in WriteAction)
 
 
@@ -216,10 +223,22 @@ def test_the_agent_reads_only_the_classification_of_the_write_boundary():
     for path, names in imports("agent").items():
         approvals = {name for name in names if name.startswith("app.approvals")}
         assert approvals <= {"app.approvals.access"}, path
-    # and the tools, the services and the API none of it
-    for package in ("tools", "services", "api", "repositories"):
-        for path, names in imports(package).items():
-            assert not any(name.startswith("app.approvals") for name in names), path
+    # the repositories none of it
+    for path, names in imports("repositories").items():
+        assert not any(name.startswith("app.approvals") for name in names), path
+
+
+def test_the_tools_can_register_a_proposal_but_never_decide_on_one():
+    # Only the user's approval, through the API, records a decision and uses
+    # it: the tools, which run the model's calls, only register proposals.
+    deciding = {"record", "authorize", "consume", "user_event", "ApprovalEvent"}
+    for path in (Path(app.__file__).parent / "tools").rglob("*.py"):
+        used = {
+            node.attr if isinstance(node, ast.Attribute) else node.id
+            for node in ast.walk(ast.parse(path.read_text()))
+            if isinstance(node, ast.Attribute | ast.Name)
+        }
+        assert not used & deciding, path
 
 
 def test_no_approval_store_lives_at_module_level():
@@ -230,12 +249,12 @@ def test_no_approval_store_lives_at_module_level():
             assert not isinstance(value, ApprovalStore), f"{module.name}.{name}"
 
 
-def test_the_api_has_no_approval_or_coach_write_endpoint():
+def test_the_api_has_one_approval_endpoint_for_the_coachs_proposals():
     paths = {
         (path, method.upper())
         for path, operations in fastapi_app.openapi()["paths"].items()
         for method in operations
     }
-    assert ("/coach/message", "POST") in paths
-    assert not any("approv" in path or "proposal" in path for path, _ in paths)
-    assert {p for p in paths if p[0].startswith("/coach")} == {("/coach/message", "POST")}
+    approve = ("/coach/proposals/{proposal_id}/approve", "POST")
+    assert {p for p in paths if p[0].startswith("/coach")} == {("/coach/message", "POST"), approve}
+    assert [p for p in paths if "approv" in p[0] or "proposal" in p[0]] == [approve]

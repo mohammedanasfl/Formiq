@@ -1,11 +1,13 @@
 """The write boundary: which operations would change Formiq data, what a
 proposed change is, and the approval a change needs before it may run.
 
-A model's proposal is never an authorization. Formiq has no write operation
-yet; this package is the contract a future one must go through.
+A model's proposal is never an authorization. Formiq's one write, creating a
+workout plan the coach proposed, goes through this package: only the user's own
+approval of the exact proposal lets it run, once.
 """
 
 from app.approvals.access import (
+    PROPOSAL_ACTIONS,
     READ_ACTIONS,
     WRITE_ACTIONS,
     Access,
@@ -37,6 +39,7 @@ from app.approvals.store import (
 )
 
 __all__ = [
+    "PROPOSAL_ACTIONS",
     "READ_ACTIONS",
     "WRITE_ACTIONS",
     "Access",

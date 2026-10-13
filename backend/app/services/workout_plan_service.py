@@ -1,3 +1,5 @@
+from datetime import date
+
 from sqlalchemy.orm import Session
 
 from app.models import WorkoutPlan, WorkoutPlanExercise
@@ -66,11 +68,16 @@ class WorkoutPlanService:
         """The user's plan, or None if the user has no plan with this id."""
         return self.plans.get_for_user(user_id, plan_id)
 
-    def get_current_plan(self, user_id: int) -> WorkoutPlan | None:
-        """The user's current plan: their PLANNED plan with the latest scheduled
-        date (then the most recently created), in the order the plans are
-        listed; None if they have no PLANNED plan. DRAFT plans are not ready and
+    def get_current_plan(self, user_id: int, today: date) -> WorkoutPlan | None:
+        """The user's current plan: their PLANNED plan scheduled for today, or
+        else the next one scheduled after today, or else the one scheduled most
+        recently before today; None if they have no PLANNED plan. Plans on the
+        same date go most recently created first. DRAFT plans are not ready and
         CANCELLED plans are not to be done, so neither is current."""
+        plan = self.plans.find_first_scheduled_from(user_id, status=PLANNED, scheduled_from=today)
+        if plan is not None:
+            return plan
+        # none today or later: the latest scheduled, as the plans are listed
         plans = self.plans.find_by_user(user_id, status=PLANNED, limit=1)
         return plans[0] if plans else None
 

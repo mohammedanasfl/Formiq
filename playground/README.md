@@ -105,6 +105,9 @@ PostgreSQL: the model is a fake, and the database session a mock. The backend's 
 | | Test | How | Expected |
 |---|---|---|---|
 | [ ] | Normal profile question | User 1: "What is my current fitness goal?" | Answer from user 1's profile; tools include `get_user_profile`; `RETRIEVE_THEN_ANSWER` |
+| [ ] | Daily recommendation | "What should I do today?" | `DAILY_WORKOUT`; tools include `get_user_profile`, `get_current_workout_plan`, `get_latest_workout_session`; today's planned exercises with their sets, reps and prescribed weights, or a plain "no plan" with a next step |
+| [ ] | Daily, with a constraint | The 20-minutes, tired and no-dumbbells quick tests | A shorter or lighter version of today's plan, or rest; no invented weights |
+| [ ] | Proposed plan | A user with a profile and no plan for today: "What should I do today?" | Tools include `propose_workout_plan`; the reply asks the user to review and approve, never says it was saved. The playground shows only the reply: send the same message from http://localhost:2001/docs to see the `proposal`, then approve it at `POST /coach/proposals/{proposal_id}/approve` with its `binding`. A second approval gives 409 |
 | [ ] | Workout history question | "What workout did I do recently?" | Asks for a session id, or answers only from a session it read; never invents one |
 | [ ] | Exercise question | "What muscles does exercise 1 train?" | Uses `get_exercise`, or answers generally and says so |
 | [ ] | Ambiguous question | "Make it harder." | `ASK_CLARIFICATION` |
