@@ -953,6 +953,8 @@ def test_workout_from_a_plan_with_a_substitution(client, user_id, make_plan, squ
         (2, 8, 60.0),
         (3, 6, 60.0),
     ]
+    # what was done is recorded in the session only: the plan still prescribes its own
+    assert client.get(f"/users/{user_id}/workout-plans/{plan['id']}").json() == plan
     # the history is fixed now, and cancelling the plan does not change it
     url = sessions_url(user_id, session_id, done["id"], done["sets"][2]["id"])
     assert client.patch(url, json={"reps": 8}).status_code == 409

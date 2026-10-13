@@ -37,7 +37,10 @@ class WorkoutSessionService:
         or as a manual workout without one. The database sets started_at. A user
         has at most one IN_PROGRESS session."""
         try:
-            if self.users.get_by_id(user_id) is None:
+            # The user's row stays locked until this transaction ends, so the
+            # user's sessions start one at a time: two requests at once cannot
+            # both find no IN_PROGRESS session and both start one.
+            if self.users.get_by_id_for_update(user_id) is None:
                 raise UserNotFoundError(f"user {user_id} does not exist")
             plan_id = session_data.workout_plan_id
             if plan_id is not None:

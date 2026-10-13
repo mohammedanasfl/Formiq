@@ -6,12 +6,16 @@ Services commit, so the service_session fixture empties the user, workout plan
 and workout session tables before and after each test.
 """
 
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy.exc import DataError
+from sqlalchemy.orm import Session
 
 from app.models import WorkoutSession
+from app.repositories import WorkoutSessionRepository
 from app.schemas import (
     UserCreate,
     WorkoutPlanCreate,
@@ -211,6 +215,38 @@ def test_create_session_rejects_a_second_session_in_progress(
 
     assert count_rows(test_engine, WorkoutSession) == 1
     assert stored_session(test_engine, running.id) == before
+
+
+def test_sessions_started_at_once_leave_one_in_progress(user, test_engine):
+    # two starts at the same moment, such as a double tap, each in its own request
+    user_id, barrier, outcomes = user.id, threading.Barrier(2), []
+    check = WorkoutSessionRepository.get_first_with_status
+
+    def slow_check(self, *args):
+        found = check(self, *args)
+        # time for the other request to check too, if it is not held back
+        time.sleep(0.3)
+        return found
+
+    def start():
+        with Session(test_engine) as session:
+            barrier.wait(timeout=5)
+            try:
+                WorkoutSessionService(session).create_session(user_id, WorkoutSessionCreate())
+                outcomes.append("started")
+            except SessionAlreadyInProgressError:
+                outcomes.append("refused")
+
+    with patch.object(WorkoutSessionRepository, "get_first_with_status", slow_check):
+        requests = [threading.Thread(target=start) for _ in range(2)]
+        for request in requests:
+            request.start()
+        for request in requests:
+            request.join(timeout=10)
+
+    # the second waits for the first, then finds its session
+    assert sorted(outcomes) == ["refused", "started"]
+    assert count_rows(test_engine, WorkoutSession) == 1
 
 
 @pytest.mark.parametrize("new", ["manual", "planned"])
