@@ -595,7 +595,9 @@ def test_patch_exercise_changes_only_the_supplied_fields(client, user_id, make_p
     assert response.status_code == 200
     after = response.json()
     assert (after["exercise_id"], after["weight_kg"]) == (squat, 60.0)
-    unchanged = set(before) - {"exercise_id", "weight_kg", "updated_at"}
+    # the catalog details follow the exercise
+    assert after["exercise"]["name"] == "Barbell Back Squat"
+    unchanged = set(before) - {"exercise_id", "exercise", "weight_kg", "updated_at"}
     assert {key: after[key] for key in unchanged} == {key: before[key] for key in unchanged}
     assert client.get(plans_url(user_id, plan["id"])).json()["exercises"] == [after]
 

@@ -175,13 +175,17 @@ def test_find_by_user_loads_exercises_in_a_fixed_number_of_queries(
 
     with count_queries(test_engine) as statements:
         loaded = {
-            plan.name: [item.exercise_id for item in plan.exercises]
+            plan.name: [(item.exercise_id, item.exercise.name) for item in plan.exercises]
             for plan in plans.find_by_user(user.id)
         }
 
-    # the plans and their exercises: two queries however many plans there are
-    assert len(statements) == 2
-    assert loaded == {f"Plan {number}": [bench_press, squat] for number in range(3)}
+    # the plans, their exercises and the catalog exercises: three queries
+    # however many plans and exercises there are
+    assert len(statements) == 3
+    assert loaded == {
+        f"Plan {number}": [(bench_press, "Barbell Bench Press"), (squat, "Barbell Back Squat")]
+        for number in range(3)
+    }
 
 
 def test_update_persists_changes(plans, db_session, user):

@@ -233,6 +233,47 @@ test("a proposal is shown section by section, each with its minutes", () => {
   );
 });
 
+test("a proposal's coverage is shown as the API's structured data, limitations included", () => {
+  const coverage = {
+    complete: true,
+    focus: "FULL_BODY",
+    trained_regions: ["LOWER_BODY", "UPPER_PUSH", "UPPER_PULL", "CORE"],
+    missing_regions: [],
+    main_exercises_counted: 4,
+    main_exercises_required: 4,
+    limitations: [],
+  };
+  const lacking = {
+    ...coverage,
+    complete: false,
+    trained_regions: ["LOWER_BODY", "UPPER_PUSH", "CORE"],
+    missing_regions: ["UPPER_PULL"],
+    limitations: [{ code: "NO_SUITABLE_EXERCISE", region: "UPPER_PULL", message: "No pull." }, null],
+  };
+
+  assert.deepEqual(P.coverageDetails({ ...PROPOSAL, coverage }), {
+    complete: true,
+    status: "Complete",
+    focus: "FULL_BODY",
+    counted: "4 of 4 main exercises",
+    trained: ["LOWER_BODY", "UPPER_PUSH", "UPPER_PULL", "CORE"],
+    missing: [],
+    limitations: [],
+  });
+  assert.deepEqual(P.coverageDetails({ ...PROPOSAL, coverage: lacking }), {
+    complete: false,
+    status: "INCOMPLETE",
+    focus: "FULL_BODY",
+    counted: "4 of 4 main exercises",
+    trained: ["LOWER_BODY", "UPPER_PUSH", "CORE"],
+    missing: ["UPPER_PULL"],
+    limitations: [{ code: "NO_SUITABLE_EXERCISE", region: "UPPER_PULL", message: "No pull." }],
+  });
+  // complete only when the API says so
+  assert.equal(P.coverageDetails({ ...PROPOSAL, coverage: { ...coverage, complete: "yes" } }).complete, false);
+  assert.equal(P.coverageDetails(PROPOSAL), null);
+});
+
 test("the saved plan's sections are counted from the API's answer", () => {
   const plan = { id: 41, exercises: PROPOSAL.exercises.concat([{ section: "MAIN_WORKOUT" }, null]) };
 
@@ -268,4 +309,156 @@ test("a failed approval says nothing was approved, with a fixed message", () => 
   }
   assert.match(P.describeApprovalError(409).message, /^Not approved/);
   assert.match(P.describeApprovalError(404).message, /^Not approved/);
+  // proposals are kept in PostgreSQL: a restart loses none
+  assert.doesNotMatch(P.describeApprovalError(404).message, /restart/i);
+});
+
+// --- saved plans ---
+
+// An access token's shape, with this subject: the page reads only its claims.
+function tokenFor(subject) {
+  const part = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${part({ alg: "HS256", typ: "JWT" })}.${part({ sub: subject, iat: 1, exp: 2 })}.signature`;
+}
+
+function planned(id, exercise_order, section, exercise, prescription) {
+  return {
+    id,
+    workout_plan_id: 41,
+    exercise_id: 100 + exercise_order,
+    exercise,
+    exercise_order,
+    section,
+    sets: 1,
+    reps: null,
+    duration_seconds: null,
+    weight_kg: null,
+    rest_seconds: null,
+    notes: null,
+    ...prescription,
+  };
+}
+
+const PLAN = {
+  id: 41,
+  user_id: 7,
+  name: "Bodyweight day",
+  status: "PLANNED",
+  scheduled_date: "2026-10-13",
+  exercises: [
+    planned(1, 1, "WARM_UP", { name: "Brisk Walk", description: "Walk briskly.", instructions: [] }, {
+      duration_seconds: 180,
+    }),
+    planned(2, 2, "MAIN_WORKOUT", {
+      name: "Push Press",
+      description: null,
+      instructions: ["Hold the bar at your shoulders.", "  ", "Press it overhead."],
+    }, { sets: 3, reps: 8, rest_seconds: 90, notes: "Light" }),
+    planned(3, 3, "MAIN_WORKOUT", { name: "Side Bridge", description: null, instructions: [] }, {
+      sets: 2,
+      duration_seconds: 30,
+    }),
+  ],
+};
+
+test("the saved plans' paths are the signed-in user's, from the access token", () => {
+  const session = P.signIn(P.createSession(), "one@example.test", tokenFor("7"));
+
+  assert.equal(P.tokenUserId(tokenFor("7")), 7);
+  assert.equal(P.plansPath(session), "/users/7/workout-plans");
+  assert.equal(P.planPath(session, 41), "/users/7/workout-plans/41");
+  for (const bad of [0, -1, 1.5, "41", 2147483648, null]) assert.equal(P.planPath(session, bad), null);
+  // no user, or not a token Formiq issues: no path, so nothing is asked for
+  for (const token of [
+    null,
+    TOKEN,
+    tokenFor("0"),
+    tokenFor("07"),
+    tokenFor("2147483648"),
+    tokenFor(7),
+    tokenFor("7/../2"),
+    "a.%%%.c",
+  ]) {
+    assert.equal(P.tokenUserId(token), null, String(token));
+    assert.equal(P.plansPath({ ...session, token }), null);
+  }
+});
+
+test("a saved plan shows each exercise's description and instructions from the API", () => {
+  const sections = P.planSections(P.readPlan(PLAN));
+
+  assert.deepEqual(
+    sections.map((part) => [part.title, part.exercises.map((exercise) => exercise.name)]),
+    [
+      ["Warm-up", ["Brisk Walk"]],
+      ["Main workout", ["Push Press", "Side Bridge"]],
+      ["Cool-down", []],
+    ]
+  );
+  const [walk] = sections[0].exercises;
+  const [press, bridge] = sections[1].exercises;
+  assert.deepEqual(walk, {
+    name: "Brisk Walk",
+    description: "Walk briskly.",
+    instructions: [],
+    missing: [P.NO_INSTRUCTIONS],
+    prescription: "1 × 180 s",
+    notes: null,
+  });
+  // the steps as stored, in order; a blank one is not a step
+  assert.deepEqual(press.instructions, ["Hold the bar at your shoulders.", "Press it overhead."]);
+  assert.deepEqual(press.missing, [P.NO_DESCRIPTION]);
+  assert.equal(press.prescription, "3 × 8, 90 s rest");
+  assert.equal(press.notes, "Light");
+  // nothing in the catalog: said so, never made up
+  assert.deepEqual([bridge.description, bridge.instructions, bridge.missing], [
+    null,
+    [],
+    [P.NO_DESCRIPTION, P.NO_INSTRUCTIONS],
+  ]);
+});
+
+test("a plan exercise without catalog details says so", () => {
+  const plan = { ...PLAN, exercises: [{ ...PLAN.exercises[0], exercise: undefined }] };
+
+  const [walk] = P.planSections(plan)[0].exercises;
+
+  assert.equal(walk.name, "Exercise 101");
+  assert.deepEqual([walk.description, walk.instructions], [null, []]);
+  assert.equal(walk.missing.length, 1);
+  assert.match(walk.missing[0], /no catalog details/);
+});
+
+test("an approval puts the saved plan on the page; a reopened plan replaces it", () => {
+  const session = P.recordExchange(signedIn(), "today?", "Plan.", PROPOSAL);
+
+  const saved = P.recordApproval(session, PROPOSAL.proposal_id, PLAN);
+  assert.equal(saved.plan, PLAN);
+  // a 201 without a plan's exercises still marks the proposal saved, and shows no plan
+  assert.equal(P.recordApproval(session, PROPOSAL.proposal_id, { id: 41 }).plan, null);
+
+  const listed = P.recordPlans(saved, [PLAN, { id: "x" }, null, { ...PLAN, id: 42 }]);
+  assert.deepEqual(listed.plans.map((plan) => plan.id), [41, 42]);
+  const reopened = P.recordPlan(listed, { ...PLAN, id: 42 });
+  assert.equal(reopened.plan.id, 42);
+  assert.equal(P.recordPlan(reopened, { detail: "not found" }), reopened);
+});
+
+test("a sign-in or a sign-out drops the saved plans shown; a clear keeps them", () => {
+  const session = P.recordPlans(P.recordPlan(signedIn(), PLAN), [PLAN]);
+
+  for (const changed of [P.signIn(session, "two@example.test", TOKEN), P.signOut(session)]) {
+    assert.deepEqual([changed.plans, changed.plan], [null, null]);
+  }
+  const cleared = P.clearConversation(session);
+  assert.deepEqual([cleared.plans, cleared.plan], [[PLAN], PLAN]);
+});
+
+test("a failed plan read shows a fixed message", () => {
+  assert.deepEqual(P.describePlanError(404), {
+    message: "Not found: the signed-in user has no such workout plan.",
+    technical: { status: 404 },
+  });
+  assert.equal(P.describePlanError(401).message, "Not signed in, or the session expired. Log in again.");
+  assert.equal(P.describePlanError(418).message, "Could not load the plan (HTTP 418).");
 });

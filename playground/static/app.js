@@ -1,6 +1,7 @@
 // The playground page: wires the controls to Playground (playground.js) and
-// to the existing POST /auth/login, POST /coach/message and
-// POST /coach/proposals/{id}/approve, on the same origin.
+// to the existing POST /auth/login, POST /coach/message,
+// POST /coach/proposals/{id}/approve and GET /users/{id}/workout-plans[/{plan_id}],
+// on the same origin.
 // Everything, the access token included, is held in memory; nothing is written
 // to storage or cookies, and the password is never kept.
 (function () {
@@ -76,6 +77,8 @@
     $("active-user").textContent = session.email || "not signed in";
     $("logout").disabled = busy || !session.token;
     renderProposal();
+    renderPlans();
+    renderPlan();
   }
 
   // The latest reply's proposal, as the API returned it, section by section.
@@ -95,6 +98,7 @@
       ["Approve before", new Date(proposal.expires_at).toLocaleString()],
       ["Proposal", proposal.proposal_id],
     ]);
+    renderCoverage(P.coverageDetails(proposal));
     const sections = $("proposal-sections");
     sections.replaceChildren();
     for (const part of P.proposalSections(proposal)) {
@@ -126,6 +130,125 @@
       ? `Saved as workout plan ${proposal.savedPlanId}: ${counts.WARM_UP} warm-up, ` +
         `${counts.MAIN_WORKOUT} main and ${counts.COOL_DOWN} cool-down exercises.`
       : "";
+  }
+
+  // The proposal's coverage, from the API's structured data: its status, the
+  // regions trained and missing, and each limitation.
+  function renderCoverage(details) {
+    const box = $("proposal-coverage");
+    box.replaceChildren();
+    box.className = "coverage";
+    if (!details) {
+      box.textContent = "Coverage: the API returned none.";
+      return;
+    }
+    if (!details.complete) box.classList.add("incomplete");
+    const status = document.createElement("p");
+    status.textContent = `Coverage: ${details.status} · ${details.focus} · ${details.counted}`;
+    const facts = document.createElement("dl");
+    facts.className = "facts";
+    box.append(status, facts);
+    for (const [name, value] of [
+      ["Trained", details.trained.join(", ") || "none"],
+      ["Missing", details.missing.join(", ") || "none"],
+    ]) {
+      const term = document.createElement("dt");
+      term.textContent = name;
+      const detail = document.createElement("dd");
+      detail.textContent = value;
+      facts.append(term, detail);
+    }
+    if (!details.limitations.length) return;
+    const list = document.createElement("ul");
+    for (const limitation of details.limitations) {
+      const item = document.createElement("li");
+      const where = limitation.region ? ` (${limitation.region})` : "";
+      item.textContent = `${limitation.code}${where}: ${limitation.message}`;
+      list.append(item);
+    }
+    box.append(list);
+  }
+
+  // The signed-in user's saved plans, as last listed: each opens from the database.
+  function renderPlans() {
+    const list = $("plans");
+    list.replaceChildren();
+    $("load-plans").disabled = busy || !session.token;
+    if (session.plans === null) return;
+    if (!session.plans.length) {
+      const item = document.createElement("li");
+      item.className = "note";
+      item.textContent = "No saved plans.";
+      list.append(item);
+      return;
+    }
+    for (const plan of session.plans) {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent =
+        `${plan.id} · ${plan.name} · ${plan.scheduled_date ?? "no date"} · ${plan.status}`;
+      button.addEventListener("click", () => openPlan(plan.id));
+      item.append(button);
+      list.append(item);
+    }
+  }
+
+  // The saved plan on the page: each exercise with its prescription, and the
+  // description and instructions the catalog has, or a note that it has none.
+  function renderPlan() {
+    const plan = session.plan;
+    $("plan").hidden = !plan;
+    if (!plan) return;
+    renderFacts("plan-facts", [
+      ["Plan", plan.id],
+      ["Name", plan.name],
+      ["Date", plan.scheduled_date],
+      ["Status", plan.status],
+    ]);
+    const sections = $("plan-sections");
+    sections.replaceChildren();
+    for (const part of P.planSections(plan)) {
+      const heading = document.createElement("h3");
+      heading.textContent = part.title;
+      const list = document.createElement("ol");
+      list.className = "exercises";
+      for (const exercise of part.exercises) {
+        const item = document.createElement("li");
+        item.className = "plan-exercise";
+        const title = document.createElement("strong");
+        title.textContent = exercise.name;
+        const note = exercise.notes ? ` · ${exercise.notes}` : "";
+        item.append(title, document.createTextNode(`: ${exercise.prescription}${note}`));
+        if (exercise.description) {
+          const description = document.createElement("p");
+          description.textContent = exercise.description;
+          item.append(description);
+        }
+        if (exercise.instructions.length) {
+          const steps = document.createElement("ol");
+          for (const step of exercise.instructions) {
+            const stepItem = document.createElement("li");
+            stepItem.textContent = step;
+            steps.append(stepItem);
+          }
+          item.append(steps);
+        }
+        for (const missing of exercise.missing) {
+          const absent = document.createElement("p");
+          absent.className = "missing";
+          absent.textContent = missing;
+          item.append(absent);
+        }
+        list.append(item);
+      }
+      if (!part.exercises.length) {
+        const item = document.createElement("li");
+        item.textContent = "none";
+        list.append(item);
+      }
+      sections.append(heading, list);
+    }
   }
 
   function renderFacts(id, facts) {
@@ -163,7 +286,7 @@
 
   function renderRequestInfo(info) {
     renderFacts("request-info", [
-      ["Method", "POST"],
+      ["Method", info.method || "POST"],
       ["Endpoint", info.endpoint || P.COACH_PATH],
       ["HTTP status", info.status || "no response"],
       ["Request ID", info.requestId],
@@ -198,6 +321,7 @@
     busy = value;
     for (const id of ["send", "login", "clear", "inject", "approve"]) $(id).disabled = value;
     $("logout").disabled = value || !session.token;
+    $("load-plans").disabled = value || !session.token;
   }
 
   // --- actions ---
@@ -315,6 +439,68 @@
     }
   }
 
+  // A read of the signed-in user's saved plans: the API's own GET, with the
+  // token. The answer is kept only if the same user is still signed in.
+  async function getPlans(path) {
+    const token = session.token;
+    hideError();
+    notice("");
+    setBusy(true);
+    const started = performance.now();
+    let status = 0;
+    let data = null;
+    try {
+      const response = await fetch(path, {
+        method: "GET",
+        headers: P.requestHeaders(session),
+        credentials: "omit",
+        cache: "no-store",
+      });
+      status = response.status;
+      data = await response.json().catch(() => null);
+    } catch {
+      status = 0;
+    } finally {
+      setBusy(false);
+    }
+    renderRequestInfo({
+      method: "GET",
+      status,
+      endpoint: path,
+      latencyMs: performance.now() - started,
+      email: session.email,
+    });
+    if (token !== session.token) {
+      notice("Saved plans arrived after the user changed; they were discarded.");
+      return null;
+    }
+    if (status === 200) return data;
+    if (status === 401 && session.token) {
+      session = P.signOut(session);
+      renderConversation();
+    }
+    showError(P.describePlanError(status));
+    return null;
+  }
+
+  async function loadPlans() {
+    const path = P.plansPath(session);
+    if (busy || path === null) return;
+    const plans = await getPlans(path);
+    if (plans === null) return;
+    session = P.recordPlans(session, plans);
+    renderConversation();
+  }
+
+  async function openPlan(planId) {
+    const path = P.planPath(session, planId);
+    if (busy || path === null) return;
+    const plan = await getPlans(path);
+    if (plan === null) return;
+    session = P.recordPlan(session, plan);
+    renderConversation();
+  }
+
   async function login() {
     if (busy) return;
     const email = $("email").value;
@@ -415,6 +601,7 @@
   });
   $("logout").addEventListener("click", logout);
   $("approve").addEventListener("click", approve);
+  $("load-plans").addEventListener("click", loadPlans);
   $("clear").addEventListener("click", clear);
   $("inject").addEventListener("click", () => inject());
   $("inject-example").addEventListener("click", () => {

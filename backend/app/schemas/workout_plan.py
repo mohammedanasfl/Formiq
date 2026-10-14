@@ -70,12 +70,31 @@ class WorkoutPlanExerciseUpdate(BaseModel):
     notes: Text | None = None
 
 
+class PlannedExerciseDetailsResponse(BaseModel):
+    """What the catalog says about a planned exercise, from Formiq's database,
+    so a saved plan can be shown and followed without asking the coach again.
+    Missing content is never made up: an exercise without instructions has
+    none here (an empty list), and one without a description has null."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    # Formiq's own short description; null for an imported exercise, whose
+    # upstream record has none
+    description: str | None
+    # the upstream record's steps, in order and unchanged; empty for Formiq's
+    # own exercises and for an imported one whose record has none
+    instructions: list[str]
+
+
 class WorkoutPlanExerciseResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     workout_plan_id: int
     exercise_id: int
+    # the catalog exercise exercise_id names, as the catalog has it now
+    exercise: PlannedExerciseDetailsResponse
     exercise_order: int
     section: PlanSection
     sets: int

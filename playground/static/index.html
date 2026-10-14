@@ -17,8 +17,8 @@
       <section class="controls" aria-label="Controls">
         <h1>Formiq Agent Playground</h1>
         <p class="note">
-          Developer test tool for <code>POST /coach/message</code> and approving its proposals. Not the
-          Formiq app.
+          Developer test tool for <code>POST /coach/message</code>, approving its proposals and
+          reopening the saved plans. Not the Formiq app.
         </p>
 
         <fieldset>
@@ -47,6 +47,18 @@
             <button id="send" type="button" class="primary">Send</button>
             <button id="clear" type="button">Clear Conversation</button>
           </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Saved plans</legend>
+          <p class="note">
+            The signed-in user's plans, read from Formiq's database with
+            <code>GET /users/{id}/workout-plans</code>. The coach is not asked.
+          </p>
+          <div class="row">
+            <button id="load-plans" type="button">Load my saved plans</button>
+          </div>
+          <ul id="plans" class="plans"></ul>
         </fieldset>
 
         <fieldset>
@@ -82,11 +94,18 @@
         <section id="proposal" class="proposal" aria-label="Proposed workout" hidden>
           <h2>Proposed workout <span class="note">(not saved until you approve it)</span></h2>
           <dl id="proposal-facts" class="facts"></dl>
+          <div id="proposal-coverage" class="coverage"></div>
           <div id="proposal-sections"></div>
           <div class="row">
             <button id="approve" type="button" class="primary">Approve and save</button>
           </div>
           <p id="proposal-saved" class="saved" role="status" hidden></p>
+        </section>
+
+        <section id="plan" class="plan" aria-label="Saved workout plan" hidden>
+          <h2>Saved workout plan <span class="note">(from Formiq's database)</span></h2>
+          <dl id="plan-facts" class="facts"></dl>
+          <div id="plan-sections"></div>
         </section>
 
         <div id="error" class="error" hidden>

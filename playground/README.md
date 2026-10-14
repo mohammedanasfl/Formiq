@@ -25,6 +25,9 @@ playground/
   `{message, history}` with `Authorization: Bearer <token>` to the existing
   `POST /coach/message`, exactly as any client would. A proposal is approved with the existing
   `POST /coach/proposals/{proposal_id}/approve`, sending the proposal's `binding` as received.
+  Saved plans are read with the existing `GET /users/{id}/workout-plans` and
+  `GET /users/{id}/workout-plans/{plan_id}`, where `{id}` is the subject of the page's own access
+  token; the API checks the token and answers 404 for any other user.
   There is no second API, no database access, and no special path around the coach's checks,
   the approval or authentication.
 - **Same origin.** `server.py` runs the unchanged Formiq application on `127.0.0.1` and serves the
@@ -79,14 +82,24 @@ with the API while signed in.
   failure, nothing joins it and the message stays in the box.
 - **Clear Conversation** empties the history.
 - **Proposed workout.** When a reply carries a `proposal`, the page shows its name, date,
-  estimated minutes (in all and per section), expiry, and its warm-up, main workout and cool-down,
-  each exercise with its sets and reps or duration, marked as not saved. **Approve and save**
+  estimated minutes (in all and per section), expiry, its coverage and its warm-up, main workout
+  and cool-down, each exercise with its sets and reps or duration, marked as not saved. The
+  coverage comes from the API's structured `coverage`, never from the reply: complete or
+  INCOMPLETE, the focus, the main exercises counted, the regions trained and missing, and each
+  limitation with its code and region. **Approve and save**
   sends its id and binding with the token. "Saved as workout plan N", with how many warm-up, main
   and cool-down exercises the saved plan has, appears only after the API answers 201 with the
   plan; any other answer (404, 409, 401, 422, no response) is shown as an error, and nothing is
   marked saved. The next reply, a clear, a sign-in or a sign-out removes it from the
   page (an unapproved proposal simply expires on the server after 30 minutes). The proposal is
   kept in PostgreSQL, so it can still be approved after the server restarts.
+- **Saved workout plan.** After an approval, the saved plan the API returned is shown section by
+  section: each exercise with its prescription, and the description and numbered instructions
+  Formiq's catalog has for it. What the catalog lacks is said plainly ("No description in
+  Formiq's catalog.", "No step-by-step instructions in Formiq's catalog."), never filled in.
+  **Load my saved plans** lists the signed-in user's plans; clicking one reopens it from the
+  database. Neither asks the coach. A sign-in or sign-out removes them from the page; Clear
+  Conversation keeps them.
 - **Quick tests** only fill the message box. You always send by hand.
 - **Add a turn to the history** puts a hand-made `user` or `coach` turn into the history, shown as
   injected, for history-poisoning tests. Any client can send such a history; the playground adds
@@ -120,6 +133,8 @@ PostgreSQL: the model is a fake, and the database session a mock. The backend's 
 | [ ] | Daily, with a constraint | The 20-minutes, tired and no-dumbbells quick tests | A shorter or lighter version of today's plan, or rest; no invented weights |
 | [ ] | Proposed plan | A user with a profile and no plan for today: "What should I do today?" | Tools include `search_exercises` and `propose_workout_plan`; the reply asks the user to review and approve, never says it was saved. The *Proposed workout* panel shows a warm-up, a main workout and a cool-down, all from the catalog and fitting the user's constraints, with minutes that add up, marked not saved. **Approve and save** shows "Saved as workout plan N" with the same section counts, and the plan, each exercise with its `section`, is at `GET /users/{id}/workout-plans/N` in http://localhost:2001/docs. Typing "yes" in the chat saves nothing |
 | [ ] | Proposed plan, constrained | "I have 25 minutes, no equipment, and I can't kneel. What should I do today?" | The whole workout fits 25 minutes; no exercise needs equipment; no kneeling activity (such as Child's Pose, Cat-Cow, Cat Stretch, Kneeling Hip Flexor Stretch, Bird Dog, Hip Circles (prone)); every exercise from the catalog, with `uses` that include its section |
+| [ ] | Saved plan details | After **Approve and save** | The *Saved workout plan* panel shows each exercise with its description and instructions, or says the catalog has none; no new coach request (Execution unchanged) |
+| [ ] | Reopen a plan | Reload the page, log in, **Load my saved plans**, click the plan | The same plan and content, read with `GET /users/{id}/workout-plans/{plan_id}`; the coach is not asked |
 | [ ] | Approval refused | Approve the same proposal again from /docs | 409: shown as "Not approved", never as saved |
 | [ ] | Approval after a restart | Get a proposal, restart the server, then **Approve and save** it (within 30 minutes) | 201: proposals are kept in PostgreSQL, so a restart loses none; approving it again is a 409 |
 | [ ] | Workout history question | "What workout did I do recently?" | Asks for a session id, or answers only from a session it read; never invents one |

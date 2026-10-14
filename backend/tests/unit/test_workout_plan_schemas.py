@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from app.models import WorkoutPlan, WorkoutPlanExercise
+from app.models import Exercise, WorkoutPlan, WorkoutPlanExercise
 from app.schemas import (
     PlanSection,
     WorkoutPlanCreate,
@@ -221,6 +221,12 @@ def test_plan_response_includes_the_plan_exercises():
                 created_at=TIMESTAMP,
                 updated_at=TIMESTAMP,
                 **{**PLAN_EXERCISE, "notes": None},
+                exercise=Exercise(
+                    id=1,
+                    name="Barbell Bench Press",
+                    description="Press a barbell from the chest.",
+                    source_record=None,
+                ),
             )
         ],
     )
@@ -237,6 +243,11 @@ def test_plan_response_includes_the_plan_exercises():
                 "id": 100,
                 "workout_plan_id": 10,
                 "exercise_id": 1,
+                "exercise": {
+                    "name": "Barbell Bench Press",
+                    "description": "Press a barbell from the chest.",
+                    "instructions": [],
+                },
                 "exercise_order": 1,
                 "section": "MAIN_WORKOUT",
                 "sets": 3,

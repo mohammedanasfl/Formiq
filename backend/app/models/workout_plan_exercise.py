@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.exercise import Exercise
     from app.models.workout_plan import WorkoutPlan
 
 
@@ -56,3 +57,8 @@ class WorkoutPlanExercise(Base):
     )
 
     workout_plan: Mapped["WorkoutPlan"] = relationship(back_populates="exercises")
+    # The catalog exercise, for its name, description and instructions: read,
+    # never changed through the plan (viewonly). selectin: the exercises of
+    # every plan exercise loaded together come in one extra query, however
+    # the plan exercises were loaded, never one query each.
+    exercise: Mapped["Exercise"] = relationship(viewonly=True, lazy="selectin")
