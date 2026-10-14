@@ -1,7 +1,8 @@
 # Formiq
 
-Adaptive AI fitness coach. A FastAPI + PostgreSQL backend with a read-only AI coach (LangGraph +
-Gemini). The React Native app (`frontend/`) comes later. Repo: `mohammedanasfl/Formiq`.
+Adaptive AI fitness coach. A FastAPI + PostgreSQL backend with an AI coach (LangGraph + Gemini)
+that reads the user's data and proposes workouts, but never writes: only the user's approval saves
+a plan. The React Native app (`frontend/`) comes later. Repo: `mohammedanasfl/Formiq`.
 
 ## Working rules
 
@@ -35,11 +36,14 @@ source .venv/bin/activate
 alembic upgrade head                          # apply migrations
 pytest -q                                     # all tests; integration tests need Postgres
 python -m app.cli set-password USER_ID        # set a dev user's password
+python -m app.cli import-exercises [--dry-run] # import/refresh the free-exercise-db catalog
+.venv/bin/python -m pytest ../playground/tests  # playground tests (also: node --test playground/tests/)
 .venv/bin/python ../playground/server.py      # playground at http://localhost:2001/playground/
 ```
 
 Tests use the `formiq_test` database, whose schema comes from Alembic migrations only. The
-playground always runs on port 2001.
+playground always runs on port 2001. `tests/conftest.py` turns the application's Langfuse tracer
+off for every test, whatever `backend/.env` enables; tracing tests build their own tracer.
 
 ## History
 
@@ -57,23 +61,45 @@ playground always runs on port 2001.
   - Then: a local playground (`playground/`), discovery of the current plan and last workout,
     4.13 JWT authentication (`POST /auth/login`, `user_credentials` table, Argon2id hashes).
   - Cleanup (`9e7242f`): the evaluation framework was replaced by scenario tests, the contract cut
-    to its critical guarantees, the tests consolidated.
+    to its critical guarantees, the tests consolidated. Merged to `main` (PR #4, 2026-10-08).
+- **Phase 5** (`cf47def`): "what should I do today?" from the profile, current plan and last
+  workout; the `propose_workout_plan` tool; `POST /coach/proposals/{id}/approve` saves the exact
+  proposal shown (its binding), once.
+- **Phase 6** (`2ef15d3`): a user's workout sessions start one at a time (user row lock).
+- **Imported catalog** (`5ee929a`): plan sections (warm-up, main, cool-down); free-exercise-db
+  imported with `import-exercises`; proposals kept in PostgreSQL (`workout_plan_proposals`).
+- **Complete workouts and observability** (`7bb3706`, `288f878`): catalog equipment corrections
+  and duplicates (`app/catalog/classification.py`); completeness judged in code
+  (`app/tools/completeness.py`), with `coverage` in the proposal response; stricter reply checks
+  (no claimed approvals or invented proposals); searches superseded by an accepted proposal;
+  opt-in `LANGFUSE_CAPTURE_CONTENT` (development and test only); tests never trace.
+- **Saved workout lifecycle** (`48c9fe7`): saved plans carry each exercise's catalog name,
+  description and instructions (`exercise`); end-to-end lifecycle tests; the playground shows
+  coverage and reopens saved plans.
 
-## Current state (2026-10-13)
+## Current state (2026-10-14)
 
-- `dev` is at `9e7242f`, pushed. PR #4 (`dev` to `main`, Phase 3 + Phase 4) is open, not merged.
-- Deploying it needs `alembic upgrade head`, `AUTH_JWT_SECRET` and `GEMINI_API_KEY` set, and a
-  password per user via the CLI.
-- **Next: Phase 5 (writes)**, waiting for the user's brief.
+- `dev` is at `48c9fe7`, pushed: 7 commits ahead of `main` (Phase 5 onwards), no PR open.
+- Deploying `dev` needs `alembic upgrade head`; `AUTH_JWT_SECRET` and `GEMINI_API_KEY` set; a
+  password per user via the CLI; and `python -m app.cli import-exercises`, run again whenever
+  `app/catalog/` changes (the catalog corrections reach a database only through it; it is safe to
+  re-run, and `--dry-run` shows what it would change). The dev database is current.
+- Not done yet: timed sets (a set needs `reps`, so a timed exercise is logged without sets; needs
+  a migration); exercise names in session history; a proposal rejection endpoint; five imported
+  main exercises have no instructions or description.
 
 ## Decisions to remember
 
-- `app/approvals/proposal.py`, `store.py`, `audit.py` and their tests
-  (`test_write_boundary*.py`) are unused today; only `approvals/access.py` is used, by
-  `app/agent/graph.py`. The user chose to keep them. In Phase 5, check whether they fit the real
-  write flow; if not, propose replacing them rather than bending the feature to fit them.
+- `app/approvals/access.py` and `proposal.py` are used by the proposal flow. `store.py` and
+  `audit.py` (and parts of `test_write_boundary*.py`) are still unused: proposals are kept in
+  PostgreSQL by `PlanProposalService` instead. The user chose to keep them; propose replacing
+  them rather than bending a feature to fit them.
 - The three overlapping tracing test files (`tests/unit/test_coach_tracing.py`,
   `tests/integration/test_coach_tracing.py`, `tests/unit/test_reliability_observability.py`) are
   also kept on purpose. Don't delete any of these unless the user asks.
-- The safety thresholds (2 kg/week loss, 800 kcal/day, 72 h fast) are product guardrails, not
-  medical rules.
+- The safety thresholds (2 kg/week loss, 800 kcal/day, 72 h fast) and the workout completeness
+  minimums are product guardrails, not medical rules.
+- Langfuse: the model request span is `model_request` (it was `gemini` before `288f878`; older
+  traces keep the old name). The project has no custom dashboards, widgets or evaluators to
+  update (checked 2026-10-14). `LANGFUSE_CAPTURE_CONTENT` is refused outside `APP_ENV`
+  development or test.
