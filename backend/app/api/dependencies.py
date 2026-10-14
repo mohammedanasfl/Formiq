@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.ai import GeminiProvider
 from app.approvals import ProposalTerms
-from app.core.config import settings
+from app.core.config import content_capture_allowed, settings
 from app.core.security import AccessTokens
 from app.db.database import get_db
 from app.models import User
@@ -41,7 +41,14 @@ AIProvider = Annotated[GeminiProvider, Depends(get_ai_provider)]
 @lru_cache
 def get_tracer() -> Tracer:
     """The coach's tracer, configured by the LANGFUSE_* settings and shared by all
-    requests: Langfuse when enabled and configured, otherwise tracing off."""
+    requests: Langfuse when enabled and configured, otherwise tracing off.
+    Content capture is refused outside development and the tests (ValueError),
+    as the settings refuse it, should they have been changed after loading:
+    there, the privacy mask always applies."""
+    if settings.langfuse_capture_content and not content_capture_allowed(settings.app_env):
+        raise ValueError(
+            f"LANGFUSE_CAPTURE_CONTENT is for development only, not APP_ENV={settings.app_env!r}"
+        )
     secret_key = settings.langfuse_secret_key
     return create_tracer(
         enabled=settings.langfuse_tracing_enabled,
@@ -50,6 +57,7 @@ def get_tracer() -> Tracer:
         base_url=settings.langfuse_base_url,
         environment=settings.app_env,
         timeout_seconds=settings.langfuse_timeout,
+        capture_content=settings.langfuse_capture_content,
     )
 
 

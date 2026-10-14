@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, exists, select
 from sqlalchemy.orm import Session
 
 from app.models import WorkoutPlanProposal
@@ -23,6 +23,20 @@ class WorkoutPlanProposalRepository:
             .where(WorkoutPlanProposal.proposal_id == proposal_id)
             .with_for_update()
         ).one_or_none()
+
+    def has_unexpired(self, user_id: int, *, action: str, status: str, now: datetime) -> bool:
+        """Whether the user has a proposal of this action, in this status, that
+        has not expired by now."""
+        return self.session.scalar(
+            select(
+                exists().where(
+                    WorkoutPlanProposal.user_id == user_id,
+                    WorkoutPlanProposal.action == action,
+                    WorkoutPlanProposal.status == status,
+                    WorkoutPlanProposal.expires_at > now,
+                )
+            )
+        )
 
     def delete_expired(self, user_id: int, *, status: str, now: datetime) -> None:
         """Deletes the user's proposals in this status that expired by now."""

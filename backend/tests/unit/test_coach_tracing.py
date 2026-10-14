@@ -30,7 +30,7 @@ from tests.coach import (
     text_turn,
     tool_turn,
 )
-from tests.observability import FailingBackend, recording
+from tests.observability import FailingBackend, RecordingBackend, recording
 from tests.unit.test_coach_conversation_context import budget_for_rounds
 
 USER = 7
@@ -85,9 +85,9 @@ def test_a_turn_is_traced_as_its_trajectory_in_order():
         "coach_request",
         (
             ("safety_check", ()),
-            ("model_turn", (("context_fit", ()), ("gemini", ()))),
+            ("model_turn", (("context_fit", ()), ("model_request", ()))),
             ("tool_calls", (("get_user_profile", ()), ("get_workout_plan", ()))),
-            ("model_turn", (("context_fit", ()), ("gemini", ()))),
+            ("model_turn", (("context_fit", ()), ("model_request", ()))),
             ("decision_validation", ()),
             ("reply_validation", ()),
         ),
@@ -99,7 +99,7 @@ def test_a_turn_is_traced_as_its_trajectory_in_order():
         "safety_check": "guardrail",
         "model_turn": "chain",
         "context_fit": "span",
-        "gemini": "generation",
+        "model_request": "generation",
         "tool_calls": "span",
         "get_user_profile": "tool",
         "get_workout_plan": "tool",
@@ -118,7 +118,7 @@ def test_each_model_request_is_a_generation_with_its_iteration():
         "Does plan 12 fit my goal?",
     )
 
-    first, second = backend.named("gemini")
+    first, second = backend.named("model_request")
     assert [first.metadata["iteration"], second.metadata["iteration"]] == [0, 1]
     assert first.model == second.model == "gemini-test"
     assert first.metadata["requested_tool_calls"] == 2
@@ -135,7 +135,7 @@ def test_token_usage_is_recorded_only_as_the_provider_reported_it():
 
     _, backend, _ = traced(fake_provider(turn), FakeTools(), "Rest?")
 
-    (generation,) = backend.named("gemini")
+    (generation,) = backend.named("model_request")
     assert generation.usage == reported
     assert generation.metadata["usage_available"] is True
 
@@ -316,7 +316,7 @@ def test_a_context_over_its_budget_is_traced_as_the_turns_end():
     assert state["final_response"] == CANNOT_ANSWER_REPLY
     (step,) = backend.named("model_turn")
     assert (step.level, step.status_message) == ("ERROR", "context_budget_exceeded")
-    assert backend.named("gemini") == []
+    assert backend.named("model_request") == []
     assert backend.root.metadata["termination"] == "context_budget_exceeded"
 
 
@@ -390,7 +390,7 @@ def test_a_provider_failure_is_traced_on_its_generation_and_still_raised():
         traced(provider, FakeTools(), "Overload?", tracer=tracer)
 
     assert raised.value is failure
-    (generation,) = backend.named("gemini")
+    (generation,) = backend.named("model_request")
     assert (generation.level, generation.status_message) == ("ERROR", "provider_timeout")
     (step,) = backend.named("model_turn")
     assert step.status_message == "provider_timeout"
@@ -403,7 +403,7 @@ def test_invalid_model_output_is_traced_as_such():
     with pytest.raises(AIProviderError):
         traced(fake_provider(text_turn("Just text.")), FakeTools(), "Hi", tracer=tracer)
 
-    (generation,) = backend.named("gemini")
+    (generation,) = backend.named("model_request")
     assert generation.status_message == "model_output_invalid"
 
 
@@ -414,7 +414,7 @@ def test_a_provider_failure_on_a_flagged_request_is_traced_with_the_fixed_reply(
     state, backend, _ = traced(provider, FakeTools(), "I have sharp knee pain.")
 
     assert state["final_response"] == SAFETY_POLICY[SafetyCategory.PAIN_OR_INJURY].fallback_reply
-    (generation,) = backend.named("gemini")
+    (generation,) = backend.named("model_request")
     assert generation.status_message == "provider_timeout"
     assert backend.root.metadata["safety_path"] == "fixed_safe_response"
     assert backend.root.metadata["safety_fallback_reason"] == "no_model_turn"
@@ -596,3 +596,55 @@ def test_langfuses_mask_applies_the_same_rule():
     assert mask(data={"size": 4, "profile": {"goal": PROFILE_CANARY}}) == {"size": 4}
     assert mask(data=f"{MESSAGE} as input") is None
     assert mask(data=[{"notes": HISTORY_CANARY}]) is None
+
+
+# content, only from a tracer that captures it (LANGFUSE_CAPTURE_CONTENT)
+
+
+def test_a_tracer_records_no_content_unless_it_captures_it():
+    built = []
+    tracer, backend = recording()
+
+    with tracer.request("coach_request", request_id="r", user_id=1) as trace:
+        trace.content(input=lambda: built.append(MESSAGE), output=PROFILE_CANARY)
+
+    # nothing is built, and nothing reaches the backend
+    assert built == []
+    assert [sent for sent in backend.sent if sent[0] == "content"] == []
+    assert PROFILE_CANARY not in backend.everything()
+
+
+def test_a_capturing_tracer_records_what_each_step_took_and_gave():
+    turns = profile_and_plan_turns()
+    tools = tools_returning(get_user_profile=PROFILE, get_workout_plan=PLAN)
+    expected = untraced(fake_provider(*turns), tools, "Does plan 12 fit?")
+
+    state, backend, _ = traced(
+        fake_provider(*turns),
+        tools,
+        "Does plan 12 fit?",
+        tracer=Tracer(RecordingBackend(), capture_content=True),
+    )
+
+    assert state == expected
+    first, second = backend.named("model_request")
+    # each model request as the chat it was: the instructions, the message, the turns
+    assert first.input == [
+        {"role": "system", "content": coach_graph_module.COACH_INSTRUCTIONS},
+        {"role": "user", "content": "Does plan 12 fit?"},
+    ]
+    assert [call["function"]["name"] for call in first.output["tool_calls"]] == [
+        "get_user_profile",
+        "get_workout_plan",
+    ]
+    assistant, *results = second.input[2:]
+    assert [message["role"] for message in results] == ["tool", "tool"]
+    assert [message["tool_call_id"] for message in results] == [
+        call["id"] for call in assistant["tool_calls"]
+    ]
+    assert second.output["tool_calls"][0]["function"]["name"] == "respond"
+    (plan_call,) = backend.named("get_workout_plan")
+    assert (plan_call.input, plan_call.output) == ({"plan_id": 12}, PLAN)
+    (reply_check,) = backend.named("reply_validation")
+    assert reply_check.input == "Plan 12 fits your goal."
+    assert reply_check.output == {"accepted": True, "rejection": None}

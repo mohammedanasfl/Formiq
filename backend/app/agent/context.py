@@ -19,7 +19,10 @@ Four things are kept apart:
   fits. The model's turns are never changed, so their tool calls and thought
   signatures go back as Gemini returned them, and every call keeps its result.
   The state keeps the full results, for the decision policy and id grounding.
-  If the request still does not fit, it is not sent.
+  If the request still does not fit, it is not sent. Whatever the budget, once
+  Formiq has accepted a proposed workout, the search results before it are
+  replaced the same way: they were the candidates, and the proposal lists the
+  exercises chosen from them.
 - The database: the authority for Formiq facts, read only through the tools.
 
 Both functions are pure and deterministic, and call no model: the application,
@@ -36,6 +39,7 @@ from google.genai import types
 from app.agent.safety import SafetyCategory, assess_safety
 from app.agent.trust import neutralize
 from app.ai import CoachMessage, ModelTurn, ToolResult, conversation
+from app.approvals.access import Access, access_of
 
 # --- the conversational context ---
 
@@ -84,6 +88,17 @@ COMPACTED_RESULT = {
         "message": (
             "This earlier result was removed to keep the request within Formiq's size "
             "limit. Call the tool again if you need its data."
+        )
+    }
+}
+# The reads whose results a proposal Formiq accepted after them supersedes, and
+# what such a result says instead of its data, under its call's id.
+SUPERSEDED_BY_PROPOSAL = frozenset({"search_exercises"})
+SUPERSEDED_RESULT = {
+    "compacted": {
+        "message": (
+            "These search results were removed once Formiq accepted the proposal made "
+            "after them, which lists the exercises chosen. Search again if you need others."
         )
     }
 }
@@ -213,14 +228,23 @@ class ContextFit:
     size_before: int
     size: int
     # the positions, in the turn's messages, of the tool results whose data was
-    # compacted: the model did not see it, so it is no evidence for its decision
+    # compacted to fit the budget: the model did not see it, so it is no
+    # evidence for its decision
     compacted: tuple[int, ...]
     # False when the request is over the budget even after compacting
     fits: bool
+    # the positions of the search results an accepted proposal superseded: not
+    # seen either, though no budget required it
+    superseded: tuple[int, ...] = ()
 
     @property
     def compacted_results(self) -> int:
         return len(self.compacted)
+
+    @property
+    def omitted(self) -> frozenset[int]:
+        """The positions of the results whose data the model was not sent."""
+        return frozenset(self.compacted) | frozenset(self.superseded)
 
 
 def request_size(instructions: str, contents: Sequence[types.Content]) -> int:
@@ -240,13 +264,20 @@ def fit_request(
 ) -> ContextFit:
     """The model request for this point of the turn, within the budget.
 
-    Over the budget, the data of the oldest tool results is compacted, one at a
-    time, until the request fits; the latest CONTEXT_KEEP_RECENT_ROUNDS rounds,
-    the model's turns, errors and the current message never are.
+    The search results an accepted proposal superseded are left out first.
+    Then, over the budget, the data of the oldest tool results is compacted,
+    one at a time, until the request fits; the latest CONTEXT_KEEP_RECENT_ROUNDS
+    rounds, the model's turns, errors and the current message never are.
     """
     view = list(messages)
     contents = conversation(user_message, view, conversation_text)
     size_before = size = request_size(instructions, contents)
+    superseded = _superseded(view)
+    if superseded:
+        for index in superseded:
+            view[index] = ToolResult(call=view[index].call, result=SUPERSEDED_RESULT)
+        contents = conversation(user_message, view, conversation_text)
+        size = request_size(instructions, contents)
     compacted: list[int] = []
     for index in _compactable(view):
         if size <= budget:
@@ -255,7 +286,38 @@ def fit_request(
         compacted.append(index)
         contents = conversation(user_message, view, conversation_text)
         size = request_size(instructions, contents)
-    return ContextFit(contents, size_before, size, tuple(compacted), size <= budget)
+    return ContextFit(
+        contents, size_before, size, tuple(compacted), size <= budget, tuple(superseded)
+    )
+
+
+def _superseded(messages: Sequence[CoachMessage]) -> list[int]:
+    """The search results with data from the rounds before the last proposal
+    Formiq accepted (a proposal call with an output), oldest first: the
+    candidates it was made from, which it lists the chosen ones of. None before
+    any accepted proposal, none from its round or after it, and none shorter
+    than the note that would replace it."""
+    accepted = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, ToolResult)
+        and access_of(message.call.name) is Access.PROPOSE
+        and "output" in message.result
+    ]
+    if not accepted:
+        return []
+    # the model's turn that made the proposal
+    made = max(
+        (index for index in range(accepted[-1]) if isinstance(messages[index], ModelTurn)),
+        default=0,
+    )
+    return [
+        index
+        for index, message in enumerate(messages[:made])
+        if isinstance(message, ToolResult)
+        and message.call.name in SUPERSEDED_BY_PROPOSAL
+        and _has_output(message.result, SUPERSEDED_RESULT)
+    ]
 
 
 def _compactable(messages: Sequence[CoachMessage]) -> list[int]:
@@ -271,5 +333,6 @@ def _compactable(messages: Sequence[CoachMessage]) -> list[int]:
     ]
 
 
-def _has_output(result: dict[str, Any]) -> bool:
-    return "output" in result and len(json.dumps(result)) > len(json.dumps(COMPACTED_RESULT))
+def _has_output(result: dict[str, Any], note: dict[str, Any] = COMPACTED_RESULT) -> bool:
+    """Whether the result holds data, and more of it than the note replacing it."""
+    return "output" in result and len(json.dumps(result)) > len(json.dumps(note))

@@ -130,6 +130,9 @@ class RecordingBackend:
     def end_trace(self, handle):
         self.inner.end_trace(_inner(handle))
 
+    def content(self, handle, *, input, output):
+        self.inner.content(_inner(handle), input=input, output=output)
+
     def shutdown(self):
         shutdown = getattr(self.inner, "shutdown", None)
         if shutdown is not None:
@@ -145,7 +148,10 @@ def install() -> None:
     """Adds the playground to this process's application: the page, the
     recording tracer and the response headers. Never called in production."""
     # the configured tracer (Langfuse when enabled), with the recorder in front
-    tracer = Tracer(RecordingBackend(get_tracer().backend))
+    configured = get_tracer()
+    tracer = Tracer(
+        RecordingBackend(configured.backend), capture_content=configured.capture_content
+    )
     app.dependency_overrides[get_tracer] = lambda: tracer
 
     @app.middleware("http")

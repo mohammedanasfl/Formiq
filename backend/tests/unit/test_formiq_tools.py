@@ -4,6 +4,7 @@ reads through the real ones."""
 
 import ast
 import logging
+import random
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,7 @@ from app.services import (
     WorkoutSessionService,
 )
 from app.tools import TOOL_DECLARATIONS, FormiqTools, ToolErrorCode
-from app.tools.formiq_tools import clip
+from app.tools.formiq_tools import clip, equipment_key, most_relevant
 from app.tools.limits import (
     MAX_EXECUTED_TOOL_CALLS_PER_TURN,
     MAX_EXERCISES,
@@ -303,6 +304,41 @@ def test_error_codes():
 
 
 # output bounds
+
+
+def test_search_results_come_in_one_order_whatever_order_they_were_found_in():
+    def match(exercise_id, name, pattern, muscle):
+        primary = SimpleNamespace(muscle_group=SimpleNamespace(name=muscle), role="PRIMARY")
+        return SimpleNamespace(
+            id=exercise_id, name=name, movement_pattern=pattern, muscles=[primary]
+        )
+
+    matches = [
+        match(1, "Walk", "CARDIO", "Calves"),
+        match(2, "Swing", "MOBILITY", "Hamstrings"),
+        match(3, "Circles", "MOBILITY", "Shoulders"),
+        match(4, "Reach", None, "Hamstrings"),
+        match(5, "Swing", "MOBILITY", "Hamstrings"),
+    ]
+
+    for seed in range(10):
+        found = random.Random(seed).sample(matches, len(matches))
+        ranked = most_relevant(found, use="WARM_UP", muscle=None)
+        # cardio; a drill per muscle, then the next; the unclassified; a name
+        # shared by two comes in id order
+        assert [item.id for item in ranked] == [1, 3, 2, 5, 4]
+
+
+@pytest.mark.parametrize(
+    ("written", "key"),
+    [
+        ("Pull-up Bar", "pull up bar"),
+        ("  EZ  curl_bar ", "ez curl bar"),
+        ("Body-Weight", "body weight"),
+    ],
+)
+def test_equipment_names_are_matched_without_case_hyphens_or_spacing(written, key):
+    assert equipment_key(written) == key
 
 
 def test_long_text_is_cut():

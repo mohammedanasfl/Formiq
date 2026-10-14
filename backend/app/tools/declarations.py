@@ -5,6 +5,7 @@ coach request, so the model cannot choose whose data it reads.
 """
 
 from app.ai import ToolDeclaration
+from app.schemas.coach import SessionFocus
 from app.schemas.exercise import Difficulty, MovementPattern, WorkoutSection
 from app.tools.limits import (
     MAX_ACTIVITY_REPS,
@@ -21,6 +22,12 @@ from app.tools.limits import (
     MAX_SECTION_MINUTES,
     MAX_UNAVAILABLE_EQUIPMENT,
     MIN_ACTIVITY_SECONDS,
+    MIN_COUNTED_SETS,
+    MIN_FOCUSED_EXERCISES,
+    MIN_FULL_BODY_EXERCISES,
+    MIN_SHORT_SESSION_EXERCISES,
+    MIN_WARM_UP_MINUTES,
+    SHORT_SESSION_MINUTES,
 )
 
 ID = {"type": "integer", "minimum": 1}
@@ -99,9 +106,13 @@ def _activities(section: str, use: WorkoutSection) -> dict:
         "maxItems": MAX_SECTION_ACTIVITIES,
         "description": (
             f"The {section}, in order: BEGINNER catalog activities whose uses include {use}. "
-            "An activity must work muscles the main exercises train, unless it is CARDIO "
-            f"(movement_pattern), which suits any workout. At most {MAX_SECTION_MINUTES} "
-            "minutes in all."
+            "Each must be CARDIO (movement_pattern), which suits any workout, or list among "
+            "its muscles one that a main exercise lists (its suits_main in the search "
+            "results lists the main exercises it fits): Formiq rejects any other, such as a "
+            "shoulder drill or a back stretch with a legs-only main workout. About 5 minutes "
+            f"in all, such as 120 to 180 seconds of easy cardio and a drill or stretch; at "
+            f"most {MAX_SECTION_MINUTES}, and a warm-up at least {MIN_WARM_UP_MINUTES} unless "
+            f"max_minutes is under {SHORT_SESSION_MINUTES}."
         ),
         "items": {
             "type": "object",
@@ -143,11 +154,19 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
         "have returned. Every exercise and activity must be an active Formiq catalog "
         "exercise whose id a tool returned, used for a section its uses include: main "
         "exercises MAIN_WORKOUT, warm-up activities WARM_UP, cool-down activities COOL_DOWN "
-        "(search_exercises by use finds them). Give max_minutes when "
-        "the user said how much time they have, and unavailable_equipment for equipment "
-        "they do not have or cannot use: Formiq rejects a proposal that does not fit them, "
-        "warm-up and cool-down included. Returns the proposal, with each exercise's "
-        "equipment and an estimate of each section's duration."
+        "(search_exercises by use finds them). Choose the main exercises first, then each "
+        "warm-up and cool-down activity to match them: one whose suits_main is any or "
+        "lists one of the main exercises you chose. Give max_minutes when "
+        "the user said how much time they have, and available_equipment (what they have; [] "
+        "for none at all) or unavailable_equipment (what they lack or cannot use) when they "
+        "said: Formiq rejects a proposal that does not fit them, warm-up and cool-down "
+        "included, and judges what the catalog offers the user by them. Formiq also rejects "
+        "a main workout that does not fulfil its focus, naming what is missing: give each "
+        "main exercise once. Returns the proposal, with each exercise's equipment, an "
+        "estimate of each section's duration, and its coverage: when Formiq's catalog has "
+        "nothing the user can do for part of the focus, the proposal is made incomplete "
+        "(coverage.complete false) and its limitations say what is missing, which you must "
+        "tell the user."
     ),
     parameters={
         "type": "object",
@@ -161,6 +180,24 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
                 "description": (
                     "The day it is for, as YYYY-MM-DD: today (the default) or up to "
                     f"{MAX_PROPOSAL_DAYS_AHEAD} days later."
+                ),
+            },
+            "focus": {
+                "type": "string",
+                "enum": [focus.value for focus in SessionFocus],
+                "description": (
+                    "What the main workout trains, by each exercise's primary muscles: "
+                    "FULL_BODY (the default) needs the lower body (Quadriceps, Glutes or "
+                    "Hamstrings), an upper-body push (Chest, Shoulders or Front Deltoid) and an "
+                    "upper-body pull (Upper Back, Lats or Rear Deltoid); UPPER_BODY a push and a "
+                    "pull; LOWER_BODY, PUSH, PULL and CORE their own. An arm, calf or grip "
+                    "exercise (Triceps, Biceps, Forearms, Calves) belongs to its region but "
+                    "never covers it. A core exercise may go with any focus. Only different "
+                    f"exercises of at least {MIN_COUNTED_SETS} sets for the focus count: at "
+                    f"least {MIN_FULL_BODY_EXERCISES} for FULL_BODY and "
+                    f"{MIN_FOCUSED_EXERCISES} for another focus, or "
+                    f"{MIN_SHORT_SESSION_EXERCISES} when max_minutes is under "
+                    f"{SHORT_SESSION_MINUTES}, which never drops a region the focus needs."
                 ),
             },
             "warm_up": _activities("warm-up", WorkoutSection.WARM_UP),
@@ -203,7 +240,17 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
                 "maximum": 180,
                 "description": (
                     "The minutes the user has, when they said: the whole workout, warm-up "
-                    "and cool-down included, must fit."
+                    "and cool-down included, must fit, and use at least half of them."
+                ),
+            },
+            "available_equipment": {
+                "type": "array",
+                "maxItems": MAX_SEARCH_EQUIPMENT,
+                "items": {"type": "string"},
+                "description": (
+                    "The equipment the user has, as the catalog names it, when they said: "
+                    "every exercise must need nothing else. Give [] for a user with no "
+                    "equipment at all, as for search_exercises."
                 ),
             },
             "unavailable_equipment": {
@@ -236,10 +283,14 @@ SEARCH_EXERCISES = ToolDeclaration(
     description=(
         "Find active exercises in the Formiq exercise catalog that match every filter "
         "given. At least one filter is required. Returns at most "
-        f"{MAX_SEARCH_RESULTS} exercises, ordered by name, and how many match. Use it to "
-        "suggest exercises or alternatives from the catalog: use finds main exercises "
-        "(MAIN_WORKOUT) and warm-up (WARM_UP) and cool-down (COOL_DOWN) activities. Narrow it "
-        "with muscle and available_equipment, so the few results returned fit the user."
+        f"{MAX_SEARCH_RESULTS} exercises, the most relevant first (easy CARDIO first for a "
+        "warm-up or cool-down, Formiq's classified exercises first, a mix of muscles), and "
+        "how many match. Use it to suggest exercises or alternatives from the catalog: use "
+        "finds main exercises (MAIN_WORKOUT) and warm-up (WARM_UP) and cool-down (COOL_DOWN) "
+        "activities. Narrow it with muscle and available_equipment, so the few results "
+        "returned fit the user; one search per section usually gives enough to choose from. "
+        "Once main exercises were found, each warm-up and cool-down activity says which of "
+        "them it suits (suits_main: their ids, or any)."
     ),
     parameters={
         "type": "object",
@@ -264,7 +315,8 @@ SEARCH_EXERCISES = ToolDeclaration(
                 "description": (
                     "The equipment the user has, as the catalog names it: only exercises that "
                     "need nothing else are returned. An empty list returns only exercises that "
-                    "need no equipment."
+                    "need no equipment, such as bodyweight exercises: give [] for a user with "
+                    "none."
                 ),
             },
             "equipment_id": {**ID, "description": "The id of equipment the exercise needs."},

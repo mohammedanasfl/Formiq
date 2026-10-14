@@ -7,7 +7,8 @@ From most to least trusted:
 2. Deterministic safety rules (app.agent.safety), run on the current message
    before the model.
 3. The trusted runtime context (CoachContext): the user the request is for, the
-   model and the tools. No text reaches it.
+   model and the tools, and whether a proposal of theirs awaits approval, from
+   Formiq's records. No text reaches it.
 4. Tool contracts and what the application generates: the tools' declarations
    and validation, the decision policy (app.agent.policy), id grounding, the
    limits, and Formiq's own notes and error results.
@@ -63,10 +64,27 @@ REPLY_SHOWS_INTERNALS = "the reply shows Formiq's internal names or codes: say i
 REPLY_CLAIMS_CHANGE = (
     "the reply says Formiq data was changed, but you can only read it: do not claim a change"
 )
+REPLY_CLAIMS_APPROVAL = (
+    "the reply says you approved a proposal, but only the user approves it, in Formiq: "
+    "do not claim an approval"
+)
+REPLY_CLAIMS_PROPOSAL = (
+    "the reply asks the user to review or approve a proposal, but none was made in this "
+    "turn and none of theirs awaits approval: propose one with propose_workout_plan, or "
+    "give the workout as a suggestion without asking for approval"
+)
+REPLY_CLAIMS_NEW_PROPOSAL = (
+    "the reply presents a new or changed proposal, but none was made in this turn: the one "
+    "awaiting the user's approval is unchanged. Propose the new one with "
+    "propose_workout_plan, or refer to the earlier one as it was"
+)
 REPLY_PROBLEMS = {
     REPLY_ECHOES_INSTRUCTIONS: "instructions_echo",
     REPLY_SHOWS_INTERNALS: "internal_names",
     REPLY_CLAIMS_CHANGE: "change_claim",
+    REPLY_CLAIMS_APPROVAL: "approval_claim",
+    REPLY_CLAIMS_PROPOSAL: "proposal_claim",
+    REPLY_CLAIMS_NEW_PROPOSAL: "new_proposal_claim",
 }
 
 # A reply sharing this many words in a row with the instructions repeats them.
@@ -77,6 +95,10 @@ INSTRUCTION_ECHO_WORDS = 10
 # statuses and error codes are all UPPER_SNAKE_CASE, which ordinary coaching text
 # does not use (RPE or AMRAP have no underscore).
 _INTERNAL_IDENTIFIER = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+# Formiq's proposal and request ids, 32 hex digits. The user is shown a
+# proposal's id with the proposal; the model never is, so one in a reply was
+# made up.
+_GENERATED_ID = re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)
 # The coach can only read: a reply saying it saved, changed or logged Formiq data
 # is false whatever led to it.
 _CHANGE_CLAIM = re.compile(
@@ -92,6 +114,44 @@ _CHANGE_CLAIM = re.compile(
     re.IGNORECASE,
 )
 
+# Only the user approves a proposal, in Formiq: a reply saying the coach
+# approved one is false whatever led to it, a yes in the conversation included.
+_APPROVAL_CLAIM = re.compile(
+    r"\b(I|I['’]ve|I\s+have|we|we['’]ve|we\s+have)\s+(just\s+|now\s+|already\s+)?"
+    r"(approved|accepted)\s+"
+    r"(it|(your|the|this|that)\s+(\w+\s+)?(proposal|plan|workout|session|routine))\b",
+    re.IGNORECASE,
+)
+
+# The user can review and approve only a proposal Formiq made: one made in the
+# turn, or an earlier one of theirs still awaiting approval. A reply that asks
+# them to, when there is none, points them to a workout Formiq never showed. A
+# plan approved earlier ("the plan you approved") or a doctor's approval is not
+# a proposal.
+_PROPOSAL_CLAIM = re.compile(
+    r"\b(this|the|that|your|my|new|updated|revised)\s+(\w+\s+)?proposal\b"
+    r"|\bproposed\s+(workout|plan|session|routine)\b"
+    r"|\bapprov(e|ing)\s+(it|this|that|the\s+(\w+\s+)?(workout|plan|proposal|session|routine))\b"
+    r"|\b(review|approve)\b[^.?!\n]{0,60}?\bin\s+(Formiq|the\s+app)\b",
+    re.IGNORECASE,
+)
+# A reply presenting a new or changed proposal, which only a proposal made in
+# the turn backs: with an earlier one awaiting approval, the user would approve
+# that one believing it changed. Offering a new one ("I can propose a new
+# workout") is not presenting one.
+_NEW_PROPOSAL = re.compile(
+    r"\b(your|the|this|that)\s+(new|updated|revised|changed|adjusted|modified|different)\s+"
+    r"(\w+\s+)?(proposal|workout|plan|version|session|routine)s?\b"
+    r"|\bhere(\s+is|\s+are|['’]s)\s+(\w+\s+){0,2}?"
+    r"(proposal|proposed|new|updated|revised|changed|adjusted|modified|different)\b"
+    r"|\b(I['’]ve|I\s+have|we['’]ve|we\s+have|I\s+just)\s+(just\s+)?"
+    r"(made|created|built|prepared|drafted|put\s+together)\b"
+    r"|\b(I|I['’]ve|I\s+have|we|we['’]ve|we\s+have)\s+(just\s+|now\s+)?"
+    r"(updated|changed|revised|adjusted|modified|swapped|replaced|reworked)\b"
+    r"|\bbelow\b",
+    re.IGNORECASE,
+)
+
 
 def _words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", unicodedata.normalize("NFKC", text).casefold())
@@ -104,19 +164,39 @@ def _shingles(instructions: str) -> frozenset[tuple[str, ...]]:
     return frozenset(tuple(words[i : i + size]) for i in range(len(words) - size + 1))
 
 
-def reply_problem(reply: str, instructions: str, tool_names: Iterable[str]) -> str | None:
+def reply_problem(
+    reply: str,
+    instructions: str,
+    tool_names: Iterable[str],
+    *,
+    proposed: bool = False,
+    awaiting_approval: bool = False,
+) -> str | None:
     """Why a reply cannot reach the user, or None when it can: it repeats the
-    instructions it was written under, shows Formiq's internal names, or says
-    Formiq data was changed."""
+    instructions it was written under, shows Formiq's internal names or ids,
+    says Formiq data was changed or a proposal approved, or asks the user to
+    review or approve a proposal when there is none: unless the turn proposed
+    a workout (proposed), it may point the user only to an earlier proposal
+    awaiting their approval (awaiting_approval, from Formiq's records), and
+    may not present a new or changed one."""
     shingles = _shingles(instructions)
     words = _words(reply)
     size = INSTRUCTION_ECHO_WORDS
     if any(tuple(words[i : i + size]) in shingles for i in range(len(words) - size + 1)):
         return REPLY_ECHOES_INSTRUCTIONS
-    if _INTERNAL_IDENTIFIER.search(reply) or any(
-        re.search(rf"\b{re.escape(name)}\b", reply) for name in tool_names if "_" in name
+    if (
+        _INTERNAL_IDENTIFIER.search(reply)
+        or _GENERATED_ID.search(reply)
+        or any(re.search(rf"\b{re.escape(name)}\b", reply) for name in tool_names if "_" in name)
     ):
         return REPLY_SHOWS_INTERNALS
     if _CHANGE_CLAIM.search(reply):
         return REPLY_CLAIMS_CHANGE
+    if _APPROVAL_CLAIM.search(reply):
+        return REPLY_CLAIMS_APPROVAL
+    if not proposed and _PROPOSAL_CLAIM.search(reply):
+        if not awaiting_approval:
+            return REPLY_CLAIMS_PROPOSAL
+        if _NEW_PROPOSAL.search(reply):
+            return REPLY_CLAIMS_NEW_PROPOSAL
     return None

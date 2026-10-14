@@ -20,6 +20,8 @@ class Node:
     level: str | None = None
     status_message: str | None = None
     usage: dict[str, int] | None = None
+    input: Any = None
+    output: Any = None
     ended: bool = False
 
 
@@ -59,6 +61,11 @@ class MemoryBackend:
     def end_trace(self, handle):
         self.sent.append(("end_trace", handle.name))
         handle.ended = True
+
+    def content(self, handle, *, input, output):
+        self.sent.append(("content", handle.name, input, output))
+        handle.input = handle.input if input is None else input
+        handle.output = handle.output if output is None else output
 
     # reading the trace
 

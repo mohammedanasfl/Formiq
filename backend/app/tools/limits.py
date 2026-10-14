@@ -38,7 +38,25 @@ MIN_ACTIVITY_SECONDS = 10
 MAX_ACTIVITY_SECONDS = 600
 MAX_SECTION_MINUTES = 15
 # A proposal's duration estimate: each set takes this long (or its own duration,
-# when timed), plus its rest. A main exercise without a rest gets
+# when timed), plus its rest. A set of reps takes SECONDS_PER_REP a rep when
+# that is longer: more than 15 reps. A main exercise without a rest gets
 # DEFAULT_REST_SECONDS; warm-up and cool-down activities have none.
 SET_SECONDS = 45
+SECONDS_PER_REP = 3
 DEFAULT_REST_SECONDS = 90
+# A proposal's completeness (app.tools.completeness). Its main workout holds at
+# least MIN_FULL_BODY_EXERCISES main exercises for the whole body, or
+# MIN_FOCUSED_EXERCISES for one part of it; at least MIN_SHORT_SESSION_EXERCISES
+# when the user has under SHORT_SESSION_MINUTES. Only an exercise of at least
+# MIN_COUNTED_SETS sets counts. These are minimums, not targets.
+SHORT_SESSION_MINUTES = 30
+MIN_FULL_BODY_EXERCISES = 4
+MIN_FOCUSED_EXERCISES = 3
+MIN_SHORT_SESSION_EXERCISES = 2
+MIN_COUNTED_SETS = 2
+# The warm-up of a session that is not short lasts at least this long, by the
+# duration estimate above.
+MIN_WARM_UP_MINUTES = 3
+# Given the minutes the user has, a proposal takes at least half of them, but
+# never needs to take more than this.
+MAX_REQUIRED_MINUTES = 45

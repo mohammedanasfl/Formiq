@@ -175,7 +175,7 @@ def test_the_largest_histories_stay_within_the_budget_and_apart(api, fixtures):
         for sent in model.requests(f"h{number}"):
             assert re.findall(r"HISTORY_\d_CANARY", sent.text) == [f"HISTORY_{number}_CANARY"]
     for root in backend.roots():
-        generations = [node for node in backend.subtree(root) if node.name == "gemini"]
+        generations = [node for node in backend.subtree(root) if node.name == "model_request"]
         assert generations
         assert all(node.metadata["context_chars"] <= CONTEXT_MAX_CHARS for node in generations)
         fits = [node for node in backend.subtree(root) if node.name == "context_fit"]

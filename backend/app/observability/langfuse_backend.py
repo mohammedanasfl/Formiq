@@ -12,7 +12,8 @@ the application's global one nor exports other libraries' spans, and it exports
 only Langfuse spans. Spans are exported in the background in batches: no
 request waits for Langfuse, and nothing is flushed per request. As a second
 line of defense, the client's mask applies safe_metadata() to whatever the SDK
-is about to send.
+is about to send, unless the tracer captures content (LANGFUSE_CAPTURE_CONTENT,
+for development), whose input and output it would drop.
 """
 
 import logging
@@ -43,6 +44,27 @@ class _Root:
     attributes: Any
     current: Any
     span: Any
+
+
+# Formiq's token counts (app.ai.gemini.token_usage) as the usage types Langfuse
+# prices models by
+USAGE_TYPES = {
+    "input_tokens": "input",
+    "cached_input_tokens": "input_cached_tokens",
+    "output_tokens": "output",
+    "reasoning_tokens": "output_reasoning_tokens",
+    "total_tokens": "total",
+}
+
+
+def usage_details(usage: Mapping[str, int]) -> dict[str, int]:
+    """A generation's token counts as Langfuse usage types. Langfuse counts each
+    token in one type only, so the cached part of the input is taken out of
+    `input`; the thinking is already apart from `output`."""
+    details = {USAGE_TYPES[name]: count for name, count in usage.items() if name in USAGE_TYPES}
+    if "input" in details and "input_cached_tokens" in details:
+        details["input"] = max(details["input"] - details["input_cached_tokens"], 0)
+    return details
 
 
 def mask(*, data: Any, **kwargs: Any) -> Any:
@@ -105,12 +127,19 @@ class LangfuseBackend:
         if status_message is not None:
             values["status_message"] = status_message
         if usage:
-            values["usage_details"] = usage
+            values["usage_details"] = usage_details(usage)
         span.update(**values)
 
     def end(self, handle: Any) -> None:
         if handle is not None:
             handle.end()
+
+    def content(self, handle: Any, *, input: Any, output: Any) -> None:
+        if handle is None:
+            return
+        span = handle.span if isinstance(handle, _Root) else handle
+        values = {"input": input, "output": output}
+        span.update(**{name: value for name, value in values.items() if value is not None})
 
     def end_trace(self, handle: Any) -> None:
         if handle is None:
@@ -132,10 +161,13 @@ def create_tracer(
     base_url: str,
     environment: str,
     timeout_seconds: int,
+    capture_content: bool = False,
     span_exporter: SpanExporter | None = None,
 ) -> Tracer:
     """The Langfuse tracer, or tracing off when it is disabled, not configured,
-    or cannot start: the coach works the same either way."""
+    or cannot start: the coach works the same either way. With capture_content,
+    Langfuse also receives the conversations and the data the coach read (for
+    development only: the settings, and get_tracer, refuse it elsewhere)."""
     if not enabled:
         return TRACING_OFF
     if not public_key or not secret_key:
@@ -151,10 +183,15 @@ def create_tracer(
             timeout=timeout_seconds,
             tracer_provider=TracerProvider(),
             should_export_span=is_langfuse_span,
-            mask=mask,
+            mask=None if capture_content else mask,
             span_exporter=span_exporter,
         )
     except Exception as error:  # noqa: BLE001 - observability must not stop the application
         logger.warning("Langfuse could not start (%s); tracing is off", type(error).__name__)
         return TRACING_OFF
-    return Tracer(LangfuseBackend(client))
+    if capture_content:
+        logger.warning(
+            "Langfuse receives the coach's conversations and the users' data "
+            "(LANGFUSE_CAPTURE_CONTENT is on): for development only"
+        )
+    return Tracer(LangfuseBackend(client), capture_content=capture_content)

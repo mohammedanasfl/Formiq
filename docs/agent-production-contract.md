@@ -127,7 +127,8 @@ Every request is bounded. As of Phase 5:
 | Current message | 4,000 characters |
 | Reply | 8,000 characters |
 | A proposed plan | 1 to 10 main exercises of 1 to 10 sets of 1 to 30 reps, at most 300 s of rest, no weight; today to 14 days ahead |
-| Its warm-up and cool-down | 1 to 5 activities each, of 1 to 3 sets of 1 to 20 reps or 10 to 600 s, no rest or weight; at most 15 minutes each |
+| Its warm-up and cool-down | 1 to 5 activities each, of 1 to 3 sets of 1 to 20 reps or 10 to 600 s, no rest or weight; at most 15 minutes each, and a warm-up of at least 3 unless the session is short |
+| Its completeness | at least 4 different main exercises of 2 or more sets for a full body, 3 for a focus, 2 when the user has under 30 minutes (a short session); every region its focus needs; at least half the user's stated time, up to 45 minutes |
 | A proposal's approval | within 30 minutes |
 
 Failures fail closed and say nothing internal:
@@ -150,6 +151,10 @@ Failures fail closed and say nothing internal:
 - **A model request is at most 350,000 characters.** Over budget, the oldest tool results are
   compacted first; the latest round, errors and the current message never are. At most 6 requests
   per turn may be compacted, and compacted results are no evidence.
+- **An accepted proposal supersedes its candidates.** Once Formiq has accepted a proposed workout,
+  later requests in the turn send the catalog search results from the rounds before it as a short
+  note, whatever the budget: the proposal lists the exercises chosen. Like compacted results, they
+  are no evidence, and their ids stay grounded.
 - **Context exhaustion fails closed.** A request that still does not fit is never sent: the turn
   ends with "cannot answer", or the fixed safe reply when flagged.
 
@@ -157,11 +162,17 @@ Failures fail closed and say nothing internal:
 
 - **The agent never writes.** No tool writes. The graph refuses every call outside the read tools
   and the proposal before it reaches the tools, records it by name only, and counts it. A reply
-  claiming a change is rejected.
+  claiming a change or an approval is rejected, and so is one asking the user to review or
+  approve a proposal when there is none: none made in the turn, and none of theirs awaiting
+  approval (pending and unexpired in PostgreSQL, read by the coach service when the request
+  begins, never taken from the model or the history). A reply may point the user to such an
+  earlier proposal, but not present a new or changed one unless the turn proposed it.
 - **The model may only propose a new workout plan** (`propose_workout_plan`), and only after the
   user's profile, current plan and last workout were checked in the turn, with a profile to build
   for. Formiq builds the proposal: the trusted user, active catalog exercises whose ids a tool
-  returned, bounded prescriptions, no weights, and the user's stated time and equipment. It has
+  returned, bounded prescriptions, no weights, and the user's stated time and equipment (what
+  they have, `[]` for none, or what they cannot use, named as the catalog names it: an unknown
+  name is refused, never ignored). It has
   three sections, each holding only exercises whose `uses` (Formiq's own classification of the
   catalog, kept apart from an imported exercise's upstream category) include it: a warm-up of
   light (BEGINNER) `WARM_UP` activities, the `MAIN_WORKOUT` exercises, and a cool-down of light
@@ -170,6 +181,22 @@ Failures fail closed and say nothing internal:
   PostgreSQL (`workout_plan_proposals`, through `PlanProposalService`), with its binding, a digest
   of the exact proposal, every section included; no tool stores anything. A flagged request runs
   no tool, so it gets no proposal.
+- **A proposal is a complete session for its focus, judged in code** (`app/tools/completeness.py`).
+  The model names the focus (full body by default, or upper body, lower body, push, pull or
+  core); each main exercise belongs to the body regions of its primary muscles, and covers a
+  region only when one of them is a main mover of it (never a secondary muscle, and never an
+  accessory such as the forearms, biceps, triceps or calves). A full-body workout covers the
+  lower body, an upper-body push and an upper-body pull, with enough different
+  exercises (section 6); a short session needs fewer exercises, never fewer regions. A repeated
+  exercise, one outside the focus, or an ADVANCED one for a beginner profile is refused. Where
+  the catalog has what is missing, the proposal is refused with what to add; only where it has
+  nothing the user can do is the proposal made incomplete, and then its coverage, in the API
+  response, says so (`complete: false`, with each limitation), whatever the reply says. The
+  rules are coaching defaults, not medical ones. The catalog's imported records are linked to
+  the equipment their instructions need where the record says "body only" (a pull-up bar, a
+  bench, bars), and an imported copy of one of Formiq's own exercises suits no section
+  (`app/catalog/classification.py`). A refused proposal is never kept, and an
+  incomplete one waits for the user's approval like any other.
 - **Only the user's own approval saves it** (`POST /coach/proposals/{id}/approve`, outside the
   coach). The approval is for the signed-in user only (another user's proposal is not found), must
   carry the binding the user was shown, is used once and expires. The stored proposal must still
@@ -182,7 +209,9 @@ Failures fail closed and say nothing internal:
   arguments, a model-supplied user, a claim of earlier permission, a forged system message or a
   "yes" in the conversation is refused, or is no approval.
 - The agent reaches only the read/propose/write classification. The tools build proposals, but
-  never store, record or use a decision. A proposal outlives a restart and is shared by every
+  never store, record or use a decision. The one fact about stored proposals the coach runs with
+  is `CoachContext.proposal_awaiting_approval`, a plain bool `CoachService` reads before the run,
+  for the reply check: nothing to call, store or decide with. A proposal outlives a restart and is shared by every
   worker process, since it is kept in the database; `app/approvals` itself holds only the rules
   and reaches no data.
 
@@ -195,6 +224,13 @@ Failures fail closed and say nothing internal:
   token counts, the trusted user id and the request id, with strings and lists kept short.
 - **Never traced:** the message, the history, the instructions, reasoning, tool arguments' values,
   tool results, profile, workout or nutrition data, keys, passwords, tokens, or exception text.
+- **Except, for development, with `LANGFUSE_CAPTURE_CONTENT` on** (off by default): Langfuse then
+  also receives the message and history, the reply, each model request's instructions and
+  conversation and the model's turn, the tools' arguments and results (the user's data included),
+  and the validations' rejections. Keys, passwords and tokens are still never traced. It is
+  allowed only with `APP_ENV` `development` or `test`: with any other environment, production
+  included, the settings refuse to load (and `get_tracer` refuses to build a tracer, should they
+  be changed after loading), so the privacy mask always applies there.
 
 ## 10. Known limitations
 

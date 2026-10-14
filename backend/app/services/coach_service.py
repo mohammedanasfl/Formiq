@@ -87,6 +87,7 @@ class CoachService:
             user_id=user_id,
             conversation_turns=len(history),
         ) as trace:
+            trace.content(input=lambda: chat_history(message, history))
             try:
                 reply, decision, tools = self._reply(user_id, message, history, trace)
                 answered = (
@@ -115,6 +116,7 @@ class CoachService:
                 tools_used=list(decision.tools_used),
                 reply_chars=len(reply),
             )
+            trace.content(output={"role": "assistant", "content": reply})
             logger.info("Coach request %s ended: status=%s", request_id, status)
             return CoachAnswer(reply, proposal)
 
@@ -127,6 +129,11 @@ class CoachService:
     ) -> tuple[str, CoachDecision, FormiqTools]:
         if self.users.get_by_id(user_id) is None:
             raise UserNotFoundError(f"user {user_id} does not exist")
+        # From Formiq's records, not the conversation: whether a proposal made
+        # earlier awaits the user's approval, so the reply may point them to it
+        awaiting_approval = self.proposal_terms is not None and PlanProposalService(
+            self.session, self.proposal_terms
+        ).awaits_approval(user_id)
         # End the read transaction, so its connection goes back to the pool
         # while the model answers, which can take seconds. The tools end theirs
         # the same way.
@@ -137,7 +144,13 @@ class CoachService:
         tools = self._tools()
         state = coach_graph.invoke(
             initial_state(message, history),
-            context=CoachContext(user_id=user_id, provider=self.provider, tools=tools, trace=trace),
+            context=CoachContext(
+                user_id=user_id,
+                provider=self.provider,
+                tools=tools,
+                trace=trace,
+                proposal_awaiting_approval=awaiting_approval,
+            ),
         )
         trace.update(iterations=state["iteration_count"], compactions=state["context_compactions"])
         return state["final_response"], state["decision"], tools
@@ -154,6 +167,16 @@ class CoachService:
             end_read=self.session.rollback,
             proposal_terms=self.proposal_terms,
         )
+
+
+def chat_history(message: str, history: Sequence[ConversationTurn]) -> list[dict[str, str]]:
+    """The conversation the client sent, and the user's message, as chat
+    messages: for a trace that captures content only."""
+    roles = {"user": "user", "coach": "assistant"}
+    return [
+        *({"role": roles[turn.role], "content": turn.text} for turn in history),
+        {"role": "user", "content": message},
+    ]
 
 
 def outcome_status(decision: CoachDecision) -> str:

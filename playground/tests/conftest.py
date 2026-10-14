@@ -5,12 +5,16 @@
 
 They call neither Gemini nor PostgreSQL: the model is a fake and the database
 session a mock. The application needs a DATABASE_URL to import; a dummy one is
-used when none is set, and no test connects to it.
+used when none is set, and no test connects to it. Nor do they call Langfuse:
+the application's tracer is off, as in the backend's tests, whatever
+backend/.env configures.
 """
 
 import os
 import sys
 from pathlib import Path
+
+import pytest
 
 PLAYGROUND = Path(__file__).resolve().parents[1]
 BACKEND = PLAYGROUND.parent / "backend"
@@ -21,3 +25,13 @@ os.environ.setdefault(
 for path in (str(BACKEND), str(PLAYGROUND)):
     if path not in sys.path:
         sys.path.insert(0, path)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def tracing_off():
+    """The playground wraps the application's tracer (server.install): it is
+    off for these tests, so no request sends a trace to a real project."""
+    from tests.observability import application_tracing_off
+
+    with application_tracing_off():
+        yield

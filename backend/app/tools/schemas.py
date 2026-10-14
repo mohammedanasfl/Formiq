@@ -10,6 +10,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.schemas.coach import ProposalCoverage, SessionFocus
 from app.schemas.exercise import Difficulty, MovementPattern, MuscleRole, WorkoutSection
 from app.schemas.workout_plan import (
     MAX_INTEGER,
@@ -130,6 +131,8 @@ class ProposeWorkoutPlanInput(UserScopedInput):
     name: PlanName
     # today when not given
     scheduled_date: date | None = None
+    # what the main workout trains, which it must fulfil (app.tools.completeness)
+    focus: SessionFocus = SessionFocus.FULL_BODY
     warm_up: SectionActivities
     # the main workout
     exercises: Annotated[
@@ -138,6 +141,11 @@ class ProposeWorkoutPlanInput(UserScopedInput):
     cool_down: SectionActivities
     # the user's own constraints, which the proposal must fit
     max_minutes: AvailableMinutes | None = None
+    # the equipment the user has, when they said, as search_exercises takes it
+    # ([] for none at all): every exercise must need nothing else
+    available_equipment: Annotated[
+        list[EquipmentName], Field(max_length=MAX_SEARCH_EQUIPMENT)
+    ] | None = None
     unavailable_equipment: Annotated[
         list[EquipmentName], Field(max_length=MAX_UNAVAILABLE_EQUIPMENT)
     ] = []
@@ -157,7 +165,7 @@ class SearchExercisesInput(ToolInput):
     # a muscle group the exercise trains, by its Formiq name
     muscle: MuscleName | None = None
     # the equipment the user has, by name: the exercise needs nothing else
-    # ([] for none at all)
+    # ([] for none at all; a name such as "body weight" says the same)
     available_equipment: Annotated[
         list[EquipmentName], Field(max_length=MAX_SEARCH_EQUIPMENT)
     ] | None = None
@@ -311,6 +319,8 @@ class ProposedWorkoutPlanOutput(BaseModel):
     main_minutes: int
     cool_down_minutes: int
     estimated_minutes: int
+    # whether the main workout fulfils its focus, and what is missing when not
+    coverage: ProposalCoverage
     expires_at: datetime
 
 
@@ -350,10 +360,17 @@ class ExerciseSummaryOutput(BaseModel):
     # muscle names, primary muscles first
     muscles: list[str]
     equipment: list[str]
+    # In a warm-up or cool-down search, once the request's searches returned
+    # main exercises: the ids of those this activity may go with in a proposal
+    # ("any" for easy CARDIO), as propose_workout_plan checks it. Left out
+    # otherwise.
+    suits_main: list[int] | Literal["any"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class SearchExercisesOutput(BaseModel):
-    # ordered by name
+    # the most relevant first (app.tools.formiq_tools.most_relevant)
     exercises: list[ExerciseSummaryOutput]
     # how many are returned, and how many match in all
     count: int

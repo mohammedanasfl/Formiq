@@ -31,7 +31,15 @@ from app.agent import (
 )
 from app.agent.context import HISTORY_CLOSE, HISTORY_OPEN, compact_conversation
 from app.agent.graph import safety_instructions
-from app.agent.trust import INSTRUCTION_ECHO_WORDS, neutralize, reply_problem
+from app.agent.trust import (
+    INSTRUCTION_ECHO_WORDS,
+    REPLY_CLAIMS_APPROVAL,
+    REPLY_CLAIMS_NEW_PROPOSAL,
+    REPLY_CLAIMS_PROPOSAL,
+    REPLY_SHOWS_INTERNALS,
+    neutralize,
+    reply_problem,
+)
 from app.ai import GeminiProvider, ModelTurn
 from tests.coach import FakeTools, call, fake_provider, respond_turn, tool_turn
 
@@ -478,6 +486,132 @@ def test_the_models_reasoning_never_reaches_the_reply():
 )
 def test_ordinary_replies_pass_the_check(reply):
     assert reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES) is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # as a live model wrote it after running out of tool rounds
+        (
+            "Here is your updated workout with Push-Ups. Review this proposal in Formiq to "
+            "save it when you are ready."
+        ),
+        "Here is a short bodyweight workout. Review it, and approve it to save it.",
+        "I've put together a proposed workout for you below.",
+        "Approve the workout when you are ready.",
+    ],
+)
+def test_a_reply_asking_to_approve_a_proposal_needs_one_from_the_turn(reply):
+    rejection = reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES)
+
+    assert rejection is not None and "none was made in this turn" in rejection
+    assert reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES, proposed=True) is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Please check with your doctor and get their approval before training again.",
+        "Here's the plan you approved earlier: 3 sets of squats.",
+        "Try 3 sets of 10 squats and 3 sets of 8 push-ups today.",
+        "Would you like me to propose a workout for today?",
+    ],
+)
+def test_a_reply_that_asks_for_no_approval_needs_no_proposal(reply):
+    assert reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES) is None
+    # and an earlier proposal awaiting approval changes nothing for it
+    assert reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES, awaiting_approval=True) is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # explaining it
+        "The proposal I made earlier works your legs because you trained chest yesterday.",
+        "The squats in the proposal train your quads and glutes; approve it in Formiq if it suits.",
+        # a reminder that it awaits approval
+        "Your workout proposal from earlier is still waiting for your approval in Formiq.",
+        "You can still review and approve the proposed workout in Formiq.",
+        # how to approve it
+        "To approve it, open the proposal in Formiq and tap Approve: it expires after 30 minutes.",
+        (
+            "Approve the proposal in Formiq when you're ready, or tell me what to change and "
+            "I'll propose a new one."
+        ),
+    ],
+)
+def test_a_reply_may_point_to_an_earlier_proposal_awaiting_approval(reply):
+    """Formiq's records say one of the user's proposals awaits their approval
+    (awaiting_approval): a reply may explain it, remind them of it, or say how
+    to approve it. With none awaiting (none was made, or it expired, was
+    approved or is another user's), the same reply points to nothing."""
+    assert (
+        reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES, awaiting_approval=True) is None
+    )
+    rejection = reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES)
+    assert rejection == REPLY_CLAIMS_PROPOSAL
+    assert "none of theirs awaits approval" in rejection
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # as a live model wrote it after running out of tool rounds
+        (
+            "Here is your updated workout with Push-Ups. Review this proposal in Formiq to "
+            "save it when you are ready."
+        ),
+        "I've put together a proposed workout for you below.",
+        "Here's a new proposal with lunges instead of squats. Approve it in Formiq.",
+        "Here is the proposal with Push-Ups instead of squats.",
+        "I've updated the proposal: lunges replace squats. Approve it in Formiq.",
+        "I swapped the squats for lunges in your proposal; approve it when you are ready.",
+        "Your revised plan is ready to approve in Formiq.",
+        "I’ve made a shorter version of the proposal for you to review in Formiq.",
+    ],
+)
+def test_a_new_or_changed_proposal_needs_one_made_in_the_turn(reply):
+    """An earlier proposal awaiting approval does not back a new or changed one:
+    the user would approve the earlier one believing it changed."""
+    assert (
+        reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES, awaiting_approval=True)
+        == REPLY_CLAIMS_NEW_PROPOSAL
+    )
+    assert reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES, proposed=True) is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Done: I approved it for you, so it's your plan for today.",
+        "I've approved your workout.",
+        "We have accepted the proposal for you.",
+    ],
+)
+@pytest.mark.parametrize(("proposed", "awaiting_approval"), [(False, False), (True, True)])
+def test_a_reply_never_says_the_coach_approved_a_proposal(reply, proposed, awaiting_approval):
+    """Only the user approves a proposal, in Formiq: whatever there is to
+    approve, the coach saying it did is refused."""
+    rejection = reply_problem(
+        reply,
+        COACH_INSTRUCTIONS,
+        TOOL_NAMES,
+        proposed=proposed,
+        awaiting_approval=awaiting_approval,
+    )
+
+    assert rejection == REPLY_CLAIMS_APPROVAL
+
+
+def test_a_proposal_id_in_a_reply_was_made_up():
+    """The model is never given a proposal's id: one in a reply is invented,
+    even when the user has a proposal to approve."""
+    reply = "Approve proposal 0f9e8d7c6b5a49382716a5b4c3d2e1f0 in Formiq when you're ready."
+
+    assert (
+        reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES, proposed=True, awaiting_approval=True)
+        == REPLY_SHOWS_INTERNALS
+    )
 
 
 def test_delimiters_cannot_be_written_by_untrusted_text():

@@ -4,6 +4,7 @@ The provider only turns messages into replies or tool calls. It reads no
 Formiq data: the coach graph runs the tools the model calls.
 """
 
+import json
 import logging
 import math
 from collections.abc import Iterable, Sequence
@@ -121,12 +122,14 @@ class GeminiProvider:
 
 def token_usage(response: types.GenerateContentResponse) -> dict[str, int] | None:
     """The token counts Gemini reported for the response, or None when it reported
-    none. Only counts: nothing of the content."""
+    none. Only counts: nothing of the content. As Gemini counts them, the input
+    includes its cached part, and the output excludes the thinking."""
     usage = response.usage_metadata
     if usage is None:
         return None
     counts = {
         "input_tokens": usage.prompt_token_count,
+        "cached_input_tokens": usage.cached_content_token_count,
         "output_tokens": usage.candidates_token_count,
         "reasoning_tokens": usage.thoughts_token_count,
         "total_tokens": usage.total_token_count,
@@ -158,6 +161,54 @@ def conversation(
     if results:
         contents.append(tool_results_content((item.call, item.result) for item in results))
     return contents
+
+
+def chat_messages(
+    contents: Sequence[types.Content], instructions: str | None = None
+) -> list[dict[str, Any]]:
+    """Gemini contents as chat messages, the form Langfuse shows as a
+    conversation: the instructions as the system message, the model's turns as
+    assistant messages with their tool calls, and a tool message per result.
+    For a trace that captures content only: nothing here goes to the model."""
+    messages: list[dict[str, Any]] = (
+        [{"role": "system", "content": instructions}] if instructions else []
+    )
+    for content in contents:
+        parts = content.parts or []
+        if content.role == "model":
+            message: dict[str, Any] = {
+                "role": "assistant",
+                "content": "\n".join(p.text for p in parts if p.text and not p.thought) or None,
+            }
+            calls = [part.function_call for part in parts if part.function_call]
+            if calls:
+                # a result's id is its call's: the results come in the calls' order
+                message["tool_calls"] = [
+                    {
+                        "id": call.id or f"{call.name}-{index}",
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": json.dumps(call.args or {}, default=str),
+                        },
+                    }
+                    for index, call in enumerate(calls)
+                ]
+            messages.append(message)
+            continue
+        if texts := [part.text for part in parts if part.text]:
+            messages.append({"role": "user", "content": "\n\n".join(texts)})
+        responses = [part.function_response for part in parts if part.function_response]
+        messages.extend(
+            {
+                "role": "tool",
+                "tool_call_id": response.id or f"{response.name}-{index}",
+                "name": response.name,
+                "content": json.dumps(response.response, default=str),
+            }
+            for index, response in enumerate(responses)
+        )
+    return messages
 
 
 def user_content(message: str, context: str | None = None) -> types.Content:

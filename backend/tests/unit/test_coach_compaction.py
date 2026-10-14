@@ -19,6 +19,7 @@ from app.agent.context import (
     MAX_CONTEXT_COMPACTIONS,
     MAX_TOOL_RESULT_CHARS,
     NO_CONVERSATION,
+    SUPERSEDED_RESULT,
     ConversationContext,
     ConversationTurn,
     compact_conversation,
@@ -351,6 +352,107 @@ def test_compaction_does_not_change_the_turns_messages():
 
     assert messages == before
     assert all(message.result == PLAN for message in messages[1::2])
+
+
+# an accepted proposal supersedes the searches it was made from
+
+PROFILE = {"output": {"user_id": 7, "profile": {"first_name": "Journey"}}}
+SEARCH = {
+    "output": {
+        "exercises": [
+            {"exercise_id": number, "name": f"Exercise {number}", "muscles": ["Glutes"]}
+            for number in range(1, 11)
+        ],
+        "count": 10,
+    }
+}
+REJECTED = {"error": {"code": "INVALID_INPUT", "message": "exercise 28 does not belong"}}
+PROPOSED = {"output": {"status": "awaiting_user_approval", "exercises": [{"exercise_id": 12}]}}
+
+
+def journey(*proposals):
+    """The profile read, a search per section, then each proposal's result in a
+    round of its own."""
+    reads = tool_turn(call("get_user_profile"))
+    searches = tool_turn(
+        *(call("search_exercises", use=use) for use in ("WARM_UP", "MAIN_WORKOUT", "COOL_DOWN"))
+    )
+    messages = [
+        reads,
+        ToolResult(call=reads.tool_calls[0], result=PROFILE),
+        searches,
+        *(ToolResult(call=item, result=SEARCH) for item in searches.tool_calls),
+    ]
+    for result in proposals:
+        turn = tool_turn(call("propose_workout_plan", exercises=[{"exercise_id": 12}]))
+        messages += [turn, ToolResult(call=turn.tool_calls[0], result=result)]
+    return messages
+
+
+def sent_results(fitted):
+    return [
+        part.function_response.response
+        for content in fitted.contents
+        for part in content.parts
+        if part.function_response
+    ]
+
+
+def test_an_accepted_proposal_supersedes_the_searches_it_was_made_from():
+    messages = journey(REJECTED, PROPOSED)
+
+    fitted = fit(messages, CONTEXT_MAX_CHARS)
+
+    # the read, the rejection and the proposal are sent; the candidates are not
+    assert sent_results(fitted) == [PROFILE, *[SUPERSEDED_RESULT] * 3, REJECTED, PROPOSED]
+    assert fitted.superseded == (3, 4, 5)
+    assert fitted.omitted == {3, 4, 5}
+    # whatever the budget: no compaction to fit it
+    assert (fitted.compacted_results, fitted.fits) == (0, True)
+    assert fitted.size < fitted.size_before == size_of(messages)
+    # the turn keeps them, for the decision policy and id grounding
+    assert [message.result for message in messages[3:6]] == [SEARCH] * 3
+
+
+@pytest.mark.parametrize("proposals", [(), (REJECTED,)])
+def test_without_an_accepted_proposal_every_search_is_sent(proposals):
+    fitted = fit(journey(*proposals), CONTEXT_MAX_CHARS)
+
+    assert fitted.superseded == ()
+    assert sent_results(fitted)[1:4] == [SEARCH] * 3
+
+
+def test_a_search_shorter_than_its_note_is_sent_as_it_is():
+    nothing = {"output": {"exercises": [], "count": 0, "total_matches": 0}}
+    messages = journey(PROPOSED)
+    messages[4] = ToolResult(call=messages[4].call, result=nothing)
+
+    fitted = fit(messages, CONTEXT_MAX_CHARS)
+
+    assert fitted.superseded == (3, 5)
+    assert sent_results(fitted)[1:4] == [SUPERSEDED_RESULT, nothing, SUPERSEDED_RESULT]
+
+
+def test_a_search_in_the_proposals_round_or_after_it_is_kept():
+    messages = journey(PROPOSED)
+    together = tool_turn(
+        call("search_exercises", use="COOL_DOWN"),
+        call("propose_workout_plan", exercises=[{"exercise_id": 12}]),
+    )
+    later = tool_turn(call("search_exercises", muscle="Glutes"))
+    messages += [
+        together,
+        ToolResult(call=together.tool_calls[0], result=SEARCH),
+        ToolResult(call=together.tool_calls[1], result=PROPOSED),
+        later,
+        ToolResult(call=later.tool_calls[0], result=SEARCH),
+    ]
+
+    fitted = fit(messages, CONTEXT_MAX_CHARS)
+
+    # only the rounds before the last accepted proposal's own
+    assert fitted.superseded == (3, 4, 5)
+    assert sent_results(fitted)[-3:] == [SEARCH, PROPOSED, SEARCH]
 
 
 def test_a_request_that_cannot_fit_says_so():

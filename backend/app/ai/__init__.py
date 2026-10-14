@@ -5,6 +5,7 @@ from app.ai.exceptions import (
 )
 from app.ai.gemini import (
     GeminiProvider,
+    chat_messages,
     conversation,
     tool_results_content,
     user_content,
@@ -27,6 +28,7 @@ __all__ = [
     "ToolCall",
     "ToolDeclaration",
     "ToolResult",
+    "chat_messages",
     "conversation",
     "tool_results_content",
     "user_content",

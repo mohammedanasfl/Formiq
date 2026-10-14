@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -46,6 +47,54 @@ class CoachMessageRequest(BaseModel):
     history: list[CoachHistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
 
 
+class SessionFocus(StrEnum):
+    """What a proposed workout trains: the whole body, or one part of it
+    (app.tools.completeness has what each requires)."""
+
+    FULL_BODY = "FULL_BODY"
+    UPPER_BODY = "UPPER_BODY"
+    LOWER_BODY = "LOWER_BODY"
+    PUSH = "PUSH"
+    PULL = "PULL"
+    CORE = "CORE"
+
+
+class BodyRegion(StrEnum):
+    """A part of the body a main exercise trains, from its primary muscles."""
+
+    LOWER_BODY = "LOWER_BODY"
+    UPPER_PUSH = "UPPER_PUSH"
+    UPPER_PULL = "UPPER_PULL"
+    CORE = "CORE"
+
+
+class CoverageLimitation(BaseModel):
+    """Why a proposed workout falls short of its focus: Formiq's catalog has
+    no exercise, or too few, that the user can do for it."""
+
+    code: Literal["NO_SUITABLE_EXERCISE", "TOO_FEW_SUITABLE_EXERCISES"]
+    # the region left untrained; null when the main workout is short of exercises
+    region: BodyRegion | None
+    message: str
+
+
+class ProposalCoverage(BaseModel):
+    """How completely a proposed workout's main exercises fulfil its focus.
+    Formiq proposes an incomplete workout only when its catalog leaves no
+    choice, and then says so here: complete is false and each limitation
+    names what is missing."""
+
+    complete: bool
+    focus: SessionFocus
+    # the regions the main exercises train, and those the focus needs that they do not
+    trained_regions: list[BodyRegion]
+    missing_regions: list[BodyRegion]
+    # the main exercises that count towards the focus, and how many it needs
+    main_exercises_counted: int
+    main_exercises_required: int
+    limitations: list[CoverageLimitation]
+
+
 class ProposedExerciseResponse(BaseModel):
     exercise_order: int
     # the warm-up, the main workout or the cool-down
@@ -82,6 +131,8 @@ class WorkoutPlanProposalResponse(BaseModel):
     main_minutes: int
     cool_down_minutes: int
     estimated_minutes: int
+    # whether the main workout fulfils its focus, and what is missing when not
+    coverage: ProposalCoverage
 
 
 class CoachMessageResponse(BaseModel):

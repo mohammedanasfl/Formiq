@@ -74,6 +74,17 @@ class PlanProposalService:
             self.session.rollback()
             raise
 
+    def awaits_approval(self, user_id: int) -> bool:
+        """Whether a workout plan proposal of the user's awaits their approval:
+        PENDING, and not expired by now. The coach may then point them to it;
+        it approves nothing, and approve() checks everything again."""
+        return self.proposals.has_unexpired(
+            user_id,
+            action=WriteAction.CREATE_WORKOUT_PLAN,
+            status=ProposalStatus.PENDING,
+            now=self.terms.clock(),
+        )
+
     def approve(self, user_id: int, proposal_id: str, binding: str) -> WorkoutPlan:
         """Creates the proposed plan for the user, as PLANNED. binding is the
         proposal's binding as the user was shown it: an approval of anything

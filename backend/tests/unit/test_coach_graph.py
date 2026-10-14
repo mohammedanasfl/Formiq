@@ -20,6 +20,7 @@ from app.agent import (
     coach_graph,
     initial_state,
 )
+from app.agent.context import SUPERSEDED_RESULT
 from app.ai import AIProviderError, GeminiProvider, tool_results_content, user_content
 from tests.coach import (
     FakeTools,
@@ -292,3 +293,41 @@ def test_running_the_graph_leaves_langsmith_tracing_off(monkeypatch, tools):
 
     # without one of those variables set to "true", nothing is traced or sent
     assert not tracing_is_enabled()
+
+
+def test_a_proposals_searches_are_left_out_but_their_ids_stay_grounded():
+    """Once Formiq accepts a proposal, the next requests leave out the search
+    results it was made from: the ids they gave stay usable, and the decision
+    rests on the reads, which are still sent."""
+    found = {
+        "output": {
+            "exercises": [
+                {"exercise_id": number, "name": f"Exercise {number}", "muscles": ["Glutes"]}
+                for number in range(10, 20)
+            ]
+        }
+    }
+    proposed = {"output": {"status": "awaiting_user_approval", "exercises": [{"exercise_id": 12}]}}
+    results = {"search_exercises": found, "propose_workout_plan": proposed}
+    tools = FakeTools(lambda item: results.get(item.name, {"output": {"tool": item.name}}))
+    reads = ("get_user_profile", "get_current_workout_plan", "get_latest_workout_session")
+    reply = "Here is a workout to review and approve in Formiq."
+    provider = fake_provider(
+        tool_turn(*(call(name) for name in reads)),
+        tool_turn(call("search_exercises", use="MAIN_WORKOUT")),
+        tool_turn(call("propose_workout_plan", exercises=[{"exercise_id": 12}])),
+        # again, from the same search's id
+        tool_turn(call("propose_workout_plan", exercises=[{"exercise_id": 12, "sets": 2}])),
+        respond_turn(reply, "DAILY_WORKOUT", "RETRIEVE_THEN_ANSWER"),
+    )
+
+    state = run(provider, tools, message="What should I do today?")
+
+    assert state["final_response"] == reply
+    # the second proposal ran: its id was not refused as ungrounded
+    ran = [item.name for calls, _ in tools.runs for item in calls]
+    assert ran.count("propose_workout_plan") == 2
+    for request in (3, 4):
+        contents = sent_contents(provider, request)
+        assert [r.response for r in tool_responses(contents[4])] == [SUPERSEDED_RESULT]
+        assert {r.name for r in tool_responses(contents[2])} == set(reads)

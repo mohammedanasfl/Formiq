@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/: the default images directory is inside it, wherever the process runs
@@ -10,6 +10,16 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 # A signing secret is at least as long as its algorithm's hash (RFC 7518,
 # section 3.2): `openssl rand -hex 32` prints 64 characters, enough for all three.
 MIN_JWT_SECRET_LENGTH = {"HS256": 32, "HS384": 48, "HS512": 64}
+
+# The APP_ENV values where Langfuse may receive the coach's content
+# (LANGFUSE_CAPTURE_CONTENT): local development and the tests. Any other, such
+# as production or a name Formiq does not know, may not.
+CONTENT_CAPTURE_ENVIRONMENTS = frozenset({"development", "test"})
+
+
+def content_capture_allowed(app_env: str | None) -> bool:
+    """Whether Langfuse may receive the coach's content where APP_ENV is app_env."""
+    return app_env in CONTENT_CAPTURE_ENVIRONMENTS
 
 
 class Settings(BaseSettings):
@@ -39,6 +49,12 @@ class Settings(BaseSettings):
     langfuse_base_url: str = "https://cloud.langfuse.com"
     # seconds the background export may wait on Langfuse; requests never do
     langfuse_timeout: Annotated[int, Field(gt=0)] = 5
+    # For development only: Langfuse also receives what the coach was asked and
+    # answered, each model request's instructions and conversation, and the
+    # tools' arguments and results, the users' data included. Off, it receives
+    # metadata only (docs/agent-production-contract.md, section 9). On outside
+    # CONTENT_CAPTURE_ENVIRONMENTS, the settings are refused.
+    langfuse_capture_content: bool = False
     # Access tokens (app.core.security). Without a secret, logging in and every
     # route that needs the signed-in user answer 503: nothing falls back to
     # anonymous access. Only HMAC algorithms are accepted, so a token can never
@@ -53,6 +69,21 @@ class Settings(BaseSettings):
     @classmethod
     def empty_jwt_secret_is_none(cls, secret: SecretStr | None) -> SecretStr | None:
         return secret if secret and secret.get_secret_value() else None
+
+    @field_validator("langfuse_capture_content")
+    @classmethod
+    def capture_content_only_in_development(cls, capture: bool, info: ValidationInfo) -> bool:
+        # Refused, not turned off: the application does not start with users'
+        # data set to leave for Langfuse. A field's error shows only its own
+        # value, never the other settings, the secrets among them.
+        app_env = info.data.get("app_env")
+        if capture and not content_capture_allowed(app_env):
+            raise ValueError(
+                "LANGFUSE_CAPTURE_CONTENT sends the users' conversations and data to Langfuse, "
+                f"so it is for development only, not APP_ENV={app_env!r}: turn it off, and "
+                "tracing records metadata only"
+            )
+        return capture
 
     @model_validator(mode="after")
     def check_jwt_secret_length(self) -> Self:

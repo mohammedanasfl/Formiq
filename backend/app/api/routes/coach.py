@@ -78,6 +78,7 @@ def send_coach_message(
                     "main_minutes",
                     "cool_down_minutes",
                     "estimated_minutes",
+                    "coverage",
                 }
             ),
         ),

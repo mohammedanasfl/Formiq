@@ -229,6 +229,8 @@ def test_the_service_builds_the_context_from_exactly_the_approved_dependencies()
         "provider",
         "tools",
         "trace",
+        # a bool the service read before the run (PlanProposalService)
+        "proposal_awaiting_approval",
     }
     assert context.args == []
 
@@ -307,8 +309,12 @@ def test_the_runtime_context_is_fixed_and_holds_only_the_approved_fields():
         "max_tool_iterations",
         "max_context_chars",
         "trace",
+        "proposal_awaiting_approval",
     }
+    # a fact for the reply check, nothing that reaches approvals
+    assert fields["proposal_awaiting_approval"] is bool
     context = CoachContext(user_id=USER, provider=fake_provider(), tools=FakeTools())
+    assert context.proposal_awaiting_approval is False
     with pytest.raises(dataclasses.FrozenInstanceError):
         context.user_id = OTHER  # type: ignore[misc]
 

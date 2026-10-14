@@ -14,9 +14,12 @@ Two rules hold whatever the backend does:
   back by the coach.
 - Only metadata is recorded: counts, sizes, names, statuses, categories and
   identifiers Formiq generates, never the user's words, the conversation, tool
-  results, the instructions or the model's reasoning. Observations take no input
-  or output, and safe_metadata() keeps only flat, short, primitive values, so a
-  dict of data cannot be recorded by mistake.
+  results, the instructions or the model's reasoning. safe_metadata() keeps only
+  flat, short, primitive values, so a dict of data cannot be recorded by
+  mistake. The one exception is a tracer made to capture content
+  (LANGFUSE_CAPTURE_CONTENT, off by default, for development): then each step
+  also records its input and output (Observation.content), the conversation
+  and its data included.
 """
 
 import logging
@@ -82,6 +85,11 @@ class Backend(Protocol):
 
     def end_trace(self, handle: Any) -> None: ...
 
+    def content(self, handle: Any, *, input: Any, output: Any) -> None:
+        """A step's input and output (None: not recorded), only from a tracer
+        that captures content."""
+        ...
+
 
 class NoBackend:
     """Tracing off: nothing is recorded."""
@@ -101,14 +109,18 @@ class NoBackend:
     def end_trace(self, handle: Any) -> None:
         return None
 
+    def content(self, handle: Any, **kwargs: Any) -> None:
+        return None
+
 
 class Observation:
     """One step of a request's trace. Every method is safe to call: a failing
     backend is logged and ignored."""
 
-    def __init__(self, backend: Backend, handle: Any) -> None:
+    def __init__(self, backend: Backend, handle: Any, *, capture_content: bool = False) -> None:
         self._backend = backend
         self._handle = handle
+        self._capture_content = capture_content
 
     def _guard(self, action: str, call: Any, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -146,7 +158,7 @@ class Observation:
             metadata=safe_metadata(metadata),
             model=model,
         )
-        return Observation(self._backend, handle)
+        return Observation(self._backend, handle, capture_content=self._capture_content)
 
     def update(self, **metadata: Any) -> None:
         self._update(metadata)
@@ -156,6 +168,21 @@ class Observation:
         reported is recorded as unavailable, never estimated."""
         counts = {k: v for k, v in (usage or {}).items() if isinstance(v, int) and v >= 0}
         self._update({"usage_available": bool(counts)}, usage=counts or None)
+
+    def content(self, *, input: Any = None, output: Any = None) -> None:
+        """What the step took and gave, recorded only by a tracer that captures
+        content. A value may be a function, called only then: nothing is built
+        for a trace that would drop it, and a failure to build it is a tracing
+        failure like any other."""
+        if self._capture_content:
+            self._guard("content", self._send_content, input, output)
+
+    def _send_content(self, input: Any, output: Any) -> None:
+        self._backend.content(
+            self._handle,
+            input=input() if callable(input) else input,
+            output=output() if callable(output) else output,
+        )
 
     def warn(self, category: str, **metadata: Any) -> None:
         self._update({**metadata, "outcome": category}, level="WARNING", status_message=category)
@@ -195,8 +222,10 @@ class RunTrace(Observation):
     """The trace of one coach request: its root observation, its counters and
     its final status."""
 
-    def __init__(self, backend: Backend, handle: Any, request_id: str) -> None:
-        super().__init__(backend, handle)
+    def __init__(
+        self, backend: Backend, handle: Any, request_id: str, *, capture_content: bool = False
+    ) -> None:
+        super().__init__(backend, handle, capture_content=capture_content)
         self.request_id = request_id
         self.counts: dict[str, int] = {}
         self.status: str | None = None
@@ -217,10 +246,13 @@ class RunTrace(Observation):
 
 
 class Tracer:
-    """Starts the trace of each request on its backend."""
+    """Starts the trace of each request on its backend. With capture_content,
+    the steps also record their input and output: the conversation and its
+    data (for development; off by default)."""
 
-    def __init__(self, backend: Backend | None = None) -> None:
+    def __init__(self, backend: Backend | None = None, *, capture_content: bool = False) -> None:
         self.backend: Backend = backend or NoBackend()
+        self.capture_content = capture_content
 
     @property
     def enabled(self) -> bool:
@@ -239,7 +271,7 @@ class Tracer:
             user_id=str(user_id),
             metadata=safe_metadata({**metadata, "request_id": request_id}),
         )
-        trace = RunTrace(self.backend, handle, request_id)
+        trace = RunTrace(self.backend, handle, request_id, capture_content=self.capture_content)
         try:
             yield trace
         finally:

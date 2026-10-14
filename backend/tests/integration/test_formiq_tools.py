@@ -483,13 +483,15 @@ def test_search_by_movement_pattern(tools, user):
 def test_search_by_difficulty(tools, user):
     result = run(tools, "search_exercises", user_id=user.id, difficulty="INTERMEDIATE")
 
+    # one exercise per primary muscle in turn (Glutes, Chest, Obliques,
+    # Shoulders, Lats), then the other two for the glutes, each turn by name
     assert names(result) == [
         "Barbell Back Squat",
         "Barbell Bench Press",
         "Cable Woodchop",
-        "Kettlebell Swing",
         "Pike Push-Up",
         "Pull-Up",
+        "Kettlebell Swing",
         "Romanian Deadlift",
     ]
     assert result["output"]["count"] == 7
@@ -634,6 +636,166 @@ def test_search_names_the_catalog_values_when_one_is_unknown(tools, user, filter
 
     assert result["error"]["code"] == "INVALID_INPUT"
     assert message in result["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "said",
+    [["body weight"], ["Bodyweight"], ["BODY-WEIGHT"], ["body only"], ["no equipment"], ["None"]],
+)
+def test_a_name_for_no_equipment_finds_what_needs_none(tools, user, said):
+    # what a model writes for training without equipment, as in the Langfuse
+    # baseline trace, finds what an empty list finds, instead of failing
+    def found(available):
+        return run(
+            tools,
+            "search_exercises",
+            user_id=user.id,
+            use="MAIN_WORKOUT",
+            difficulty="BEGINNER",
+            available_equipment=available,
+        )
+
+    result = found(said)
+
+    assert result == found([])
+    assert result["output"]["count"] > 0
+    assert all(item["equipment"] == [] for item in result["output"]["exercises"])
+
+
+def test_a_name_for_no_equipment_never_widens_what_the_user_has(tools, db_session, user):
+    glutes = add_muscle_group(db_session, "Test Glutes")
+    band = add_equipment(db_session, "Test Loop Band")
+    bar = add_equipment(db_session, "Test Bar")
+    add_exercise(db_session, "Test Bridge", primary=[glutes])
+    add_exercise(db_session, "Test Band Walk", primary=[glutes], equipment=[band])
+    add_exercise(db_session, "Test Bar Thrust", primary=[glutes], equipment=[bar])
+
+    def found(*available):
+        result = run(
+            tools,
+            "search_exercises",
+            user_id=user.id,
+            muscle=glutes.name,
+            available_equipment=list(available),
+        )
+        return names(result)
+
+    # a band and their own body weight: what needs the band or nothing, never the bar
+    assert found("Test Loop Band", "body weight") == ["Test Band Walk", "Test Bridge"]
+    assert found("body weight") == found() == ["Test Bridge"]
+    # a piece written with other case, hyphens or spacing is still that piece
+    assert found("test-loop  band") == ["Test Band Walk", "Test Bridge"]
+
+
+def test_unknown_equipment_is_refused_with_the_names_there_are(tools, user):
+    said = ["bodyweight", "Hover Board"]
+
+    result = run(tools, "search_exercises", user_id=user.id, available_equipment=said)
+
+    assert result["error"]["code"] == "INVALID_INPUT"
+    message = result["error"]["message"]
+    # the name for no equipment is understood; only the unknown one is named
+    assert message.startswith("the catalog has no equipment 'Hover Board'; it has Barbell, Bench, ")
+    assert message.endswith("; for no equipment at all, give an empty list")
+
+
+def test_a_warm_up_search_returns_easy_cardio_then_a_drill_per_muscle(tools, db_session, user):
+    mat = add_equipment(db_session, "Test Mat")
+    quads = add_muscle_group(db_session, "Test Quads")
+    back = add_muscle_group(db_session, "Test Back")
+
+    def warm_up(name, muscle, pattern):
+        add_exercise(
+            db_session, name, primary=[muscle], equipment=[mat], movement_pattern=pattern,
+            uses=["WARM_UP"],
+        )  # fmt: skip
+
+    # added out of order: the order comes from the ranking, not the insertion
+    warm_up("Test D Unclassified", quads, None)
+    warm_up("Test B Back Drill", back, "MOBILITY")
+    warm_up("Test Z March", quads, "CARDIO")
+    warm_up("Test C Quad Drill", quads, "MOBILITY")
+    warm_up("Test A Back Drill", back, "MOBILITY")
+
+    result = run(tools, "search_exercises", user_id=user.id, use="WARM_UP", equipment_id=mat.id)
+
+    assert names(result) == [
+        # easy cardio suits any main workout, so it always fits a proposal
+        "Test Z March",
+        # Formiq's classified drills, one per primary muscle in turn
+        "Test A Back Drill",
+        "Test C Quad Drill",
+        "Test B Back Drill",
+        # then what Formiq has not classified
+        "Test D Unclassified",
+    ]
+    # the same matches always come in the same order
+    assert run(tools, "search_exercises", user_id=user.id, use="WARM_UP", equipment_id=mat.id) == (
+        result
+    )
+    # with no main exercises found yet, none is said to suit them
+    assert all("suits_main" not in item for item in result["output"]["exercises"])
+
+
+def test_a_muscle_search_returns_where_it_is_primary_first(tools, db_session, user):
+    quads = add_muscle_group(db_session, "Test Quads")
+    back = add_muscle_group(db_session, "Test Back")
+    add_exercise(db_session, "Test A Row", primary=[back], secondary=[quads])
+    add_exercise(db_session, "Test B Squat", primary=[quads])
+
+    result = run(tools, "search_exercises", user_id=user.id, muscle="test quads")
+
+    assert names(result) == ["Test B Squat", "Test A Row"]
+
+
+def test_the_few_results_returned_cover_several_muscles(tools, db_session, user):
+    rack = add_equipment(db_session, "Test Rack")
+    legs = add_muscle_group(db_session, "Test Legs")
+    arms = add_muscle_group(db_session, "Test Arms")
+    for number in range(8):
+        add_exercise(db_session, f"Test L {number}", primary=[legs], equipment=[rack])
+    for number in range(4):
+        add_exercise(db_session, f"Test M {number}", primary=[arms], equipment=[rack])
+
+    result = run(tools, "search_exercises", user_id=user.id, equipment_id=rack.id)
+
+    # bounded, and saying how many match in all
+    assert (result["output"]["count"], result["output"]["total_matches"]) == (10, 12)
+    # every arms exercise, where the first ten names would hold two of them
+    assert names(result) == [
+        "Test L 0", "Test M 0", "Test L 1", "Test M 1", "Test L 2", "Test M 2",
+        "Test L 3", "Test M 3", "Test L 4", "Test L 5",
+    ]  # fmt: skip
+
+
+def test_search_results_hold_only_what_choosing_an_exercise_needs(tools, db_session, user):
+    mat = add_equipment(db_session, "Test Mat")
+    record = {
+        "id": "Test_Imported_Drill",
+        "category": "stretching",
+        "instructions": ["Lie down on the mat."] * 20,
+        "images": ["Test_Imported_Drill/0.jpg"],
+    }
+    add_exercise(
+        db_session,
+        "Test Imported Drill",
+        equipment=[mat],
+        movement_pattern=None,
+        uses=["WARM_UP", "COOL_DOWN"],
+        source="FREE_EXERCISE_DB",
+        source_id="Test_Imported_Drill",
+        source_record=record,
+        image_paths=["Test_Imported_Drill/0.jpg"],
+    )
+
+    result = run(tools, "search_exercises", user_id=user.id, equipment_id=mat.id)
+
+    (item,) = result["output"]["exercises"]
+    # the selection metadata: no upstream record, instructions, category or images
+    assert set(item) == {
+        "exercise_id", "name", "difficulty", "movement_pattern", "uses", "muscles", "equipment",
+    }  # fmt: skip
+    assert "Lie down" not in str(result) and ".jpg" not in str(result)
 
 
 def test_an_imported_exercise_shows_its_upstream_steps_and_category(tools, db_session, user):

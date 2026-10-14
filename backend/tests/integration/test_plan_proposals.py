@@ -23,11 +23,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agent.context import SUPERSEDED_RESULT
 from app.ai import AIProviderError, ToolCall
 from app.api.dependencies import PROPOSAL_TTL, get_ai_provider, get_proposal_terms
 from app.approvals import ProposalTerms, WriteAction, restore
 from app.main import app
-from app.models import Equipment, WorkoutPlan, WorkoutPlanProposal
+from app.models import Equipment, MuscleGroup, UserProfile, WorkoutPlan, WorkoutPlanProposal
 from app.schemas import WorkoutPlanProposalResponse
 from app.schemas.coach import ProposedExerciseResponse
 from app.services import (
@@ -39,9 +40,17 @@ from app.services import (
 )
 from app.tools import FormiqTools, formiq_tools
 from tests.auth import bearer
-from tests.coach import call, fake_provider, respond_turn, tool_turn
+from tests.coach import (
+    call,
+    fake_provider,
+    respond_turn,
+    sent_contents,
+    tool_responses,
+    tool_turn,
+)
 from tests.integration.catalog import add_exercise
 from tests.integration.test_coach_daily import (
+    DAILY_READS,
     TODAY,
     add_plan,
     create_user,
@@ -102,17 +111,20 @@ def activity(exercise_id, sets=1, **fields):
 
 
 def bodyweight(ids):
-    """A short workout that needs no equipment, with a warm-up for the
-    shoulders and legs it trains and a cool-down that stretches them."""
+    """A full-body workout at home, with a resistance band and no dumbbells: a
+    push, a lunge, a pull and a core exercise, a warm-up for the shoulders and
+    legs it trains and a cool-down that stretches them."""
     return {
         "name": "Bodyweight Basics",
         "warm_up": [
             activity(ids["Arm Circles"], reps=10),
-            activity(ids["Leg Swings"], reps=10, notes="Each leg"),
+            activity(ids["Leg Swings"], sets=2, reps=10, notes="Each leg"),
         ],
         "exercises": [
             exercise(ids["Push-Up"], rest_seconds=60),
             exercise(ids["Walking Lunge"], reps=12, rest_seconds=60, notes="Each leg"),
+            exercise(ids["Resistance Band Row"], reps=12, rest_seconds=60),
+            exercise(ids["Bird Dog"], rest_seconds=60),
         ],
         "cool_down": [
             activity(ids["Doorway Chest Stretch"], sets=2, duration_seconds=30, notes="Each side"),
@@ -165,13 +177,15 @@ def test_a_proposal_is_built_from_the_catalog_and_saves_nothing(
 
     output = result["output"]
 
-    def shown(order, section, name, sets, reps=None, duration=None, rest=None, notes=None):
+    def shown(
+        order, section, name, sets, reps=None, duration=None, rest=None, notes=None, equipment=()
+    ):
         return {
             "exercise_order": order,
             "section": section,
             "exercise_id": ids[name],
             "exercise_name": name,
-            "equipment": [],
+            "equipment": list(equipment),
             "sets": sets,
             "reps": reps,
             "duration_seconds": duration,
@@ -187,19 +201,39 @@ def test_a_proposal_is_built_from_the_catalog_and_saves_nothing(
         # one order across the sections, warm-up first
         "exercises": [
             shown(1, "WARM_UP", "Arm Circles", 1, reps=10),
-            shown(2, "WARM_UP", "Leg Swings", 1, reps=10, notes="Each leg"),
+            shown(2, "WARM_UP", "Leg Swings", 2, reps=10, notes="Each leg"),
             shown(3, "MAIN_WORKOUT", "Push-Up", 3, reps=10, rest=60),
             shown(4, "MAIN_WORKOUT", "Walking Lunge", 3, reps=12, rest=60, notes="Each leg"),
-            shown(5, "COOL_DOWN", "Doorway Chest Stretch", 2, duration=30, notes="Each side"),
-            shown(6, "COOL_DOWN", "Standing Quad Stretch", 2, duration=30, notes="Each side"),
+            shown(
+                5,
+                "MAIN_WORKOUT",
+                "Resistance Band Row",
+                3,
+                reps=12,
+                rest=60,
+                equipment=["Resistance Band"],
+            ),
+            shown(6, "MAIN_WORKOUT", "Bird Dog", 3, reps=10, rest=60),
+            shown(7, "COOL_DOWN", "Doorway Chest Stretch", 2, duration=30, notes="Each side"),
+            shown(8, "COOL_DOWN", "Standing Quad Stretch", 2, duration=30, notes="Each side"),
         ],
-        # 2 sets of 45 s, no rest between activities
-        "warm_up_minutes": 2,
-        # 6 sets of 45 s, each with 60 s of rest
-        "main_minutes": 11,
+        # 3 sets of 45 s, no rest between activities
+        "warm_up_minutes": 3,
+        # 12 sets of 45 s, each with 60 s of rest
+        "main_minutes": 21,
         # 4 holds of 30 s
         "cool_down_minutes": 2,
-        "estimated_minutes": 15,
+        "estimated_minutes": 26,
+        # a push, a lunge, a pull and a core exercise: a whole body
+        "coverage": {
+            "complete": True,
+            "focus": "FULL_BODY",
+            "trained_regions": ["LOWER_BODY", "UPPER_PUSH", "UPPER_PULL", "CORE"],
+            "missing_regions": [],
+            "main_exercises_counted": 4,
+            "main_exercises_required": 4,
+            "limitations": [],
+        },
     }
     # made for the trusted user, for the coach's reply; the tool stores nothing,
     # not even the proposal (the coach service keeps the one it shows)
@@ -425,8 +459,11 @@ def test_each_section_holds_activities_that_suit_it_and_the_main_workout(
 def test_an_exercise_may_suit_more_than_one_section(tools, user, ids):
     # Formiq uses Bird Dog to warm up and as a main exercise, and Cat-Cow to warm
     # up and to cool down: each may go in either
-    arguments = workout(ids, exercise(ids["Push-Up"]), exercise(ids["Bird Dog"]))
-    arguments["warm_up"] = [activity(ids["Bird Dog"], reps=8), activity(ids["Cat-Cow"], reps=8)]
+    arguments = workout(ids, *bodyweight(ids)["exercises"])
+    arguments["warm_up"] = [
+        activity(ids["Bird Dog"], sets=2, reps=8),
+        activity(ids["Cat-Cow"], sets=2, reps=8),
+    ]
     arguments["cool_down"] = [activity(ids["Cat-Cow"], reps=8)]
 
     output = propose(tools, user, **arguments)["output"]
@@ -435,6 +472,8 @@ def test_an_exercise_may_suit_more_than_one_section(tools, user, ids):
         ("WARM_UP", "Bird Dog"),
         ("WARM_UP", "Cat-Cow"),
         ("MAIN_WORKOUT", "Push-Up"),
+        ("MAIN_WORKOUT", "Walking Lunge"),
+        ("MAIN_WORKOUT", "Resistance Band Row"),
         ("MAIN_WORKOUT", "Bird Dog"),
         ("COOL_DOWN", "Cat-Cow"),
     ]
@@ -467,7 +506,9 @@ def test_a_user_without_equipment_can_say_so(tools, user, ids, db_session):
     squat = workout(ids, exercise(ids["Goblet Squat"]), unavailable_equipment=every_piece)
 
     assert "needs Dumbbell" in propose(tools, user, **squat)["error"]["message"]
-    squat["exercises"] = [exercise(ids["Bodyweight Squat"])]
+    squat["exercises"] = [
+        exercise(ids[name]) for name in ("Bodyweight Squat", "Push-Up", "Walking Lunge", "Bird Dog")
+    ]
     assert "output" in propose(tools, user, **squat)
 
 
@@ -484,6 +525,181 @@ def test_the_warm_up_and_cool_down_fit_the_users_equipment_and_stay_short(tools,
         propose(tools, user, **long_walk)["error"]["message"]
     )
     assert tools.proposals == []
+
+
+def legs(ids):
+    """A legs and core main workout without equipment, as in the Langfuse
+    baseline trace, with a lunge added so that it fulfils a LOWER_BODY focus:
+    it trains the glutes, quadriceps, hamstrings, calves, core and lower back,
+    not the shoulders or the upper back."""
+    return [
+        exercise(ids["Bodyweight Squat"], reps=12, rest_seconds=60),
+        exercise(ids["Glute Bridge"], reps=12, rest_seconds=60),
+        exercise(ids["Walking Lunge"], reps=12, rest_seconds=60),
+        exercise(ids["Bird Dog"], rest_seconds=60),
+    ]
+
+
+def test_every_warm_up_and_cool_down_misfit_is_named_at_once(tools, user, ids):
+    # the baseline's two rejected choices, in one proposal: one correction
+    # fixes both, instead of a second rejection for the second one
+    arguments = workout(ids, *legs(ids))
+    arguments["warm_up"] = [
+        activity(ids["Brisk Walk"], duration_seconds=180),
+        activity(ids["Arm Circles"], reps=10),
+    ]
+    arguments["cool_down"] = [
+        activity(ids["Cross-Body Shoulder Stretch"], duration_seconds=30),
+        activity(ids["Standing Quad Stretch"], sets=2, duration_seconds=30),
+    ]
+
+    result = propose(tools, user, **arguments)
+
+    assert result["error"] == {
+        "code": "INVALID_INPUT",
+        "message": (
+            f"exercise {ids['Arm Circles']} (Arm Circles) works none of the muscles the main "
+            "exercises train, so it does not belong in this warm-up; "
+            f"exercise {ids['Cross-Body Shoulder Stretch']} (Cross-Body Shoulder Stretch) works "
+            "none of the muscles the main exercises train, so it does not belong in this "
+            "cool-down: the main exercises "
+            "train Calves, Core, Glutes, Hamstrings, Lower Back, Quadriceps; choose activities "
+            "that "
+            "work one of them, or easy CARDIO"
+        ),
+    }
+    assert tools.proposals == []
+
+
+def test_suits_main_says_which_activities_a_proposal_accepts(tools, user, ids):
+    """What the warm-up and cool-down searches say each activity suits is what
+    the proposal accepts: searched in one turn with the main exercises (the
+    warm-up first, as the traced model did), each activity goes with the legs
+    workout exactly when its suits_main is any or holds one of its exercises."""
+    searches = [
+        ToolCall(
+            name="search_exercises",
+            arguments={"use": use, "difficulty": "BEGINNER", "available_equipment": []},
+            id=f"search-{use}",
+        )
+        for use in ("WARM_UP", "MAIN_WORKOUT", "COOL_DOWN")
+    ]
+    warm_up, main, cool_down = (
+        result["output"]["exercises"] for result in tools.run(searches, user_id=user.id)
+    )
+    chosen = {item["exercise_id"] for item in legs(ids)}
+    assert chosen <= {item["exercise_id"] for item in main}
+    assert all("suits_main" not in item for item in main)
+
+    for section, found in (("warm_up", warm_up), ("cool_down", cool_down)):
+        assert found[0]["suits_main"] == "any"
+        for item in found:
+            arguments = workout(ids, *legs(ids), focus="LOWER_BODY")
+            # long enough for a warm-up of at least 3 minutes
+            arguments[section] = [activity(item["exercise_id"], duration_seconds=180)]
+            suits = item["suits_main"] == "any" or bool(chosen & set(item["suits_main"]))
+
+            accepted = "output" in propose(tools, user, **arguments)
+
+            assert accepted == suits, item["name"]
+
+
+def test_easy_cardio_and_activities_for_the_trained_muscles_are_accepted(tools, user, ids):
+    arguments = workout(ids, *legs(ids), focus="LOWER_BODY")
+    arguments["warm_up"] = [
+        activity(ids["Brisk Walk"], duration_seconds=180),
+        activity(ids["Leg Swings"], sets=2, reps=10, notes="Each leg"),
+    ]
+    arguments["cool_down"] = [
+        activity(ids["Marching in Place"], duration_seconds=60),
+        activity(ids["Standing Quad Stretch"], sets=2, duration_seconds=30),
+        activity(ids["Figure-Four Glute Stretch"], sets=2, duration_seconds=30),
+        activity(ids["Cat-Cow"], reps=8),
+    ]
+
+    output = propose(tools, user, **arguments)["output"]
+
+    # Leg Swings work the hamstrings and glutes, the stretches the quadriceps and
+    # glutes, Cat-Cow the lower back and core; walking and marching are CARDIO
+    assert [(item["section"], item["exercise_name"]) for item in output["exercises"]] == [
+        ("WARM_UP", "Brisk Walk"),
+        ("WARM_UP", "Leg Swings"),
+        ("MAIN_WORKOUT", "Bodyweight Squat"),
+        ("MAIN_WORKOUT", "Glute Bridge"),
+        ("MAIN_WORKOUT", "Walking Lunge"),
+        ("MAIN_WORKOUT", "Bird Dog"),
+        ("COOL_DOWN", "Marching in Place"),
+        ("COOL_DOWN", "Standing Quad Stretch"),
+        ("COOL_DOWN", "Figure-Four Glute Stretch"),
+        ("COOL_DOWN", "Cat-Cow"),
+    ]
+    # a few minutes each: 3 minutes of walking and two sets of swings; a minute
+    # of marching, four 30-second stretches and a set of Cat-Cow
+    assert (output["warm_up_minutes"], output["cool_down_minutes"]) == (5, 4)
+
+
+@pytest.mark.parametrize(
+    ("unavailable", "message"),
+    [
+        # a misspelled piece was once ignored, so a dumbbell exercise passed
+        (
+            ["Dumbells"],
+            "the catalog has no equipment 'Dumbells'; it has Barbell, Bench, ",
+        ),
+        # having no equipment does not name what the user cannot use
+        (
+            ["body weight"],
+            (
+                "unavailable_equipment names the equipment the user cannot use, and having no "
+                "equipment is not one; the catalog has Barbell, Bench, "
+            ),
+        ),
+    ],
+)
+def test_the_equipment_the_user_cannot_use_must_be_the_catalogs(
+    tools, user, ids, unavailable, message
+):
+    goblet = workout(ids, exercise(ids["Goblet Squat"]), unavailable_equipment=unavailable)
+
+    result = propose(tools, user, **goblet)
+
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert result["error"]["message"].startswith(message)
+    assert result["error"]["message"].endswith(
+        "; for a user with no equipment at all, name every piece"
+    )
+    assert tools.proposals == []
+
+
+def test_the_equipment_the_user_cannot_use_is_matched_however_it_is_written(tools, user, ids):
+    goblet = workout(ids, exercise(ids["Goblet Squat"]), unavailable_equipment=["DUMBBELL "])
+
+    assert "needs Dumbbell, which the user cannot use" in (
+        propose(tools, user, **goblet)["error"]["message"]
+    )
+
+
+def test_long_sets_of_reps_count_in_the_time_the_user_has(tools, user, ids):
+    # 30 reps take longer than 10: estimated at 3 seconds a rep, so a plan of
+    # long sets that would not fit in 18 minutes is not proposed as if it did
+    def push_ups(reps):
+        return workout(
+            ids,
+            exercise(ids["Push-Up"], reps=reps, rest_seconds=60),
+            exercise(ids["Pike Push-Up"], reps=reps, rest_seconds=60),
+            focus="PUSH",
+            max_minutes=18,
+        )
+
+    short = propose(tools, user, **push_ups(10))["output"]
+    long = propose(tools, user, **push_ups(30))
+
+    # 6 sets of (45 s + 60 s rest), with a 3-minute walk before and after
+    assert (short["main_minutes"], short["estimated_minutes"]) == (11, 17)
+    # 6 sets of (90 s + 60 s rest)
+    assert long["error"]["message"].startswith(
+        "this plan takes about 21 minutes (warm-up 3, main 15, cool-down 3), more than the 18"
+    )
 
 
 @pytest.mark.parametrize("section", ["warm_up", "exercises", "cool_down"])
@@ -504,6 +720,385 @@ def test_a_retired_exercise_is_never_proposed(
         "code": "INVALID_INPUT",
         "message": f"exercise {retirable_exercise_id} is not an active Formiq catalog exercise",
     }
+
+
+# --- a complete workout ---
+
+
+def main_of(ids, *names, sets=3):
+    return [exercise(ids[name], sets=sets, rest_seconds=60) for name in names]
+
+
+def every_piece_of_equipment(session):
+    return list(session.scalars(select(Equipment.name)))
+
+
+def problem(result):
+    assert result["error"]["code"] == "INVALID_INPUT", result
+    return result["error"]["message"]
+
+
+PUSH_HINT = (
+    "the main workout trains no upper-body push (no main exercise with Chest, Shoulders or "
+    "Front Deltoid as a primary muscle), which a FULL_BODY workout needs: add a main exercise "
+    "for it, such as one search_exercises finds with use MAIN_WORKOUT and muscle Chest"
+)
+PULL_HINT = (
+    "the main workout trains no upper-body pull (no main exercise with Upper Back, Lats or "
+    "Rear Deltoid as a primary muscle), which a FULL_BODY workout needs: add a main exercise "
+    "for it, such as one search_exercises finds with use MAIN_WORKOUT and muscle Upper Back"
+)
+# what the hints add when the model gave no equipment: how to say the user has none
+LACKING = (
+    ", or, if the user does not have the equipment it needs, give available_equipment (what "
+    "they have; [] for none) and Formiq proposes the workout without it, saying what it "
+    "leaves out"
+)
+NO_PULL = {
+    "code": "NO_SUITABLE_EXERCISE",
+    "region": "UPPER_PULL",
+    "message": (
+        "Formiq's catalog has no upper-body pull exercise (with Upper Back, Lats or Rear "
+        "Deltoid as a primary muscle) that suits the user's equipment and experience, so this "
+        "workout does not train it."
+    ),
+}
+
+
+def test_a_full_body_workout_of_three_main_exercises_is_not_proposed(tools, user, ids):
+    """The undersized proposal the dev database kept: a squat, a bird dog and a
+    lunge, called full body. Every way it falls short is named at once."""
+    arguments = workout(ids, *main_of(ids, "Bodyweight Squat", "Bird Dog", "Walking Lunge"))
+
+    assert problem(propose(tools, user, **arguments)) == (
+        f"{PUSH_HINT}{LACKING}; {PULL_HINT}{LACKING}; the main workout has 3 exercises that "
+        "count for a FULL_BODY workout (each different, for lower body, upper-body push, "
+        "upper-body pull, core, of at least 2 sets), fewer than the 4 it needs: add main "
+        "exercises from the catalog"
+    )
+    assert tools.proposals == []
+
+
+def test_a_complete_full_body_workout_is_proposed_as_complete(tools, user, ids):
+    arguments = workout(
+        ids, *main_of(ids, "Bodyweight Squat", "Push-Up", "Resistance Band Row", "Bird Dog")
+    )
+
+    output = propose(tools, user, **arguments)["output"]
+
+    assert output["coverage"] == {
+        "complete": True,
+        "focus": "FULL_BODY",
+        "trained_regions": ["LOWER_BODY", "UPPER_PUSH", "UPPER_PULL", "CORE"],
+        "missing_regions": [],
+        "main_exercises_counted": 4,
+        "main_exercises_required": 4,
+        "limitations": [],
+    }
+
+
+def test_a_carry_or_curls_are_no_pull_and_calf_raises_no_lower_body(tools, user, ids):
+    # Farmer's Carry trains the forearms, a curl the biceps, calf raises the
+    # calves: each belongs to its region, but a full-body workout still needs a
+    # back exercise and a leg exercise
+    accessories = main_of(
+        ids, "Standing Calf Raise", "Push-Up", "Farmer's Carry", "Dumbbell Biceps Curl"
+    )
+
+    message = problem(propose(tools, user, **workout(ids, *accessories)))
+
+    assert "trains no lower body" in message
+    assert PULL_HINT in message
+    assert "fewer than" not in message
+
+
+def test_a_short_session_may_hold_fewer_exercises_but_still_covers_its_focus(tools, user, ids):
+    # 20 minutes: two or three exercises will do, but still the whole body
+    two = workout(ids, *main_of(ids, "Bodyweight Squat", "Push-Up", sets=2), max_minutes=20)
+    three = workout(
+        ids,
+        *main_of(ids, "Bodyweight Squat", "Push-Up", "Resistance Band Row", sets=2),
+        max_minutes=20,
+    )
+
+    assert problem(propose(tools, user, **two)) == PULL_HINT + LACKING
+    output = propose(tools, user, **three)["output"]
+    assert output["coverage"]["complete"] is True
+    assert (
+        output["coverage"]["main_exercises_counted"],
+        output["coverage"]["main_exercises_required"],
+    ) == (3, 2)
+    # 6 sets of (45 s + 60 s rest), between two 3-minute walks
+    assert output["estimated_minutes"] == 17
+
+
+def test_a_focused_workout_is_judged_by_its_focus_not_as_a_full_body_one(tools, user, ids):
+    presses = main_of(ids, "Push-Up", "Dumbbell Bench Press", "Dumbbell Shoulder Press")
+
+    push = propose(tools, user, **workout(ids, *presses, focus="PUSH"))["output"]
+    full_body = propose(tools, user, **workout(ids, *presses))
+
+    assert push["coverage"] == {
+        "complete": True,
+        "focus": "PUSH",
+        "trained_regions": ["UPPER_PUSH"],
+        "missing_regions": [],
+        "main_exercises_counted": 3,
+        "main_exercises_required": 3,
+        "limitations": [],
+    }
+    assert "trains no lower body" in problem(full_body)
+    assert "trains no upper-body pull" in problem(full_body)
+
+
+def test_an_exercise_outside_the_focus_does_not_belong_in_it(tools, user, ids):
+    upper = main_of(
+        ids, "Push-Up", "One-Arm Dumbbell Row", "Dumbbell Shoulder Press", "Leg Press"
+    )
+
+    assert problem(propose(tools, user, **workout(ids, *upper, focus="UPPER_BODY"))) == (
+        f"exercise {ids['Leg Press']} (Leg Press) trains none of what a UPPER_BODY workout "
+        "trains (upper-body push, upper-body pull, core): choose another exercise, or another "
+        "focus"
+    )
+
+
+def test_repeated_exercises_and_single_sets_do_not_make_a_workout_complete(
+    tools, user, ids, db_session
+):
+    push_ups = add_main_exercise(db_session, "Push-Ups", "Chest", "BEGINNER")
+    three = main_of(ids, "Bodyweight Squat", "Push-Up", "Resistance Band Row")
+
+    twice = propose(tools, user, **workout(ids, *three, exercise(ids["Push-Up"])))
+    renamed = propose(tools, user, **workout(ids, *three, exercise(push_ups.id)))
+    one_set = propose(tools, user, **workout(ids, *three, exercise(ids["Bird Dog"], sets=1)))
+
+    assert problem(twice) == (
+        f"exercise {ids['Push-Up']} (Push-Up) is in the main workout twice: list each main "
+        "exercise once, and give it more sets for more work"
+    )
+    assert problem(renamed).startswith(
+        f"exercise {push_ups.id} (Push-Ups) repeats exercise {ids['Push-Up']} (Push-Up)"
+    )
+    assert "has 3 exercises that count for a FULL_BODY workout" in problem(one_set)
+    assert tools.proposals == []
+
+
+def test_a_gap_the_catalog_cannot_fill_is_disclosed_never_hidden(tools, user, ids, db_session):
+    """With no equipment at all, Formiq's catalog has no pulling exercise: the
+    full-body workout is proposed, marked incomplete, with what it leaves out.
+    With equipment, the same workout is refused: a pull is there to choose."""
+    no_pull = main_of(ids, "Bodyweight Squat", "Push-Up", "Walking Lunge", "Bird Dog")
+    nothing = every_piece_of_equipment(db_session)
+
+    at_home = propose(tools, user, **workout(ids, *no_pull, unavailable_equipment=nothing))
+    at_the_gym = propose(tools, user, **workout(ids, *no_pull))
+
+    assert at_home["output"]["coverage"] == {
+        "complete": False,
+        "focus": "FULL_BODY",
+        "trained_regions": ["LOWER_BODY", "UPPER_PUSH", "CORE"],
+        "missing_regions": ["UPPER_PULL"],
+        "main_exercises_counted": 4,
+        "main_exercises_required": 4,
+        "limitations": [NO_PULL],
+    }
+    assert problem(at_the_gym) == PULL_HINT + LACKING
+    # the gap is never filled with an exercise the user cannot do
+    banded = workout(
+        ids,
+        *no_pull,
+        exercise(ids["Resistance Band Row"]),
+        unavailable_equipment=nothing,
+    )
+    assert "needs Resistance Band, which the user cannot use" in problem(
+        propose(tools, user, **banded)
+    )
+    assert len(tools.proposals) == 1
+
+
+@pytest.mark.parametrize(
+    "has", [[], ["body weight"], ["Pull-up Bar"]], ids=["nothing", "body_weight", "a_bar"]
+)
+def test_a_user_may_say_what_equipment_they_have(tools, user, ids, has):
+    """As in a search: [] (or a name for no equipment) for none at all, so the
+    gap is disclosed without naming every piece the user lacks. With a pull-up
+    bar, the pull-up can fill it, so the workout without a pull is refused."""
+    no_pull = main_of(ids, "Bodyweight Squat", "Push-Up", "Walking Lunge", "Bird Dog")
+
+    result = propose(tools, user, **workout(ids, *no_pull, available_equipment=has))
+
+    if has == ["Pull-up Bar"]:
+        assert problem(result) == PULL_HINT
+    else:
+        assert result["output"]["coverage"]["limitations"] == [NO_PULL]
+
+
+def test_the_equipment_the_user_has_bounds_every_exercise(tools, user, ids):
+    banded = workout(
+        ids,
+        *main_of(ids, "Bodyweight Squat", "Push-Up", "Resistance Band Row", "Goblet Squat"),
+        available_equipment=["Resistance Band"],
+    )
+
+    assert "needs Dumbbell, which the user cannot use" in problem(propose(tools, user, **banded))
+    misspelled = workout(ids, *main_of(ids, "Push-Up"), available_equipment=["Dumbells"])
+    assert problem(propose(tools, user, **misspelled)).startswith(
+        "the catalog has no equipment 'Dumbells'; it has Barbell, Bench, "
+    )
+
+
+def test_too_few_suitable_exercises_are_disclosed(tools, user, ids, db_session):
+    # with only a resistance band, the catalog has one pulling exercise
+    band_only = [name for name in every_piece_of_equipment(db_session) if name != "Resistance Band"]
+    pull = workout(
+        ids,
+        *main_of(ids, "Resistance Band Row", "Bird Dog"),
+        focus="PULL",
+        unavailable_equipment=band_only,
+    )
+
+    output = propose(tools, user, **pull)["output"]
+
+    assert output["coverage"] == {
+        "complete": False,
+        "focus": "PULL",
+        "trained_regions": ["UPPER_PULL", "CORE"],
+        "missing_regions": [],
+        "main_exercises_counted": 1,
+        "main_exercises_required": 3,
+        "limitations": [
+            {
+                "code": "TOO_FEW_SUITABLE_EXERCISES",
+                "region": None,
+                "message": (
+                    "Formiq's catalog has only 1 different exercises for a PULL workout that "
+                    "suit the user's equipment and experience, fewer than the 3 it needs."
+                ),
+            }
+        ],
+    }
+
+
+def test_a_focus_the_catalog_has_nothing_for_is_refused(tools, user, ids, db_session):
+    nothing = every_piece_of_equipment(db_session)
+    pull = workout(
+        ids, *main_of(ids, "Bird Dog"), focus="PULL", unavailable_equipment=nothing
+    )
+
+    assert "Formiq's catalog has no exercise for a PULL workout that suits the user's " in (
+        problem(propose(tools, user, **pull))
+    )
+    assert tools.proposals == []
+
+
+def muscle_group(session, name):
+    return session.scalars(select(MuscleGroup).where(MuscleGroup.name == name)).one()
+
+
+def add_experience(session, user, profile_fields, experience):
+    """The user's profile, which says how experienced they are."""
+    fields = {**profile_fields, "fitness_experience": experience}
+    session.add(UserProfile(user_id=user.id, **fields))
+    session.flush()
+
+
+def add_main_exercise(session, name, muscle, difficulty):
+    return add_exercise(
+        session,
+        name,
+        primary=[muscle_group(session, muscle)],
+        difficulty=difficulty,
+        uses=["MAIN_WORKOUT"],
+    )
+
+
+@pytest.mark.parametrize(("experience", "accepted"), [("beginner", False), ("intermediate", True)])
+def test_a_beginner_is_never_proposed_an_advanced_exercise(
+    tools, user, ids, db_session, profile_fields, experience, accepted
+):
+    add_experience(db_session, user, profile_fields, experience)
+    hard = add_main_exercise(db_session, "Test Advanced Press", "Chest", "ADVANCED")
+    arguments = workout(
+        ids,
+        *main_of(ids, "Bodyweight Squat", "Resistance Band Row", "Bird Dog"),
+        exercise(hard.id),
+    )
+
+    result = propose(tools, user, **arguments)
+
+    if accepted:
+        assert result["output"]["coverage"]["complete"] is True
+    else:
+        assert problem(result) == (
+            f"exercise {hard.id} (Test Advanced Press) is ADVANCED, too hard for a beginner: "
+            "choose a BEGINNER or INTERMEDIATE one (search_exercises with difficulty BEGINNER "
+            "finds them)"
+        )
+
+
+@pytest.mark.parametrize(("experience", "disclosed"), [("beginner", True), ("intermediate", False)])
+def test_only_what_suits_the_users_experience_fills_a_gap(
+    tools, user, ids, db_session, profile_fields, experience, disclosed
+):
+    # without equipment, the only pull is too hard for a beginner: for them the
+    # gap is disclosed, for anyone else it is to be filled
+    add_experience(db_session, user, profile_fields, experience)
+    add_main_exercise(db_session, "Test Advanced Pull", "Lats", "ADVANCED")
+    arguments = workout(
+        ids,
+        *main_of(ids, "Bodyweight Squat", "Push-Up", "Walking Lunge", "Bird Dog"),
+        unavailable_equipment=every_piece_of_equipment(db_session),
+    )
+
+    result = propose(tools, user, **arguments)
+
+    if disclosed:
+        assert result["output"]["coverage"]["limitations"] == [NO_PULL]
+    else:
+        assert problem(result).startswith("the main workout trains no upper-body pull")
+
+
+@pytest.mark.parametrize(
+    ("max_minutes", "accepted"),
+    # the workout takes about 26 minutes: at least half of 50, not of 60
+    [(None, True), (50, True), (60, False)],
+)
+def test_a_workout_uses_at_least_half_the_time_the_user_has(
+    tools, user, ids, max_minutes, accepted
+):
+    arguments = {**bodyweight(ids), "max_minutes": max_minutes}
+    if max_minutes is None:
+        del arguments["max_minutes"]
+
+    result = propose(tools, user, **arguments)
+
+    if accepted:
+        assert result["output"]["estimated_minutes"] == 26
+    else:
+        assert problem(result) == (
+            "this plan takes about 26 minutes, less than half of the 60 the user has: make it "
+            "at least 30 minutes, with more sets or main exercises"
+        )
+
+
+@pytest.mark.parametrize(("max_minutes", "accepted"), [(None, False), (30, False), (25, True)])
+def test_a_warm_up_lasts_three_minutes_unless_the_session_is_short(
+    tools, user, ids, max_minutes, accepted
+):
+    arguments = {**bodyweight(ids), "warm_up": [activity(ids["Arm Circles"], reps=10)]}
+    if max_minutes is not None:
+        arguments["max_minutes"] = max_minutes
+
+    result = propose(tools, user, **arguments)
+
+    if accepted:
+        assert result["output"]["warm_up_minutes"] == 1
+    else:
+        assert problem(result) == (
+            "the warm-up takes about 1 minutes, less than 3: make it longer, such as a longer "
+            "bout of easy cardio, rather than add activities"
+        )
 
 
 # --- through the coach and the API ---
@@ -557,7 +1152,7 @@ def ask(client, use_provider, user_id, *turns, message="What should I do today?"
 
 def proposing(ids):
     """A model that reads what today needs and the catalog (the main exercises,
-    then the warm-up drills and the stretches), then proposes a bodyweight
+    then the warm-up drills and the stretches), then proposes a full-body
     workout that fits 30 minutes without dumbbells."""
     return (
         daily_reads(
@@ -565,6 +1160,8 @@ def proposing(ids):
             call("search_exercises", movement_pattern="LUNGE"),
         ),
         tool_turn(
+            call("search_exercises", movement_pattern="HORIZONTAL_PULL"),
+            call("search_exercises", movement_pattern="ROTATION"),
             call("search_exercises", movement_pattern="MOBILITY"),
             call("search_exercises", movement_pattern="STRETCH"),
         ),
@@ -622,7 +1219,8 @@ def test_a_proposed_plan_is_saved_only_by_the_users_approval_and_once(
     assert [
         shown[key]
         for key in ("warm_up_minutes", "main_minutes", "cool_down_minutes", "estimated_minutes")
-    ] == [2, 11, 2, 15]
+    ] == [3, 21, 2, 26]
+    assert shown["coverage"]["complete"] is True
     assert [
         (
             item["exercise_order"],
@@ -636,11 +1234,13 @@ def test_a_proposed_plan_is_saved_only_by_the_users_approval_and_once(
         for item in shown["exercises"]
     ] == [
         (1, "WARM_UP", "Arm Circles", [], 1, 10, None),
-        (2, "WARM_UP", "Leg Swings", [], 1, 10, None),
+        (2, "WARM_UP", "Leg Swings", [], 2, 10, None),
         (3, "MAIN_WORKOUT", "Push-Up", [], 3, 10, None),
         (4, "MAIN_WORKOUT", "Walking Lunge", [], 3, 12, None),
-        (5, "COOL_DOWN", "Doorway Chest Stretch", [], 2, None, 30),
-        (6, "COOL_DOWN", "Standing Quad Stretch", [], 2, None, 30),
+        (5, "MAIN_WORKOUT", "Resistance Band Row", ["Resistance Band"], 3, 12, None),
+        (6, "MAIN_WORKOUT", "Bird Dog", [], 3, 10, None),
+        (7, "COOL_DOWN", "Doorway Chest Stretch", [], 2, None, 30),
+        (8, "COOL_DOWN", "Standing Quad Stretch", [], 2, None, 30),
     ]
     # proposed, not saved
     assert plans_of(test_engine, me) == []
@@ -671,11 +1271,13 @@ def test_a_proposed_plan_is_saved_only_by_the_users_approval_and_once(
         for item in plan["exercises"]
     ] == [
         (1, "WARM_UP", ids["Arm Circles"], 1, 10, None, None, None, None),
-        (2, "WARM_UP", ids["Leg Swings"], 1, 10, None, None, None, "Each leg"),
+        (2, "WARM_UP", ids["Leg Swings"], 2, 10, None, None, None, "Each leg"),
         (3, "MAIN_WORKOUT", ids["Push-Up"], 3, 10, None, None, 60, None),
         (4, "MAIN_WORKOUT", ids["Walking Lunge"], 3, 12, None, None, 60, "Each leg"),
-        (5, "COOL_DOWN", ids["Doorway Chest Stretch"], 2, None, 30, None, None, "Each side"),
-        (6, "COOL_DOWN", ids["Standing Quad Stretch"], 2, None, 30, None, None, "Each side"),
+        (5, "MAIN_WORKOUT", ids["Resistance Band Row"], 3, 12, None, None, 60, None),
+        (6, "MAIN_WORKOUT", ids["Bird Dog"], 3, 10, None, None, 60, None),
+        (7, "COOL_DOWN", ids["Doorway Chest Stretch"], 2, None, 30, None, None, "Each side"),
+        (8, "COOL_DOWN", ids["Standing Quad Stretch"], 2, None, 30, None, None, "Each side"),
     ]
     assert [
         {key: item[key] for key in ProposedExerciseResponse.model_fields if key in item}
@@ -696,6 +1298,265 @@ def test_a_proposed_plan_is_saved_only_by_the_users_approval_and_once(
         {"detail": "this proposal was already approved"},
     )
     assert plans_of(test_engine, me) == [plan["id"]]
+
+
+def test_the_baseline_journey_proposes_in_four_requests_and_saves_only_on_approval(
+    client, use_provider, users, ids, test_engine
+):
+    """The journey of the Langfuse baseline trace: no plan and no workout yet,
+    and a user without equipment asking for today's workout. A model that
+    follows the instructions reads, searches each section once (saying "body
+    weight", as the traced model did), proposes, then replies: four requests
+    and seven tool calls, none invalid, where the trace took six and eleven.
+    Once the proposal is accepted, the search results are not sent again; the
+    reply rests on the proposal, which the response carries; nothing is saved
+    until the user approves it."""
+    me, _ = users
+    searches = [
+        call(
+            "search_exercises", use=use, difficulty="BEGINNER", available_equipment=["body weight"]
+        )
+        for use in ("WARM_UP", "MAIN_WORKOUT", "COOL_DOWN")
+    ]
+    plan = {
+        "name": "Beginner Legs and Core",
+        "warm_up": [
+            activity(ids["Brisk Walk"], duration_seconds=180),
+            activity(ids["Inchworm"], reps=6),
+        ],
+        "focus": "LOWER_BODY",
+        "exercises": legs(ids),
+        "cool_down": [
+            activity(ids["Figure-Four Glute Stretch"], sets=2, duration_seconds=30),
+            activity(ids["Kneeling Hip Flexor Stretch"], sets=2, duration_seconds=30),
+            activity(ids["Cat-Cow"], reps=8),
+        ],
+    }
+    reply = (
+        "Here is a bodyweight workout for your legs and core, about 28 minutes. Review it "
+        "in Formiq and approve it to save it."
+    )
+
+    body, provider = ask(
+        client,
+        use_provider,
+        me,
+        daily_reads(),
+        tool_turn(*searches),
+        tool_turn(proposal(**plan)),
+        recommend(reply),
+        message="give workout plan for today",
+    )
+
+    assert provider.generate_turn.call_count == 4
+    # every search ran, and found only what needs no equipment, easy cardio first
+    found = [response.response for response in tool_responses(sent_contents(provider, 2)[-1])]
+    assert [len(result["output"]["exercises"]) for result in found] == [10, 6, 10]
+    for result in found:
+        assert all(item["equipment"] == [] for item in result["output"]["exercises"])
+    main = {item["exercise_id"] for item in plan["exercises"]}
+    for section, results in (("warm_up", found[0]), ("cool_down", found[2])):
+        activities = {item["exercise_id"]: item for item in results["output"]["exercises"]}
+        assert next(iter(activities.values()))["movement_pattern"] == "CARDIO"
+        # each activity chosen says it suits the main exercises chosen
+        for chosen in plan[section]:
+            suits = activities[chosen["exercise_id"]]["suits_main"]
+            assert suits == "any" or main & set(suits)
+    # the reply's request: the reads and the proposal, not the candidates again
+    final = sent_contents(provider, 3)
+    assert [response.response for response in tool_responses(final[4])] == (
+        [SUPERSEDED_RESULT] * 3
+    )
+    assert {response.name for response in tool_responses(final[2])} == set(DAILY_READS)
+    assert received(provider, 3)["propose_workout_plan"]["output"]["status"] == (
+        "awaiting_user_approval"
+    )
+    # the reply, and the proposal it introduces, as the user is shown them
+    assert body["reply"] == reply
+    shown = body["proposal"]
+    assert [(item["section"], item["exercise_name"]) for item in shown["exercises"]] == [
+        ("WARM_UP", "Brisk Walk"),
+        ("WARM_UP", "Inchworm"),
+        ("MAIN_WORKOUT", "Bodyweight Squat"),
+        ("MAIN_WORKOUT", "Glute Bridge"),
+        ("MAIN_WORKOUT", "Walking Lunge"),
+        ("MAIN_WORKOUT", "Bird Dog"),
+        ("COOL_DOWN", "Figure-Four Glute Stretch"),
+        ("COOL_DOWN", "Kneeling Hip Flexor Stretch"),
+        ("COOL_DOWN", "Cat-Cow"),
+    ]
+    assert [
+        shown[key]
+        for key in ("warm_up_minutes", "main_minutes", "cool_down_minutes", "estimated_minutes")
+    ] == [4, 21, 3, 28]
+    assert plans_of(test_engine, me) == []
+
+    response = approve(client, me, shown)
+
+    assert response.status_code == 201
+    assert plans_of(test_engine, me) == [response.json()["id"]]
+
+
+def test_a_reply_offering_a_proposal_the_turn_never_made_is_rejected(
+    client, use_provider, users, test_engine
+):
+    """A model that describes a changed workout as a proposal to approve, without
+    proposing it, is told so; only its corrected reply reaches the user."""
+    me, _ = users
+    suggestion = "Try 3 sets of 10 push-ups and 3 sets of 12 bodyweight squats today."
+
+    body, provider = ask(
+        client,
+        use_provider,
+        me,
+        daily_reads(call("search_exercises", movement_pattern="HORIZONTAL_PUSH")),
+        recommend(
+            "Here is your updated workout with Push-Ups. Review this proposal in Formiq to "
+            "save it when you are ready."
+        ),
+        recommend(suggestion),
+        message="Propose a new version of today's workout with Push-Ups instead of Bench Dips.",
+    )
+
+    assert body == {"reply": suggestion}
+    refusal = received(provider, 2)["respond"]["error"]["message"]
+    assert "none was made in this turn" in refusal
+    with Session(test_engine) as session:
+        stored = session.scalars(
+            select(WorkoutPlanProposal).where(WorkoutPlanProposal.user_id == me)
+        ).all()
+    assert stored == []
+    assert plans_of(test_engine, me) == []
+
+
+def follow_up(client, use_provider, user_id, *replies, message, history=()):
+    """The response to a later message, from a model that answers it with these
+    replies in turn, reading nothing (the first one the coach accepts reaches
+    the user), and the scripted model."""
+    provider = use_provider(*(respond_turn(reply) for reply in replies))
+    response = client.post(
+        "/coach/message",
+        headers=bearer(user_id),
+        json={"message": message, "history": list(history)},
+    )
+    assert response.status_code == 200, response.json()
+    return response.json(), provider
+
+
+def proposals_of(test_engine, user_id):
+    """The user's stored proposals, by id, with their status."""
+    with Session(test_engine) as session:
+        return {
+            stored.proposal_id: stored.status
+            for stored in session.scalars(
+                select(WorkoutPlanProposal).where(WorkoutPlanProposal.user_id == user_id)
+            )
+        }
+
+
+@pytest.mark.parametrize(
+    ("message", "reply"),
+    [
+        (
+            "Why did you choose those exercises?",
+            "The proposal I made earlier works your chest and legs, since you rested yesterday.",
+        ),
+        (
+            "Is that workout still there?",
+            "Your workout proposal from earlier is still waiting for your approval in Formiq.",
+        ),
+        (
+            "How do I approve the workout you proposed?",
+            "Open the proposal in Formiq and tap Approve: that saves it as today's plan.",
+        ),
+    ],
+)
+def test_a_later_reply_may_point_to_the_users_proposal_awaiting_approval(
+    client, use_provider, users, ids, test_engine, message, reply
+):
+    """Explaining an earlier proposal, reminding the user of it, or saying how to
+    approve it: Formiq's records hold it, pending and unexpired, so the reply
+    reaches the user. It approves nothing: the proposal still waits for the
+    user's own approval."""
+    me, _ = users
+    shown = ask(client, use_provider, me, *proposing(ids))[0]["proposal"]
+
+    body, _ = follow_up(client, use_provider, me, reply, message=message)
+
+    assert body == {"reply": reply}
+    assert proposals_of(test_engine, me) == {shown["proposal_id"]: "PENDING"}
+    assert plans_of(test_engine, me) == []
+    assert approve(client, me, shown).status_code == 201
+
+
+@pytest.mark.parametrize(
+    "earlier", ["none", "in the history only", "expired", "approved", "theirs"]
+)
+def test_a_reply_pointing_to_a_proposal_none_awaits_is_rejected(
+    client, use_provider, users, ids, test_engine, clock, earlier
+):
+    """Only a pending, unexpired proposal of the user's in Formiq's records backs
+    a reply pointing to one: not one the model or the client-sent history
+    invents, an expired or already approved one, or another user's."""
+    me, them = users
+    history = []
+    if earlier == "in the history only":
+        history = [
+            {"role": "user", "text": "What should I do today?"},
+            {"role": "coach", "text": "Here is a proposal for today: approve it in Formiq."},
+        ]
+    if earlier in ("expired", "approved"):
+        shown = ask(client, use_provider, me, *proposing(ids))[0]["proposal"]
+        if earlier == "approved":
+            assert approve(client, me, shown).status_code == 201
+        else:
+            clock.now += PROPOSAL_TTL
+    if earlier == "theirs":
+        ask(client, use_provider, them, *proposing(ids))
+    reminder = "Your workout proposal from earlier is still waiting for your approval in Formiq."
+    suggestion = "No workout is waiting for you: shall I propose one for today?"
+
+    body, provider = follow_up(
+        client,
+        use_provider,
+        me,
+        reminder,
+        suggestion,
+        message="Is my workout still waiting?",
+        history=history,
+    )
+
+    assert body == {"reply": suggestion}
+    refusal = received(provider, 1)["respond"]["error"]["message"]
+    assert "none of theirs awaits approval" in refusal
+
+
+def test_an_earlier_proposal_is_never_presented_as_a_changed_one(
+    client, use_provider, users, ids, test_engine
+):
+    """The user asks for a change, and the model, without proposing it, says
+    the earlier proposal is the changed one: refused, since the user would
+    approve the earlier one believing it changed. That one is left as it was."""
+    me, _ = users
+    shown = ask(client, use_provider, me, *proposing(ids))[0]["proposal"]
+    claim = (
+        "Here is your updated workout with Push-Ups. Review this proposal in Formiq to save "
+        "it when you are ready."
+    )
+    honest = (
+        "Your earlier proposal still awaits your approval in Formiq as it was. Ask again "
+        "and I will propose a workout with push-ups."
+    )
+
+    body, provider = follow_up(
+        client, use_provider, me, claim, honest, message="Swap the lunges for push-ups."
+    )
+
+    assert body == {"reply": honest}
+    refusal = received(provider, 1)["respond"]["error"]["message"]
+    assert "the one awaiting the user's approval is unchanged" in refusal
+    assert proposals_of(test_engine, me) == {shown["proposal_id"]: "PENDING"}
+    assert approve(client, me, shown).status_code == 201
 
 
 def test_a_provider_failure_after_the_coach_proposed_leaves_nothing_to_approve(
@@ -834,8 +1695,7 @@ def test_the_binding_covers_every_section_of_the_proposal(
     assert [item["section"] for item in saved["exercises"]] == [
         "WARM_UP",
         "WARM_UP",
-        "MAIN_WORKOUT",
-        "MAIN_WORKOUT",
+        *["MAIN_WORKOUT"] * 4,
         "COOL_DOWN",
         "COOL_DOWN",
     ]
@@ -938,4 +1798,129 @@ def test_without_a_profile_the_coach_asks_instead_of_proposing(
     refusal = received(provider, 2)["propose_workout_plan"]["error"]
     assert refusal["code"] == "PROPOSAL_REFUSED"
     assert "no fitness profile" in refusal["message"]
+    assert plans_of(test_engine, me) == []
+
+
+# --- a complete workout, through the coach and the API ---
+
+
+def at_home_searches():
+    """The model's searches of each section, for a user without equipment."""
+    return tool_turn(
+        *(
+            call("search_exercises", use=use, available_equipment=[])
+            for use in ("MAIN_WORKOUT", "WARM_UP", "COOL_DOWN")
+        )
+    )
+
+
+def test_an_incomplete_workout_is_disclosed_to_the_user_and_saved_only_on_approval(
+    client, use_provider, users, ids, test_engine
+):
+    """A user without equipment: Formiq's catalog has no pull they can do, so
+    the proposal the response carries says it is incomplete and what it leaves
+    out, whatever the reply says. It waits for the user's own approval like any
+    other, of the exact proposal shown, once."""
+    me, _ = users
+    # what the live model found it needed: to say the user has no equipment
+    plan = workout(
+        ids,
+        *main_of(ids, "Bodyweight Squat", "Push-Up", "Walking Lunge", "Bird Dog"),
+        available_equipment=[],
+    )
+    reply = (
+        "Here is a full-body bodyweight workout, about 27 minutes. It has no pulling "
+        "exercise: there is none you can do without equipment. Review it in Formiq and "
+        "approve it to save it."
+    )
+
+    body, _ = ask(
+        client,
+        use_provider,
+        me,
+        daily_reads(),
+        at_home_searches(),
+        tool_turn(proposal(**plan)),
+        recommend(reply),
+    )
+
+    assert body["reply"] == reply
+    shown = body["proposal"]
+    assert shown["coverage"] == {
+        "complete": False,
+        "focus": "FULL_BODY",
+        "trained_regions": ["LOWER_BODY", "UPPER_PUSH", "CORE"],
+        "missing_regions": ["UPPER_PULL"],
+        "main_exercises_counted": 4,
+        "main_exercises_required": 4,
+        "limitations": [NO_PULL],
+    }
+    assert proposals_of(test_engine, me) == {shown["proposal_id"]: "PENDING"}
+    assert plans_of(test_engine, me) == []
+    # disclosed is not approved: only the binding the user was shown saves it
+    assert approve(client, me, shown, binding="0" * 64).status_code == 409
+    assert plans_of(test_engine, me) == []
+    saved = approve(client, me, shown)
+    assert saved.status_code == 201
+    assert approve(client, me, shown).status_code == 409
+    assert plans_of(test_engine, me) == [saved.json()["id"]]
+
+
+def test_an_undersized_workout_is_refused_and_nothing_is_kept(
+    client, use_provider, users, ids, test_engine
+):
+    """The model proposes the undersized full-body workout the dev database
+    kept, is told what it lacks, and gives up: the user gets no proposal, and
+    Formiq keeps none."""
+    me, _ = users
+    undersized = workout(ids, *main_of(ids, "Bodyweight Squat", "Bird Dog", "Walking Lunge"))
+    honest = "I could not put a complete workout together today."
+
+    body, provider = ask(
+        client,
+        use_provider,
+        me,
+        daily_reads(),
+        at_home_searches(),
+        tool_turn(proposal(**undersized)),
+        respond_turn(honest, "DAILY_WORKOUT", "CANNOT_ANSWER"),
+    )
+
+    refusal = received(provider, 3)["propose_workout_plan"]["error"]
+    assert refusal["code"] == "INVALID_INPUT"
+    assert PULL_HINT in refusal["message"]
+    assert body == {"reply": honest}
+    assert proposals_of(test_engine, me) == {}
+    assert plans_of(test_engine, me) == []
+
+
+def test_a_refused_workout_is_completed_from_the_catalog_and_proposed_once(
+    client, use_provider, users, ids, test_engine
+):
+    """Told what the workout lacks, the model searches for a pull and a push,
+    and proposes again: only the complete proposal reaches the user and is
+    kept."""
+    me, _ = users
+    lower = ("Bodyweight Squat", "Bird Dog", "Walking Lunge")
+    complete = workout(ids, *main_of(ids, *lower, "Push-Up", "Resistance Band Row"))
+
+    body, provider = ask(
+        client,
+        use_provider,
+        me,
+        daily_reads(),
+        at_home_searches(),
+        tool_turn(proposal(**workout(ids, *main_of(ids, *lower)))),
+        tool_turn(call("search_exercises", use="MAIN_WORKOUT", muscle="Upper Back")),
+        tool_turn(proposal(**complete)),
+        recommend("Here is a full-body workout. Review it in Formiq and approve it to save it."),
+    )
+
+    assert "error" in received(provider, 3)["propose_workout_plan"]
+    shown = body["proposal"]
+    assert shown["coverage"]["complete"] is True
+    assert [
+        item["exercise_name"] for item in shown["exercises"] if item["section"] == "MAIN_WORKOUT"
+    ] == [*lower, "Push-Up", "Resistance Band Row"]
+    assert proposals_of(test_engine, me) == {shown["proposal_id"]: "PENDING"}
     assert plans_of(test_engine, me) == []

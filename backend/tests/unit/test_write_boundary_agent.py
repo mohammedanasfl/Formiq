@@ -200,8 +200,19 @@ def test_the_coach_is_offered_and_can_run_only_formiqs_reads_and_its_proposal():
 
 
 def test_nothing_the_coach_runs_with_can_reach_approvals():
-    fields = {field.name for field in dataclasses.fields(CoachContext)}
-    assert fields == {"user_id", "provider", "tools", "max_tool_iterations", "max_context_chars", "trace"}
+    fields = {field.name: field.type for field in dataclasses.fields(CoachContext)}
+    assert set(fields) == {
+        "user_id",
+        "provider",
+        "tools",
+        "max_tool_iterations",
+        "max_context_chars",
+        "trace",
+        "proposal_awaiting_approval",
+    }
+    # Whether a proposal awaits the user's approval, read by the coach service
+    # before the run: a plain bool, so nothing to call, store or decide with
+    assert fields["proposal_awaiting_approval"] is bool
     assert not any("approv" in key for key in initial_state("x"))
 
 
