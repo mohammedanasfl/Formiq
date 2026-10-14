@@ -291,6 +291,8 @@ def test_every_classified_id_is_in_the_dataset(by_id):
         | classification.COOL_DOWN_IDS
         | classification.NO_EQUIPMENT_NEEDED
         | classification.EXTRA_MAIN_WORKOUT
+        | set(classification.EQUIPMENT_NEEDED)
+        | set(classification.FORMIQ_DUPLICATES)
     )
 
     assert listed - set(by_id) == set()
@@ -338,6 +340,11 @@ def test_not_every_stretch_is_a_warm_up_or_cool_down(parsed, by_id):
         ("Hamstring-SMR", ["WARM_UP", "COOL_DOWN"]),
         # a core exercise filed under stretching is a main exercise
         ("Superman", ["MAIN_WORKOUT"]),
+        # a pull-up trains, with the bar Formiq links it to
+        ("Pullups", ["MAIN_WORKOUT"]),
+        # a copy of Formiq's own exercise suits nothing
+        ("Bodyweight_Walking_Lunge", []),
+        ("Pushups", []),
         # a partner stretch suits nothing here
         ("Seated_Hamstring", []),
     ],
@@ -356,7 +363,26 @@ def test_the_classification_counts(parsed):
 
     assert counts == {
         WorkoutSection.WARM_UP: 24,
-        WorkoutSection.MAIN_WORKOUT: 734,
+        WorkoutSection.MAIN_WORKOUT: 729,
         WorkoutSection.COOL_DOWN: 53,
     }
-    assert sum(not item.uses for item in parsed.exercises) == 71
+    assert sum(not item.uses for item in parsed.exercises) == 76
+
+
+@pytest.mark.parametrize("source_id", sorted(classification.EQUIPMENT_NEEDED))
+def test_formiq_names_the_equipment_a_body_only_record_needs(parsed, by_id, source_id):
+    item = next(item for item in parsed.exercises if item.source_id == source_id)
+
+    assert by_id[source_id]["equipment"] == "body only"
+    assert item.equipment == list(classification.EQUIPMENT_NEEDED[source_id])
+    # the record is kept as it was
+    assert item.record == by_id[source_id]
+
+
+def test_every_other_record_keeps_its_own_equipment(parsed, by_id):
+    for item in parsed.exercises:
+        if item.source_id in classification.EQUIPMENT_NEEDED:
+            continue
+        named = by_id[item.source_id]["equipment"]
+        mapped = free_exercise_db.EQUIPMENT.get(named) if named else None
+        assert item.equipment == ([mapped] if mapped else []), item.source_id

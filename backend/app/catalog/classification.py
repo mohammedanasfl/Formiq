@@ -37,6 +37,15 @@ Faster or intermediate cardio (running, rope jumping, rowing, the elliptical,
 stair machines, skating, sprints) is left out of both: the warm-up and
 cool-down are light. No cardio is a main exercise, since a proposal's main
 exercises are prescribed in reps.
+
+Equipment: a record's equipment is mapped as it is, except for the few in
+EQUIPMENT_NEEDED, whose record says "body only" though their instructions
+hang from a bar, dip on a bench or between bars, or lean on a racked bar.
+Formiq links them to that equipment; the record itself is kept as it was.
+
+Duplicates: the few records in FORMIQ_DUPLICATES are one of Formiq's own
+exercises under another name, with the same equipment. They suit no section,
+so a workout never holds both; they stay in the catalog, readable by id.
 """
 
 from app.schemas.exercise import WorkoutSection
@@ -161,10 +170,40 @@ COOL_DOWN_STRETCHES = frozenset(
 WARM_UP_IDS = WARM_UP_CARDIO | WARM_UP_DRILLS
 COOL_DOWN_IDS = COOL_DOWN_CARDIO | COOL_DOWN_STRETCHES
 
+# Formiq's equipment for records that say "body only" but need some, by its
+# instructions: a pull-up bar to hang from, a bench or parallel bars to dip on
+# ("other", as Dips_-_Chest_Version's record names them), a bar in a rack.
+EQUIPMENT_NEEDED = {
+    "Chin-Up": ("Pull-up Bar",),
+    "Gorilla_Chin_Crunch": ("Pull-up Bar",),
+    "Hanging_Leg_Raise": ("Pull-up Bar",),
+    "Hanging_Pike": ("Pull-up Bar",),
+    "Pullups": ("Pull-up Bar",),
+    # a V-bar handle hung on the pull-up bar
+    "V-Bar_Pullup": ("Pull-up Bar", "Other Equipment"),
+    "Wide-Grip_Rear_Pull-Up": ("Pull-up Bar",),
+    "Wind_Sprints": ("Pull-up Bar",),
+    "Bench_Dips": ("Bench",),
+    "Dips_-_Triceps_Version": ("Other Equipment",),
+    "Body_Tricep_Press": ("Barbell", "Squat Rack"),
+}
+
+# Records that are one of Formiq's own exercises (by its name) under another
+# name, done with the same equipment
+FORMIQ_DUPLICATES = {
+    "Bodyweight_Walking_Lunge": "Walking Lunge",
+    "Pushups": "Push-Up",
+    "Seated_Cable_Rows": "Seated Cable Row",
+    "Standing_Cable_Wood_Chop": "Cable Woodchop",
+    "Triceps_Pushdown": "Cable Triceps Pushdown",
+}
+
 
 def uses_of(source_id: str, category: str, equipment: str | None) -> list[WorkoutSection]:
     """The sections the upstream exercise suits, in workout order. category
     and equipment are the record's own values."""
+    if source_id in FORMIQ_DUPLICATES:
+        return []
     uses = set()
     if source_id in WARM_UP_IDS:
         uses.add(WARM_UP)

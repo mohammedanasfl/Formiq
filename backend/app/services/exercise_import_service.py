@@ -162,7 +162,8 @@ class ExerciseImportService:
                 "source_record": item.record,
             }
             muscles = {muscle_groups[name]: role for name, role in item.muscles.items()}
-            needs = [equipment[name] for name in item.equipment]
+            # in the order the exercise's links are read back
+            needs = sorted((equipment[name] for name in item.equipment), key=lambda e: e.id)
 
             if exercise is None:
                 exercise = self.exercises.create(Exercise(**values))

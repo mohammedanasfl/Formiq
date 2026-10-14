@@ -14,7 +14,7 @@ import copy
 import pytest
 from sqlalchemy import func, select
 
-from app.catalog import free_exercise_db
+from app.catalog import classification, free_exercise_db
 from app.catalog.free_exercise_db import SOURCE_VERSION
 from app.models import Exercise, ExerciseMuscle, User, WorkoutPlan, WorkoutPlanExercise
 from app.repositories.exercise_repository import LOAD_MUSCLES_AND_EQUIPMENT
@@ -69,7 +69,7 @@ def test_the_import_reports_what_it_did(imported_catalog):
     # three of the listed images are in the images directory
     assert (summary.images_registered, summary.images_missing) == (3, 1717)
     assert summary.not_in_source == []
-    assert summary.uses == {"WARM_UP": 22, "MAIN_WORKOUT": 725, "COOL_DOWN": 52}
+    assert summary.uses == {"WARM_UP": 22, "MAIN_WORKOUT": 720, "COOL_DOWN": 52}
 
 
 def test_an_exercise_formiq_already_has_is_skipped_never_duplicated(
@@ -111,7 +111,8 @@ def test_every_source_field_is_kept_and_the_ids_are_kept_apart(imported_catalog,
         assert isinstance(exercise.id, int)
         assert exercise.source_id == record["id"] != str(exercise.id)
         assert exercise.description is None
-        # the muscles and equipment the record names, in Formiq's catalog
+        # the muscles and equipment the record names, in Formiq's catalog, but
+        # for the equipment Formiq corrects
         assert {link.muscle_group.name for link in exercise.muscles} == {
             free_exercise_db.MUSCLES[name]
             for name in record["primaryMuscles"] + record["secondaryMuscles"]
@@ -119,7 +120,8 @@ def test_every_source_field_is_kept_and_the_ids_are_kept_apart(imported_catalog,
         mapped = (
             free_exercise_db.EQUIPMENT.get(record["equipment"]) if record["equipment"] else None
         )
-        assert [item.name for item in exercise.equipment] == ([mapped] if mapped else [])
+        expected = classification.EQUIPMENT_NEEDED.get(record["id"], [mapped] if mapped else [])
+        assert {item.name for item in exercise.equipment} == set(expected)
         # a valid catalog entry
         ExerciseResponse.model_validate(exercise)
 

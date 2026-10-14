@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.catalog.classification import uses_of
+from app.catalog.classification import EQUIPMENT_NEEDED, uses_of
 from app.catalog.images import is_image_path
 from app.schemas.exercise import (
     Difficulty,
@@ -131,7 +131,8 @@ class SourceExercise:
     movement_pattern: MovementPattern | None
     # Formiq muscle group names and roles, primary first
     muscles: dict[str, MuscleRole]
-    # Formiq equipment names; empty when the record names none
+    # Formiq equipment names: the record's, or Formiq's correction of it
+    # (EQUIPMENT_NEEDED); empty when it needs none
     equipment: list[str]
     uses: list[WorkoutSection]
     # the record's image paths, in order
@@ -308,14 +309,19 @@ def _mapped(record: dict[str, Any], name: str, warnings: list[str]) -> SourceExe
     for key, role in roles:
         for muscle in record[key]:
             muscles.setdefault(MUSCLES[muscle], role)
-    equipment = EQUIPMENT.get(record["equipment"]) if record["equipment"] is not None else None
+    if record["id"] in EQUIPMENT_NEEDED:
+        # Formiq's correction of a record that names no equipment it needs
+        equipment = list(EQUIPMENT_NEEDED[record["id"]])
+    else:
+        mapped = EQUIPMENT.get(record["equipment"]) if record["equipment"] is not None else None
+        equipment = [mapped] if mapped else []
     return SourceExercise(
         source_id=record["id"],
         name=name,
         difficulty=LEVELS[record["level"]],
         movement_pattern=MovementPattern.CARDIO if record["category"] == "cardio" else None,
         muscles=muscles,
-        equipment=[equipment] if equipment else [],
+        equipment=equipment,
         uses=uses_of(record["id"], record["category"], record["equipment"]),
         image_paths=list(record["images"]),
         record=record,

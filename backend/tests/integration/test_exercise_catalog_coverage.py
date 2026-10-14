@@ -8,11 +8,22 @@ They import into a transaction that is rolled back, never commit, and require
 the local PostgreSQL container to be running.
 """
 
+from unittest.mock import Mock
+
 import pytest
 from sqlalchemy import select
 
+from app.ai import ToolCall
 from app.models import Equipment, Exercise
 from app.repositories.exercise_repository import LOAD_MUSCLES_AND_EQUIPMENT
+from app.services import (
+    ExerciseCatalogService,
+    UserProfileService,
+    UserService,
+    WorkoutPlanService,
+    WorkoutSessionService,
+)
+from app.tools import FormiqTools
 
 MAJOR_MUSCLE_GROUPS = (
     "Chest",
@@ -62,7 +73,7 @@ def test_each_section_has_the_measured_coverage(catalog):
     # (in all, Formiq's own, needing no equipment)
     assert counts == {
         "WARM_UP": (38, 16, 26),
-        "MAIN_WORKOUT": (752, 27, 103),
+        "MAIN_WORKOUT": (747, 27, 90),
         "COOL_DOWN": (69, 17, 51),
     }
 
@@ -112,15 +123,16 @@ def test_every_major_muscle_group_but_the_known_gaps_has_a_warm_up_drill(catalog
 @pytest.mark.parametrize(
     ("muscle_group", "count"),
     [
-        ("Chest", 15),
-        ("Core", 42),
-        ("Quadriceps", 16),
+        ("Chest", 14),
+        ("Core", 38),
+        ("Quadriceps", 15),
         ("Glutes", 9),
-        ("Triceps", 8),
-        ("Lats", 4),
+        ("Triceps", 5),
         ("Shoulders", 2),
         ("Hamstrings", 2),
-        # gaps: pulling and arm work need something to pull or lift
+        # gaps: pulling and arm work need something to pull or lift (a pull-up
+        # needs a bar, though its record says "body only")
+        ("Lats", 0),
         ("Upper Back", 0),
         ("Biceps", 0),
     ],
@@ -163,3 +175,86 @@ def test_every_piece_of_equipment_has_an_exercise(imported_session, catalog):
     used = {item.name for exercise in catalog for item in exercise.equipment}
 
     assert set(imported_session.scalars(select(Equipment.name).where(Equipment.is_active))) == used
+
+
+# --- Formiq's corrections of the imported records ---
+
+
+def by_source_id(catalog):
+    return {exercise.source_id: exercise for exercise in catalog if exercise.source_id}
+
+
+@pytest.mark.parametrize(
+    ("source_id", "equipment"),
+    [
+        ("Pullups", {"Pull-up Bar"}),
+        ("Chin-Up", {"Pull-up Bar"}),
+        ("V-Bar_Pullup", {"Pull-up Bar", "Other Equipment"}),
+        ("Wide-Grip_Rear_Pull-Up", {"Pull-up Bar"}),
+        ("Hanging_Leg_Raise", {"Pull-up Bar"}),
+        ("Bench_Dips", {"Bench"}),
+        ("Dips_-_Triceps_Version", {"Other Equipment"}),
+        ("Body_Tricep_Press", {"Barbell", "Squat Rack"}),
+    ],
+)
+def test_an_exercise_its_record_calls_body_only_needs_its_equipment(
+    catalog, source_id, equipment
+):
+    exercise = by_source_id(catalog)[source_id]
+
+    assert {item.name for item in exercise.equipment} == equipment
+    # the upstream record is kept as it was
+    assert exercise.source_record["equipment"] == "body only"
+    assert exercise.uses == ["MAIN_WORKOUT"]
+
+
+@pytest.mark.parametrize(
+    ("source_id", "formiqs"),
+    [
+        ("Bodyweight_Walking_Lunge", "Walking Lunge"),
+        ("Pushups", "Push-Up"),
+        ("Seated_Cable_Rows", "Seated Cable Row"),
+        ("Standing_Cable_Wood_Chop", "Cable Woodchop"),
+        ("Triceps_Pushdown", "Cable Triceps Pushdown"),
+    ],
+)
+def test_an_imported_copy_of_formiqs_own_exercise_suits_no_section(catalog, source_id, formiqs):
+    copy = by_source_id(catalog)[source_id]
+    own = next(exercise for exercise in catalog if exercise.name == formiqs)
+
+    # never in a workout beside Formiq's own; still readable by id
+    assert copy.uses == []
+    assert copy.is_active
+    assert "MAIN_WORKOUT" in own.uses
+    assert {item.name for item in copy.equipment} == {item.name for item in own.equipment}
+
+
+def test_a_search_for_no_equipment_finds_nothing_that_needs_some(imported_session):
+    """What the coach finds for a user without equipment: no pull-up, dip or
+    hanging exercise, and so no pulling exercise at all; with a pull-up bar,
+    the pull-ups."""
+    tools = FormiqTools(
+        users=UserService(imported_session),
+        profiles=UserProfileService(imported_session),
+        plans=WorkoutPlanService(imported_session),
+        sessions=WorkoutSessionService(imported_session),
+        catalog=ExerciseCatalogService(imported_session),
+        end_read=Mock(),
+    )
+
+    def search(**arguments):
+        (result,) = tools.run([ToolCall(name="search_exercises", arguments=arguments)], user_id=1)
+        return result["output"]
+
+    corrected = {"Pullups", "Chin-Up", "V-Bar Pullup", "Bench Dips", "Dips - Triceps Version"}
+    for muscle in ("Lats", "Upper Back", "Triceps", "Chest", "Core"):
+        found = search(use="MAIN_WORKOUT", muscle=muscle, available_equipment=[])
+        names = {item["name"] for item in found["exercises"]}
+        assert all(item["equipment"] == [] for item in found["exercises"]), muscle
+        assert not names & (corrected | {"Pushups", "Bodyweight Walking Lunge"}), muscle
+    for muscle in ("Lats", "Upper Back"):
+        assert search(use="MAIN_WORKOUT", muscle=muscle, available_equipment=[])[
+            "total_matches"
+        ] == 0
+    with_a_bar = search(use="MAIN_WORKOUT", muscle="Lats", available_equipment=["Pull-up Bar"])
+    assert {"Pullups", "Chin-Up"} <= {item["name"] for item in with_a_bar["exercises"]}
