@@ -9,19 +9,20 @@ import pytest
 
 from app.schemas import WorkoutPlanExerciseResponse, WorkoutPlanResponse
 from tests.auth import bearer
+from tests.integration.users import create_user
 from tests.integration.workout_plans import retire_exercise
 
 DATE = "2026-10-10"
 
 
 @pytest.fixture
-def user_id(client):
-    return client.post("/users", json={"email": "plan-api@example.com"}).json()["id"]
+def user_id(client, test_engine):
+    return create_user(test_engine, email="plan-api@example.com")
 
 
 @pytest.fixture
-def other_user_id(client):
-    return client.post("/users", json={"email": "plan-api-other@example.com"}).json()["id"]
+def other_user_id(client, test_engine):
+    return create_user(test_engine, email="plan-api-other@example.com")
 
 
 @pytest.fixture

@@ -8,11 +8,13 @@ and after each test.
 from datetime import datetime
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import User, UserProfile
-from app.schemas import UserProfileResponse, UserResponse
+from app.schemas import UserProfileResponse
 from tests.auth import bearer
+from tests.integration.users import create_user
 
 EMAIL = "api-user@example.com"
 PHONE = "+910000000020"
@@ -30,8 +32,8 @@ def profile_body(profile_fields):
 
 
 @pytest.fixture
-def user_id(client):
-    return client.post("/users", json={"email": EMAIL}).json()["id"]
+def user_id(client, test_engine):
+    return create_user(test_engine, email=EMAIL)
 
 
 @pytest.fixture
@@ -46,70 +48,22 @@ def test_health_still_returns_ok(client):
     assert response.json() == {"status": "ok"}
 
 
-# POST /users
+# Users are made by signing up (POST /auth/register, test_registration_api.py)
 
 
 @pytest.mark.parametrize(
     "body",
-    [{"email": EMAIL}, {"phone": PHONE}, {"email": EMAIL, "phone": PHONE}],
+    [{"email": EMAIL}, {"phone": PHONE}, {"email": EMAIL, "phone": PHONE}, {}],
 )
-def test_create_user_returns_201_and_the_user(client, body):
-    response = client.post("/users", json=body)
+def test_no_route_creates_a_user(client, test_engine, body):
+    # a user made without a password could never log in, and its email could
+    # not sign up: no request creates one, signed in or not
+    for headers in ({}, bearer(create_user(test_engine, email="signed-in@example.com"))):
+        response = client.post("/users", json=body, headers=headers)
 
-    assert response.status_code == 201
-    user = response.json()
-    assert set(user) == set(UserResponse.model_fields)
-    UserResponse.model_validate(user)
-    assert (user["email"], user["phone"]) == (body.get("email"), body.get("phone"))
-
-
-def test_create_user_persists_the_user_in_the_test_database(client, test_engine):
-    user_id = client.post("/users", json={"email": EMAIL}).json()["id"]
-
+        assert response.status_code == 404
     with Session(test_engine) as session:
-        assert session.get(User, user_id).email == EMAIL
-
-
-@pytest.mark.parametrize("body", [{}, {"email": None, "phone": None}])
-def test_create_user_without_email_or_phone_returns_422(client, body):
-    assert client.post("/users", json=body).status_code == 422
-
-
-def test_create_user_with_duplicate_email_returns_409(client):
-    client.post("/users", json={"email": EMAIL})
-
-    response = client.post("/users", json={"email": EMAIL, "phone": PHONE})
-
-    assert response.status_code == 409
-    assert response.json() == {"detail": "a user with this email already exists"}
-
-
-def test_create_user_with_duplicate_phone_returns_409(client):
-    client.post("/users", json={"phone": PHONE})
-
-    response = client.post("/users", json={"email": EMAIL, "phone": PHONE})
-
-    assert response.status_code == 409
-    assert response.json() == {"detail": "a user with this phone already exists"}
-
-
-def test_users_without_email_or_phone_can_coexist(client):
-    bodies = [
-        {"phone": PHONE},
-        {"phone": "+910000000021"},
-        {"email": EMAIL},
-        {"email": f"second-{EMAIL}"},
-    ]
-
-    responses = [client.post("/users", json=body) for body in bodies]
-
-    assert [response.status_code for response in responses] == [201, 201, 201, 201]
-    duplicate_phone = client.post("/users", json={"phone": PHONE})
-    assert duplicate_phone.status_code == 409
-    assert duplicate_phone.json() == {"detail": "a user with this phone already exists"}
-    duplicate_email = client.post("/users", json={"email": EMAIL})
-    assert duplicate_email.status_code == 409
-    assert duplicate_email.json() == {"detail": "a user with this email already exists"}
+        assert session.scalars(select(User.email)).all() == ["signed-in@example.com"]
 
 
 # GET /users/{user_id}
@@ -123,8 +77,8 @@ def test_get_user_returns_200_and_the_user(client, user_id):
     assert response.json()["email"] == EMAIL
 
 
-def test_get_another_or_a_missing_user_returns_404(client, user_id):
-    other_user_id = client.post("/users", json={"phone": PHONE}).json()["id"]
+def test_get_another_or_a_missing_user_returns_404(client, user_id, test_engine):
+    other_user_id = create_user(test_engine, phone=PHONE)
 
     # the same answer whether or not the other user exists
     for other in (other_user_id, 999999):
@@ -149,10 +103,10 @@ def test_get_user_with_invalid_id_returns_422(client, user_id):
     ],
 )
 def test_user_id_outside_the_integer_column_range_returns_422(
-    client, profile_body, method, path, body, user_id
+    client, test_engine, profile_body, method, path, body, user_id
 ):
     json = profile_body if body == "profile" else body
-    signed_in = client.post("/users", json={"phone": PHONE}).json()["id"]
+    signed_in = create_user(test_engine, phone=PHONE)
 
     response = client.request(method, path.format(user_id), json=json, headers=bearer(signed_in))
 
@@ -212,7 +166,7 @@ def test_create_profile_without_required_field_returns_422(client, user_id, prof
 def test_create_profile_ignores_user_id_in_body(client, user_id, profile_body, test_engine):
     # UserProfileCreate does not declare user_id, so it is ignored, not rejected:
     # the profile belongs to the user in the path
-    other_user_id = client.post("/users", json={"phone": PHONE}).json()["id"]
+    other_user_id = create_user(test_engine, phone=PHONE)
 
     response = client.post(
         f"/users/{user_id}/profile", json={**profile_body, "user_id": other_user_id}
@@ -270,10 +224,12 @@ def test_patch_profile_sets_nullable_field_to_null(client, user_id, profile):
     assert client.get(f"/users/{user_id}/profile").json()["target_weight_kg"] is None
 
 
-def test_patch_profile_ignores_identity_and_timestamp_fields(client, user_id, profile):
+def test_patch_profile_ignores_identity_and_timestamp_fields(
+    client, user_id, profile, test_engine
+):
     # UserProfileUpdate does not declare these fields, so they are ignored, not
     # rejected: only weight_kg changes
-    other_user_id = client.post("/users", json={"phone": PHONE}).json()["id"]
+    other_user_id = create_user(test_engine, phone=PHONE)
     protected = {
         "id": profile["id"] + 1,
         "user_id": other_user_id,

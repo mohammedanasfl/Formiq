@@ -12,6 +12,7 @@ from app.agent.graph import (
     MAX_TOOL_ITERATIONS,
     CoachContext,
     CoachTools,
+    PendingProposal,
     build_coach_graph,
     coach_graph,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "CoachState",
     "CoachTools",
     "ConversationContext",
+    "PendingProposal",
     "ConversationTurn",
     "Decision",
     "Intent",

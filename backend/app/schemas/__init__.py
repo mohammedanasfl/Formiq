@@ -1,4 +1,4 @@
-from app.schemas.auth import AccessTokenResponse, LoginRequest
+from app.schemas.auth import AccessTokenResponse, LoginRequest, RegisterRequest
 from app.schemas.coach import (
     CoachMessageRequest,
     CoachMessageResponse,
@@ -89,6 +89,7 @@ __all__ = [
     "WorkoutSetUpdate",
     "WorkoutSetResponse",
     "LoginRequest",
+    "RegisterRequest",
     "AccessTokenResponse",
     "CoachMessageRequest",
     "CoachMessageResponse",

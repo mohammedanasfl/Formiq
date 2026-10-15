@@ -3,6 +3,7 @@ Gemini API or reads the database."""
 
 import ast
 import re
+from itertools import count
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -58,10 +59,12 @@ def run(provider, tools, *, user_id=7, message="How should I start?", **context)
 
 
 def always_calling_a_tool():
-    """A model that calls a tool on every turn, and never answers with text."""
+    """A model that calls a tool on every turn, each time another search (the
+    same call again would not run: it has its result), and never answers."""
     provider = Mock(spec=GeminiProvider)
+    searches = count(1)
     provider.generate_turn.side_effect = lambda *args, **kwargs: tool_turn(
-        call("get_user_profile")
+        call("search_exercises", muscle=f"Muscle {next(searches)}")
     )
     return provider
 
@@ -183,7 +186,7 @@ def test_tools_run_for_the_user_of_the_request_whatever_the_model_asks(tools):
 def test_after_the_limit_the_model_may_only_decide(tools):
     provider = fake_provider(
         tool_turn(call("get_user_profile")),
-        tool_turn(call("get_user_profile")),
+        tool_turn(call("get_current_workout_plan")),
         respond_turn("Here is what I found.", "PROFILE", "RETRIEVE_THEN_ANSWER"),
     )
 
@@ -255,6 +258,16 @@ def test_instructions_cover_the_tools():
         assert rule in COACH_INSTRUCTIONS
 
 
+def test_instructions_never_ask_for_equipment_the_user_did_not_name():
+    """The tools take available_equipment only when the user said what they
+    have: a search told to always send it guesses names from a gym training
+    location, which the catalog rejects, costing a model round (seen live on
+    2026-10-14)."""
+    assert "available_equipment for what the user has" not in COACH_INSTRUCTIONS
+    assert "each with available_equipment when the user said what they have" in COACH_INSTRUCTIONS
+    assert "never guessed from their training location" in COACH_INSTRUCTIONS
+
+
 @pytest.mark.parametrize("package", ["agent", "ai"])
 def test_agent_and_provider_do_not_reach_the_database(package):
     # Formiq data reaches the agent only through tools that call the services.
@@ -316,17 +329,17 @@ def test_a_proposals_searches_are_left_out_but_their_ids_stay_grounded():
         tool_turn(*(call(name) for name in reads)),
         tool_turn(call("search_exercises", use="MAIN_WORKOUT")),
         tool_turn(call("propose_workout_plan", exercises=[{"exercise_id": 12}])),
-        # again, from the same search's id
-        tool_turn(call("propose_workout_plan", exercises=[{"exercise_id": 12, "sets": 2}])),
+        # an id from the same search, after the proposal
+        tool_turn(call("get_exercise", exercise_id=13)),
         respond_turn(reply, "DAILY_WORKOUT", "RETRIEVE_THEN_ANSWER"),
     )
 
     state = run(provider, tools, message="What should I do today?")
 
     assert state["final_response"] == reply
-    # the second proposal ran: its id was not refused as ungrounded
+    # the read ran: its id was not refused as ungrounded
     ran = [item.name for calls, _ in tools.runs for item in calls]
-    assert ran.count("propose_workout_plan") == 2
+    assert ran.count("get_exercise") == 1
     for request in (3, 4):
         contents = sent_contents(provider, request)
         assert [r.response for r in tool_responses(contents[4])] == [SUPERSEDED_RESULT]

@@ -45,6 +45,10 @@ class ModelTurn:
     # the token counts the provider reported for this turn, if it did: for
     # observability only, never sent back to the model
     usage: dict[str, int] | None = None
+    # the model that answered, as the provider reported it (Gemini's
+    # model_version), which may be a more specific version than the one asked
+    # for: for observability only
+    model: str | None = None
 
 
 @dataclass(frozen=True)

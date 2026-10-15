@@ -425,7 +425,7 @@ SCENARIOS: dict[str, Scenario] = {
         tuple(tools(c("get_workout_plan", plan_id=12)) for _ in range(12)),
         canned={"get_workout_plan": BIG_PLAN}, context_rounds=2, tool_iterations=50,
         graph_steps=200,
-        decision="CANNOT_ANSWER", status="cannot_answer", requests=9,
+        decision="CANNOT_ANSWER", status="cannot_answer", requests=3 + MAX_CONTEXT_COMPACTIONS,
         termination="compaction_limit_exceeded", extra={"compactions": MAX_CONTEXT_COMPACTIONS},
     ),
     # --- failures ---
@@ -602,8 +602,10 @@ class CannedTools:
     """Tools that answer with the scenario's outputs, within the real per-turn limit."""
 
     declarations = TOOL_DECLARATIONS
-    # as FormiqTools records the plans it proposed: canned outputs propose none
+    # as FormiqTools records the plans it proposed, and the proposal awaiting
+    # approval it read: canned outputs propose and read none
     proposals = ()
+    pending_shown = None
 
     def __init__(self, outputs: dict[str, dict], users: list[int]) -> None:
         self.outputs, self.users = outputs, users
@@ -666,7 +668,9 @@ def run_scenario(scenario: Scenario, session, fixtures, provider=None) -> Run:
         stack.enter_context(patch.object(FormiqTools, "run", recording_run))
         if scenario.canned is not None:
             canned = CannedTools(fill(scenario.canned, names), tool_users)
-            stack.enter_context(patch.object(CoachService, "_tools", lambda self: canned))
+            stack.enter_context(
+                patch.object(CoachService, "_tools", lambda self, conversation: canned)
+            )
         limits = {}
         if scenario.context_chars is not None:
             limits["max_context_chars"] = scenario.context_chars

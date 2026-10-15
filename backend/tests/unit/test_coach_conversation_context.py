@@ -381,7 +381,7 @@ def test_an_answer_from_a_compacted_result_is_rejected_until_the_tool_is_called_
     provider = fake_provider(
         tool_turn(call("get_workout_plan", plan_id=12)),
         tool_turn(call("search_exercises", difficulty="BEGINNER")),
-        tool_turn(call("search_exercises", difficulty="BEGINNER")),
+        tool_turn(call("search_exercises", difficulty="INTERMEDIATE")),
         # the plan's data was compacted out of this request: no evidence for it
         respond_turn("Plan 12 has one exercise.", "WORKOUT_PLAN", "RETRIEVE_THEN_ANSWER"),
         tool_turn(call("get_workout_plan", plan_id=12)),
@@ -414,7 +414,7 @@ def test_an_answer_from_a_compacted_result_alone_never_reaches_the_user():
     provider.generate_turn.side_effect = [
         tool_turn(call("get_workout_plan", plan_id=12)),
         tool_turn(call("search_exercises", difficulty="BEGINNER")),
-        tool_turn(call("search_exercises", difficulty="BEGINNER")),
+        tool_turn(call("search_exercises", difficulty="INTERMEDIATE")),
         *[respond_turn("Plan 12 has one exercise.", "WORKOUT_PLAN", "RETRIEVE_THEN_ANSWER")] * 3,
     ]
 

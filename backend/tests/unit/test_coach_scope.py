@@ -17,11 +17,13 @@ from app.agent import (
     COACH_INSTRUCTIONS,
     SAFETY_POLICY,
     CoachContext,
+    ConversationTurn,
+    Intent,
     SafetyCategory,
     coach_graph,
     initial_state,
 )
-from app.agent.policy import OUT_OF_SCOPE_REPLY
+from app.agent.policy import OUT_OF_SCOPE_REPLY, check_scope, fitness_terms
 from app.tools import TOOL_DECLARATIONS, FormiqTools
 from tests.coach import FakeTools, call, fake_provider, respond_turn, tool_turn
 from tests.unit.test_coach_injection import results_sent
@@ -206,3 +208,94 @@ def test_safety_still_comes_first():
     assert state["decision"].safety is not SafetyCategory.SAFE
     assert state["final_response"] == SAFETY_POLICY[state["decision"].safety].fallback_reply
     assert tools.runs == []
+
+
+# --- a fitness request is never out of scope ---
+
+
+@pytest.mark.parametrize(
+    ("message", "said"),
+    [
+        # the live QA's two (2026-10-15): the redirect met 1 in 3 and 2 in 3 of them
+        ("I don't have any equipment.", "'equipment'"),
+        ("Create a workout that only trains my neck.", "'workout', 'neck'"),
+        ("Can I do squats with dumbbells?", "'squats', 'dumbbells'"),
+        ("How much protein should I eat?", "'protein'"),
+    ],
+)
+def test_a_fitness_request_classified_out_of_scope_goes_back_to_the_model(message, said):
+    tools = AllTools()
+    reply = "Formiq builds full-body, upper, lower, push, pull or core workouts; here is what fits."
+    provider = fake_provider(
+        respond_turn("Off topic.", "OUT_OF_SCOPE", "CANNOT_ANSWER"),
+        respond_turn(reply, "ADAPTATION", "CANNOT_ANSWER"),
+    )
+
+    state = run(provider, tools, message)
+
+    (rejection,) = results_sent(provider, 1)
+    assert rejection["error"]["code"] == "DECISION_REJECTED"
+    message_sent = rejection["error"]["message"]
+    assert message_sent.startswith(f"this request is about fitness (it says {said})")
+    assert "say so in your own reply" in message_sent
+    # never Formiq's redirect: the model's own answer of what it can do
+    assert state["final_response"] == reply
+    assert state["decision"].intent == "ADAPTATION"
+
+
+def test_a_short_follow_up_to_change_the_workout_is_fitness_in_a_conversation():
+    provider = fake_provider(
+        respond_turn("Off topic.", "OUT_OF_SCOPE", "CANNOT_ANSWER"),
+        respond_turn("Which part should be shorter?", "AMBIGUOUS", "ASK_CLARIFICATION"),
+    )
+
+    state = coach_graph.invoke(
+        initial_state("Can you make it shorter?", [ConversationTurn("user", "Plan my week")]),
+        context=CoachContext(user_id=USER, provider=provider, tools=AllTools()),
+    )
+
+    assert results_sent(provider, 1)[0]["error"]["code"] == "DECISION_REJECTED"
+    assert state["final_response"] == "Which part should be shorter?"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What is the capital of France?",
+        "How do I run a Python script?",
+        "Explain how model weights are trained.",
+        "Tell me a joke about cats.",
+        "What are the sets in set theory?",
+        "Write me a back-end API.",
+        # a follow-up word, but no conversation to follow up
+        "Can you make it shorter?",
+    ],
+)
+def test_a_request_outside_fitness_still_gets_the_redirect(message):
+    provider = fake_provider(respond_turn("Here you go...", "OUT_OF_SCOPE", "CANNOT_ANSWER"))
+
+    state = run(provider, AllTools(), message)
+
+    assert fitness_terms(message, has_conversation=False) == []
+    assert state["final_response"] == OUT_OF_SCOPE_REPLY
+
+
+@pytest.mark.parametrize(
+    ("message", "terms"),
+    [
+        ("I don't have any equipment.", ["equipment"]),
+        ("Make me a 20 minute WORKOUT", ["workout"]),
+        ("push-ups or pull ups?", ["push-ups", "pull ups"]),
+        ("a warm-up and a cool down", ["warm-up", "cool down"]),
+        ("bodyweight only please", []),
+        ("I want to lose weight", ["lose weight"]),
+    ],
+)
+def test_fitness_words_are_whole_words(message, terms):
+    assert fitness_terms(message, has_conversation=False) == terms
+
+
+def test_the_veto_is_only_for_out_of_scope():
+    assert check_scope(Intent.ADAPTATION, ["workout"]) is None
+    assert check_scope(Intent.OUT_OF_SCOPE, []) is None
+    assert check_scope(Intent.OUT_OF_SCOPE, ["workout"]) is not None

@@ -225,7 +225,7 @@ documentation at http://127.0.0.1:8000/docs.
 | `POST` | `/coach/message` | message and history | 200 |
 | `POST` | `/coach/proposals/{proposal_id}/approve` | the proposal's binding | 201 |
 | `POST` | `/auth/login` | email and password | 200 |
-| `POST` | `/users` | email and/or phone (at least one) | 201 |
+| `POST` | `/auth/register` | email and password (8+ characters): a new account, signed in | 201 |
 | `GET` | `/users/{user_id}` | | 200 |
 | `POST` | `/users/{user_id}/profile` | onboarding profile | 201 |
 | `GET` | `/users/{user_id}/profile` | | 200 |
@@ -248,7 +248,9 @@ Errors return `{"detail": "..."}` with these status codes:
 
 Every route under `/users/{user_id}`, and `POST /coach/message`, needs the header
 `Authorization: Bearer <access token>`, and serves only the signed-in user: any other `user_id`
-is not found. `POST /users` and the exercise catalog need no sign-in. The coach takes its user from
+is not found. Signing up (`POST /auth/register`) and the exercise catalog need no sign-in. There is
+no other way to create a user through the API: an account always gets its password when it is
+made, so no one can take an email before its owner signs up with it. The coach takes its user from
 the token only; its request body has no `user_id`.
 
 1. Set `AUTH_JWT_SECRET` in `.env` (never in `.env.example`), for example to the output of
@@ -256,8 +258,15 @@ the token only; its request body has no `user_id`.
    `AUTH_ACCESS_TOKEN_EXPIRE_MINUTES` (30 by default) are optional.
 2. Apply the migrations (`alembic upgrade head`): passwords are kept, as Argon2id hashes only,
    in the `user_credentials` table.
-3. Give an existing user who has an email a password. The command asks for it without echoing
-   it, and never takes it as an argument:
+3. Sign up with `POST /auth/register` (`{"email": ..., "password": ...}`, at least 8
+   characters): it creates the account with its password and returns an `access_token`. The email
+   is stored in lower case, without surrounding spaces: an address is one account whatever its
+   case, and login matches it so. An email that already has an account, in any case, gets 409, and
+   that account is left as it was: signing up never gives an existing account a password.
+   Accounts made earlier whose emails differ only in case are kept apart, never merged: each logs
+   in with its email exactly as stored. To give an existing user who has an email a password,
+   or change it, use the command, which asks for it without echoing it and never takes it as an
+   argument:
    ```bash
    python -m app.cli set-password USER_ID
    ```

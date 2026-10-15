@@ -20,6 +20,7 @@ from app.agent import (
     SAFETY_POLICY,
     CoachContext,
     ConversationTurn,
+    PendingProposal,
     SafetyCategory,
     coach_graph,
     initial_state,
@@ -209,10 +210,16 @@ def test_nothing_the_coach_runs_with_can_reach_approvals():
         "max_context_chars",
         "trace",
         "proposal_awaiting_approval",
+        "pending_proposal",
     }
     # Whether a proposal awaits the user's approval, read by the coach service
     # before the run: a plain bool, so nothing to call, store or decide with
     assert fields["proposal_awaiting_approval"] is bool
+    # and what the instructions say of it: plain numbers from the same records
+    assert {item.name: item.type for item in dataclasses.fields(PendingProposal)} == {
+        "expires_in_minutes": int,
+        "revises_plan_id": int | None,
+    }
     assert not any("approv" in key for key in initial_state("x"))
 
 

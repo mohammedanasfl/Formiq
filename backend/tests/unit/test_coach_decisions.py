@@ -19,6 +19,7 @@ from app.agent import (
     coach_graph,
     initial_state,
 )
+from app.agent.graph import PROPOSAL_RETRY_ROUNDS
 from app.ai import GeminiProvider, ModelTurn, ToolCall, ToolResult
 from tests.coach import (
     FakeTools,
@@ -479,7 +480,7 @@ def test_the_decisions_results_reach_the_model_as_data():
 
 
 def test_the_longest_legal_turn_fits_the_graphs_step_limit():
-    assert MAX_GRAPH_STEPS == 2 * (MAX_TOOL_ITERATIONS + 1) + 1
+    assert MAX_GRAPH_STEPS == 2 * (MAX_TOOL_ITERATIONS + PROPOSAL_RETRY_ROUNDS + 1) + 1
     provider = Mock(spec=GeminiProvider)
     provider.generate_turn.side_effect = lambda *args, **kwargs: respond_turn(
         "Your goal is fat loss.", "PROFILE", "ANSWER"
@@ -502,5 +503,6 @@ def test_a_loop_beyond_the_step_limit_is_stopped_by_the_graph():
     with pytest.raises(GraphRecursionError):
         run(provider, FakeTools(), "What is my goal?", max_tool_iterations=50)
 
-    # at most one model request beyond the longest legal turn
-    assert provider.generate_turn.call_count == MAX_TOOL_ITERATIONS + 2
+    # at most one model request beyond the longest legal turn (one that
+    # corrects a refused proposal past the limit)
+    assert provider.generate_turn.call_count == MAX_TOOL_ITERATIONS + PROPOSAL_RETRY_ROUNDS + 2

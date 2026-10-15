@@ -28,6 +28,10 @@ EXPIRED = "this proposal has expired: ask the coach for a new one"
 CHANGED = "this approval is for a different version of the proposal than the one proposed"
 ALREADY_APPROVED = "this proposal was already approved"
 NOT_APPROVABLE = "this proposal cannot be approved"
+REPLACED_PLAN_CHANGED = (
+    "the workout plan this proposal replaces was changed or cancelled since it was proposed: "
+    "ask the coach for a new one"
+)
 
 
 class PlanProposalService:
@@ -41,7 +45,10 @@ class PlanProposalService:
     it expires, and once: the row is locked while it is approved, and the plan
     is created and the proposal used up in one transaction, so two approvals
     at once save one plan, and a failed one saves nothing and uses nothing up.
-    Every check fails closed.
+    A proposal that revises a saved plan cancels it in the same transaction,
+    only if it is still PLANNED and as it was when proposed: its row is locked
+    too, so two approvals replacing it save one plan. Every check fails
+    closed.
     """
 
     def __init__(self, session: Session, terms: ProposalTerms) -> None:
@@ -85,10 +92,22 @@ class PlanProposalService:
             now=self.terms.clock(),
         )
 
+    def awaiting_approval(self, user_id: int) -> list[WorkoutPlanProposal]:
+        """The user's workout plan proposals awaiting their approval (PENDING,
+        not expired by now), the most recently made first: the one the coach
+        last showed them is the first. Read for the user of the request only;
+        reading one approves nothing, and approve() checks everything again."""
+        return self.proposals.list_unexpired(
+            user_id,
+            action=WriteAction.CREATE_WORKOUT_PLAN,
+            status=ProposalStatus.PENDING,
+            now=self.terms.clock(),
+        )
+
     def approve(self, user_id: int, proposal_id: str, binding: str) -> WorkoutPlan:
-        """Creates the proposed plan for the user, as PLANNED. binding is the
-        proposal's binding as the user was shown it: an approval of anything
-        else approves nothing."""
+        """Creates the proposed plan for the user, as PLANNED, and cancels the
+        plan it revises, if any. binding is the proposal's binding as the user
+        was shown it: an approval of anything else approves nothing."""
         try:
             stored = self.proposals.get_for_update(proposal_id)
             # another user's proposal is not told apart from a missing one
@@ -122,6 +141,16 @@ class PlanProposalService:
                 raise ProposalNotApprovableError(NOT_APPROVABLE)
 
             values = proposal.values()
+            # the plan it revises, still PLANNED and unchanged, is cancelled with it
+            if (replaced_id := values.get("replaces_plan_id")) is not None:
+                replaced = self.plans.lock_plan(user_id, replaced_id)
+                if (
+                    replaced is None
+                    or replaced.status != WorkoutPlanStatus.PLANNED
+                    or self.plans.version_of(replaced) != values.get("replaces_plan_digest")
+                ):
+                    raise ProposalNotApprovableError(REPLACED_PLAN_CHANGED)
+                self.plans.cancel_locked(replaced)
             plan = self.plans.add_plan(
                 user_id,
                 WorkoutPlanCreate(

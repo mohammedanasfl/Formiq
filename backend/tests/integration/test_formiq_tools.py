@@ -331,12 +331,15 @@ def test_completed_session_with_its_performed_sets(
                         performed(2, 10, 20.0, 8.5),
                         performed(3, 6, 20.0, 10.0, completed=False),
                     ],
+                    # counted from the records: the third set was not completed
+                    "completed_sets": 2,
                 },
                 {
                     "exercise_id": push_up,
                     "exercise_name": "Push-Up",
                     "exercise_order": 2,
                     "sets": [performed(1, 15, None, None)],
+                    "completed_sets": 1,
                 },
             ],
             "truncated": False,
@@ -446,7 +449,7 @@ def test_search_by_equipment(tools, db_session, user):
     add_exercise(db_session, "Test Goblet Squat", equipment=[kettlebell])
     add_exercise(db_session, "Test Air Squat")
 
-    result = run(tools, "search_exercises", user_id=user.id, equipment_id=kettlebell.id)
+    result = run(tools, "search_exercises", user_id=user.id, equipment=kettlebell.name)
 
     assert result["output"] == {
         "exercises": [
@@ -526,7 +529,7 @@ def test_search_combines_equipment_with_the_other_filters(tools, db_session, use
     add_exercise(db_session, "Test Band Hinge", equipment=[band], movement_pattern="HINGE")
 
     result = run(
-        tools, "search_exercises", user_id=user.id, equipment_id=band.id, movement_pattern="HINGE"
+        tools, "search_exercises", user_id=user.id, equipment=band.name, movement_pattern="HINGE"
     )
 
     assert names(result) == ["Test Band Hinge"]
@@ -537,7 +540,7 @@ def test_search_returns_at_most_ten_exercises(tools, db_session, user):
     for number in range(MAX_SEARCH_RESULTS + 2):
         add_exercise(db_session, f"Test Rack Exercise {number:02}", equipment=[rack])
 
-    result = run(tools, "search_exercises", user_id=user.id, equipment_id=rack.id)
+    result = run(tools, "search_exercises", user_id=user.id, equipment=rack.name)
 
     assert result["output"]["count"] == MAX_SEARCH_RESULTS == 10
     # and says how many match in all
@@ -548,7 +551,7 @@ def test_search_returns_at_most_ten_exercises(tools, db_session, user):
 def test_search_without_matches(tools, db_session, user):
     unused = add_equipment(db_session, "Test Unused")
 
-    result = run(tools, "search_exercises", user_id=user.id, equipment_id=unused.id)
+    result = run(tools, "search_exercises", user_id=user.id, equipment=unused.name)
 
     assert result == {"output": {"exercises": [], "count": 0, "total_matches": 0}}
 
@@ -558,7 +561,7 @@ def test_search_leaves_out_inactive_exercises(tools, db_session, user):
     add_exercise(db_session, "Test Sled Push", equipment=[sled])
     add_exercise(db_session, "Test Sled Pull", equipment=[sled], is_active=False)
 
-    assert names(run(tools, "search_exercises", user_id=user.id, equipment_id=sled.id)) == [
+    assert names(run(tools, "search_exercises", user_id=user.id, equipment=sled.name)) == [
         "Test Sled Push"
     ]
 
@@ -568,7 +571,7 @@ def test_search_without_filters_is_rejected(tools, user):
 
     assert result["error"]["code"] == "INVALID_INPUT"
     assert (
-        "at least one of use, muscle, available_equipment, equipment_id, movement_pattern, "
+        "at least one of use, muscle, available_equipment, equipment, movement_pattern, "
         "difficulty is required" in result["error"]["message"]
     )
 
@@ -696,7 +699,11 @@ def test_unknown_equipment_is_refused_with_the_names_there_are(tools, user):
     message = result["error"]["message"]
     # the name for no equipment is understood; only the unknown one is named
     assert message.startswith("the catalog has no equipment 'Hover Board'; it has Barbell, Bench, ")
-    assert message.endswith("; for no equipment at all, give an empty list")
+    # and how to correct it: an empty list for none, or no filter when the user named none
+    assert message.endswith(
+        "; for no equipment at all, give an empty list, and when the user did not say what "
+        "equipment they have, leave available_equipment out"
+    )
 
 
 def test_a_warm_up_search_returns_easy_cardio_then_a_drill_per_muscle(tools, db_session, user):
@@ -717,7 +724,7 @@ def test_a_warm_up_search_returns_easy_cardio_then_a_drill_per_muscle(tools, db_
     warm_up("Test C Quad Drill", quads, "MOBILITY")
     warm_up("Test A Back Drill", back, "MOBILITY")
 
-    result = run(tools, "search_exercises", user_id=user.id, use="WARM_UP", equipment_id=mat.id)
+    result = run(tools, "search_exercises", user_id=user.id, use="WARM_UP", equipment=mat.name)
 
     assert names(result) == [
         # easy cardio suits any main workout, so it always fits a proposal
@@ -730,7 +737,7 @@ def test_a_warm_up_search_returns_easy_cardio_then_a_drill_per_muscle(tools, db_
         "Test D Unclassified",
     ]
     # the same matches always come in the same order
-    assert run(tools, "search_exercises", user_id=user.id, use="WARM_UP", equipment_id=mat.id) == (
+    assert run(tools, "search_exercises", user_id=user.id, use="WARM_UP", equipment=mat.name) == (
         result
     )
     # with no main exercises found yet, none is said to suit them
@@ -757,7 +764,7 @@ def test_the_few_results_returned_cover_several_muscles(tools, db_session, user)
     for number in range(4):
         add_exercise(db_session, f"Test M {number}", primary=[arms], equipment=[rack])
 
-    result = run(tools, "search_exercises", user_id=user.id, equipment_id=rack.id)
+    result = run(tools, "search_exercises", user_id=user.id, equipment=rack.name)
 
     # bounded, and saying how many match in all
     assert (result["output"]["count"], result["output"]["total_matches"]) == (10, 12)
@@ -788,7 +795,7 @@ def test_search_results_hold_only_what_choosing_an_exercise_needs(tools, db_sess
         image_paths=["Test_Imported_Drill/0.jpg"],
     )
 
-    result = run(tools, "search_exercises", user_id=user.id, equipment_id=mat.id)
+    result = run(tools, "search_exercises", user_id=user.id, equipment=mat.name)
 
     (item,) = result["output"]["exercises"]
     # the selection metadata: no upstream record, instructions, category or images

@@ -97,6 +97,10 @@ off for every test, whatever `backend/.env` enables; tracing tests build their o
 - The three overlapping tracing test files (`tests/unit/test_coach_tracing.py`,
   `tests/integration/test_coach_tracing.py`, `tests/unit/test_reliability_observability.py`) are
   also kept on purpose. Don't delete any of these unless the user asks.
+- Revising a saved plan (user's decision, 2026-10-14): approving the revision saves it as a new
+  PLANNED plan and cancels the original in the same transaction; the original is never edited
+  or deleted. An ALTERNATIVE keeps an original main exercise only when the catalog has no other
+  suitable one: no fixed share of changed exercises.
 - The safety thresholds (2 kg/week loss, 800 kcal/day, 72 h fast) and the workout completeness
   minimums are product guardrails, not medical rules.
 - Langfuse: the model request span is `model_request` (it was `gemini` before `288f878`; older

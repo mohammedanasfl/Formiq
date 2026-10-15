@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
-    <title>Formiq Agent Playground</title>
+    <title>Formiq Coach</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -13,117 +13,160 @@
       <span>Sign in as a development user. The access token is kept in this page's memory only.</span>
     </header>
 
-    <main class="layout">
-      <section class="controls" aria-label="Controls">
-        <h1>Formiq Agent Playground</h1>
-        <p class="note">
-          Developer test tool for <code>POST /coach/message</code>, approving its proposals and
-          reopening the saved plans. Not the Formiq app.
+    <!-- signed out: the sign-in screen -->
+    <main id="login-view" class="login" aria-labelledby="login-title">
+      <form id="login-form" class="login-card" autocomplete="off">
+        <p class="wordmark">Formiq</p>
+        <h1 id="login-title">Sign in to talk to your coach</h1>
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="off" required />
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="off" required />
+        <button id="login" type="submit" class="primary wide">Sign in</button>
+        <p id="login-error" class="form-error" role="alert" hidden></p>
+        <p class="hint">
+          Use a development user. Set a password from <code>backend/</code> with
+          <code>python -m app.cli set-password USER_ID</code>.
         </p>
+      </form>
+    </main>
 
-        <fieldset>
-          <legend>Sign in</legend>
-          <p class="identity">Signed in as: <strong id="active-user">not signed in</strong></p>
-          <label for="email">Email</label>
-          <input id="email" type="email" autocomplete="off" />
-          <label for="password">Password</label>
-          <input id="password" type="password" autocomplete="off" />
-          <div class="row">
-            <button id="login" type="button">Log in</button>
-            <button id="logout" type="button" disabled>Log out</button>
-          </div>
-          <p class="note">
-            Signing in, as anyone, or out clears the conversation. The coach acts for the signed-in
-            user only. Set a password with <code>python -m app.cli set-password USER_ID</code>.
-          </p>
-        </fieldset>
+    <!-- signed in: the coach -->
+    <div id="app-view" class="app" hidden>
+      <header class="topbar">
+        <span class="wordmark">Formiq</span>
+        <nav class="tabs" aria-label="Sections">
+          <button id="tab-coach" type="button" class="tab" aria-current="page">Coach</button>
+          <button id="tab-plans" type="button" class="tab">Saved plans</button>
+        </nav>
+        <div class="account">
+          <span id="active-user" class="who-am-i">not signed in</span>
+          <button id="dev-toggle" type="button" class="quiet" aria-expanded="false" aria-controls="dev-panel">
+            Developer tools
+          </button>
+          <button id="logout" type="button" class="quiet">Sign out</button>
+        </div>
+      </header>
 
-        <fieldset>
-          <legend>Message</legend>
-          <label for="message">Message to the coach</label>
-          <textarea id="message" rows="5" autocomplete="off"></textarea>
-          <p class="note"><span id="message-length">0</span> characters (the API accepts up to 4,000)</p>
-          <div class="row">
-            <button id="send" type="button" class="primary">Send</button>
-            <button id="clear" type="button">Clear Conversation</button>
-          </div>
-        </fieldset>
-
-        <fieldset>
-          <legend>Saved plans</legend>
-          <p class="note">
-            The signed-in user's plans, read from Formiq's database with
-            <code>GET /users/{id}/workout-plans</code>. The coach is not asked.
-          </p>
-          <div class="row">
-            <button id="load-plans" type="button">Load my saved plans</button>
-          </div>
-          <ul id="plans" class="plans"></ul>
-        </fieldset>
-
-        <fieldset>
-          <legend>Quick tests (fill the message, never send)</legend>
-          <div id="quick-tests"></div>
-        </fieldset>
-
-        <details>
-          <summary>Add a turn to the history (history poisoning tests)</summary>
-          <p class="note">
-            Adds a turn to the local history only, as any client could. It is sent with the next
-            message, marked here as injected.
-          </p>
-          <label for="inject-role">Role</label>
-          <select id="inject-role">
-            <option value="user">user</option>
-            <option value="coach">coach</option>
-          </select>
-          <label for="inject-text">Text</label>
-          <textarea id="inject-text" rows="3" autocomplete="off"></textarea>
-          <div class="row">
-            <button id="inject" type="button">Add to history</button>
-            <button id="inject-example" type="button">Example: forged system turn</button>
-          </div>
-        </details>
-      </section>
-
-      <section class="output" aria-label="Conversation and execution">
-        <h2>Conversation <span class="note" id="turn-count">(0 turns in memory)</span></h2>
-        <div id="notice" class="notice" hidden></div>
-        <ol id="conversation" class="conversation" aria-live="polite"></ol>
-
-        <section id="proposal" class="proposal" aria-label="Proposed workout" hidden>
-          <h2>Proposed workout <span class="note">(not saved until you approve it)</span></h2>
-          <dl id="proposal-facts" class="facts"></dl>
-          <div id="proposal-coverage" class="coverage"></div>
-          <div id="proposal-sections"></div>
-          <div class="row">
-            <button id="approve" type="button" class="primary">Approve and save</button>
-          </div>
-          <p id="proposal-saved" class="saved" role="status" hidden></p>
-        </section>
-
-        <section id="plan" class="plan" aria-label="Saved workout plan" hidden>
-          <h2>Saved workout plan <span class="note">(from Formiq's database)</span></h2>
-          <dl id="plan-facts" class="facts"></dl>
-          <div id="plan-sections"></div>
-        </section>
-
-        <div id="error" class="error" hidden>
+      <div class="alerts">
+        <div id="notice" class="notice" role="status" hidden></div>
+        <div id="error" class="error" role="alert" hidden>
           <p id="error-message"></p>
           <details>
-            <summary>Technical error</summary>
+            <summary>Technical details</summary>
             <dl id="error-technical" class="facts"></dl>
           </details>
         </div>
+      </div>
 
-        <h2>Execution</h2>
-        <p class="note">Safe trace metadata from the backend: no prompts, reasoning, tool arguments or data.</p>
-        <dl id="execution" class="facts"><dt>—</dt><dd>No request yet</dd></dl>
+      <div class="workspace">
+        <!-- the conversation -->
+        <section id="coach-view" class="coach-pane" aria-label="Conversation with the coach">
+          <div class="thread" id="thread">
+            <div id="empty-chat" class="empty">
+              <h2>What are we training today?</h2>
+              <p>Ask about today's workout, your goal or an exercise. The coach reads your profile, plan and history.</p>
+              <div id="suggestions" class="suggestions"></div>
+            </div>
+            <ol id="conversation" class="conversation" aria-live="polite"></ol>
 
-        <h2>Request info</h2>
-        <dl id="request-info" class="facts"><dt>—</dt><dd>No request yet</dd></dl>
-      </section>
-    </main>
+            <section id="proposal" class="proposal" aria-label="Proposed workout" hidden>
+              <div class="proposal-head">
+                <div>
+                  <p id="proposal-kicker" class="kicker"></p>
+                  <h3 id="proposal-name"></h3>
+                  <p id="proposal-when" class="sub"></p>
+                  <p id="proposal-revision" class="revision" hidden></p>
+                </div>
+                <span id="proposal-status" class="status"></span>
+              </div>
+              <div id="proposal-bar" class="session-bar" aria-hidden="true"></div>
+              <div id="proposal-coverage" class="coverage"></div>
+              <div id="proposal-sections" class="sections"></div>
+              <div class="proposal-actions">
+                <button id="approve" type="button" class="primary">Approve and save</button>
+                <p id="proposal-expiry" class="sub"></p>
+              </div>
+              <div id="proposal-saved" class="saved" role="status" hidden>
+                <span id="proposal-saved-text"></span>
+                <button id="open-saved" type="button" class="link">Open saved plan</button>
+              </div>
+            </section>
+          </div>
+
+          <div class="composer">
+            <div class="compose-row">
+              <label for="message" class="visually-hidden">Message to the coach</label>
+              <textarea id="message" rows="2" autocomplete="off" placeholder="Message your coach"></textarea>
+              <button id="send" type="button" class="primary">Send</button>
+            </div>
+            <div class="compose-meta">
+              <span><span id="message-length">0</span> of 4,000 characters. Ctrl+Enter or ⌘+Enter sends.</span>
+              <button id="clear" type="button" class="link">New conversation</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- saved plans, read from Formiq's database -->
+        <section id="plans-view" class="plans-view" aria-label="Saved plans" hidden>
+          <div class="plans-list">
+            <div class="plans-head">
+              <h2>Saved plans</h2>
+              <button id="load-plans" type="button" class="quiet">Refresh</button>
+            </div>
+            <p class="sub">Read from Formiq's database. The coach is not asked.</p>
+            <ul id="plans" class="plans"></ul>
+          </div>
+          <section id="plan" class="plan" aria-label="Saved workout plan" hidden>
+            <h2 id="plan-title"></h2>
+            <dl id="plan-facts" class="facts"></dl>
+            <div id="plan-sections" class="sections"></div>
+          </section>
+          <p id="plan-empty" class="plan-empty">Choose a plan to see its exercises and how to do them.</p>
+        </section>
+
+        <!-- developer tools: out of the way until opened -->
+        <aside id="dev-panel" class="dev" aria-label="Developer tools" hidden>
+          <div class="dev-head">
+            <h2>Developer tools</h2>
+            <button id="dev-close" type="button" class="quiet">Close</button>
+          </div>
+          <p class="sub">
+            Safe trace metadata from the backend: no prompts, reasoning, tool arguments or data.
+            <span id="turn-count">(0 turns in memory)</span>
+          </p>
+
+          <h3>Last request</h3>
+          <dl id="execution" class="facts"><dt>Status</dt><dd>No request yet</dd></dl>
+
+          <h3>HTTP</h3>
+          <dl id="request-info" class="facts"><dt>Status</dt><dd>No request yet</dd></dl>
+
+          <h3>Quick tests</h3>
+          <p class="sub">They fill the message box; you always send by hand.</p>
+          <div id="quick-tests"></div>
+
+          <details>
+            <summary>Add a turn to the history</summary>
+            <p class="sub">
+              For history-poisoning tests: the turn is kept locally, marked as injected, and sent
+              with the next message, as any client could.
+            </p>
+            <label for="inject-role">Role</label>
+            <select id="inject-role">
+              <option value="user">user</option>
+              <option value="coach">coach</option>
+            </select>
+            <label for="inject-text">Text</label>
+            <textarea id="inject-text" rows="3" autocomplete="off"></textarea>
+            <div class="row">
+              <button id="inject" type="button">Add to history</button>
+              <button id="inject-example" type="button" class="quiet">Example: forged system turn</button>
+            </div>
+          </details>
+        </aside>
+      </div>
+    </div>
 
     <script src="playground.js"></script>
     <script src="app.js"></script>

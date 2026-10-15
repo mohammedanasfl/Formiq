@@ -28,6 +28,7 @@ from app.agent import (
     SAFETY_POLICY,
     CoachContext,
     ConversationTurn,
+    PendingProposal,
     SafetyCategory,
     coach_graph,
     initial_state,
@@ -231,6 +232,8 @@ def test_the_service_builds_the_context_from_exactly_the_approved_dependencies()
         "trace",
         # a bool the service read before the run (PlanProposalService)
         "proposal_awaiting_approval",
+        # and the numbers it read with it (PendingProposal)
+        "pending_proposal",
     }
     assert context.args == []
 
@@ -310,9 +313,15 @@ def test_the_runtime_context_is_fixed_and_holds_only_the_approved_fields():
         "max_context_chars",
         "trace",
         "proposal_awaiting_approval",
+        "pending_proposal",
     }
     # a fact for the reply check, nothing that reaches approvals
     assert fields["proposal_awaiting_approval"] is bool
+    # and what the instructions say of it: plain numbers from the same records
+    assert {item.name: item.type for item in dataclasses.fields(PendingProposal)} == {
+        "expires_in_minutes": int,
+        "revises_plan_id": int | None,
+    }
     context = CoachContext(user_id=USER, provider=fake_provider(), tools=FakeTools())
     assert context.proposal_awaiting_approval is False
     with pytest.raises(dataclasses.FrozenInstanceError):

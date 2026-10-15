@@ -384,16 +384,23 @@ def test_each_simultaneous_request_reaches_its_own_limits(test_engine, people, b
             assert counts["model_requests"] == 1
             assert "tool_calls_executed" not in counts
             continue
-        # 5 rounds of 20 requested calls, 5 run each, then the forced decision:
-        # whatever the other requests did at the same time
+        # 5 rounds of 20 requested calls, then the forced decision, whatever the
+        # other requests did at the same time: the first round runs 8, and the
+        # later rounds ask for the same lookup again, which the turn already
+        # has, so none of theirs runs
         assert counts["status"] == "cannot_answer"
         assert counts["model_requests"] == 6
         assert counts["iterations"] == 5
         assert counts["tool_calls_requested"] == 100
         calls = [node for node in backend.subtree(root) if node.kind == "tool"]
         refused = [c for c in calls if c.metadata.get("error_code") == "TOOL_LIMIT_REACHED"]
-        assert (len(calls), len(refused)) == (100, 75)
-        assert counts["tool_tool_limit_reached"] == 75
+        repeated = [c for c in calls if c.metadata.get("error_code") == "DUPLICATE_CALL"]
+        assert (len(calls), len(refused), len(repeated)) == (100, 12, 80)
+        # the first round's 20 reached the tools, which ran 8 (the counter counts
+        # what reached them: a known tracing gap)
+        assert counts["tool_calls_executed"] == 20
+        assert counts["tool_tool_limit_reached"] == 12
+        assert counts["tool_duplicate_call"] == 80
     assert len(backend.roots()) == 21
 
 

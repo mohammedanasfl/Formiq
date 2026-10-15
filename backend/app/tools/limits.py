@@ -9,13 +9,22 @@ MAX_SEARCH_EQUIPMENT = 20
 MAX_INSTRUCTION_STEPS = 12
 # exercises returned for one workout plan or session
 MAX_EXERCISES = 30
+# plans listed by list_workout_plans, and the main exercises named for each
+MAX_LISTED_PLANS = 20
+MAX_LISTED_PLAN_EXERCISES = 8
+# catalog exercises a refused proposal suggests, for each thing to correct
+MAX_SUGGESTIONS = 3
 # sets returned for one exercise of a workout session
 MAX_SETS = 15
 # characters of free text (notes, descriptions); longer text is cut
 MAX_TEXT_LENGTH = 500
-# tool calls run from one model turn; the rest are answered with an error (the
-# coach graph rejects a turn that requests more than 20 calls)
-MAX_EXECUTED_TOOL_CALLS_PER_TURN = 5
+# Tool calls run from one model turn; the rest are answered with an error (the
+# coach graph rejects a turn that requests more than 20 calls). Enough for what
+# a new workout needs in one round: the profile, the current plan, the last
+# workout, the proposal awaiting approval and the plans list, and the
+# warm-up, main and cool-down searches. With 5, a model that batched what the
+# instructions ask lost the sixth call to this limit, and a round to it.
+MAX_EXECUTED_TOOL_CALLS_PER_TURN = 8
 
 # A workout plan the coach proposes (propose_workout_plan): Formiq's coaching
 # bounds, tighter than the plan columns' own limits.

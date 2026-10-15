@@ -66,20 +66,20 @@ CONTEXT_MAX_CONVERSATION_CHARS = 8_000
 MAX_TOOL_RESULT_CHARS = 50_000
 # The most the model is sent in one request, in characters: instructions, the
 # conversational context, the message, the model's turns and the tool results.
-# It holds one round of the largest results (the tools run 5 calls of a turn,
-# app.tools.limits), which is never compacted: 5 x MAX_TOOL_RESULT_CHARS, with
+# It holds one round of the largest results (the tools run 8 calls of a turn,
+# app.tools.limits), which is never compacted: 8 x MAX_TOOL_RESULT_CHARS, with
 # 100,000 more for everything else. Older rounds are compacted to stay within
-# it. About 90,000 tokens: well within the model's window, but each request
+# it. About 125,000 tokens: well within the model's window, but each request
 # stays bounded however long the turn runs. A test checks it against the tools'
 # limits, which the agent does not import.
-CONTEXT_MAX_CHARS = 350_000
+CONTEXT_MAX_CHARS = 500_000
 # The latest rounds of tool results, which are never compacted: the data the
 # model asked for last, which its next step most likely needs.
 CONTEXT_KEEP_RECENT_ROUNDS = 1
 # Model requests of one turn whose context may be compacted. One per request at
-# most, so this is the coach's own request limit (MAX_TOOL_ITERATIONS + 1); a
-# turn needing more ends without the model.
-MAX_CONTEXT_COMPACTIONS = 6
+# most, so this is the coach's own request limit (MAX_TOOL_ITERATIONS +
+# PROPOSAL_RETRY_ROUNDS + 1); a turn needing more ends without the model.
+MAX_CONTEXT_COMPACTIONS = 7
 
 # What a compacted tool result says instead of its data. It still answers its
 # call, under the call's id: it is a function response, not a user message.

@@ -10,7 +10,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from app.schemas.coach import ProposalCoverage, SessionFocus
+from app.schemas.coach import ProposalCoverage, ProposalRevision, RevisionKind, SessionFocus
 from app.schemas.exercise import Difficulty, MovementPattern, MuscleRole, WorkoutSection
 from app.schemas.workout_plan import (
     MAX_INTEGER,
@@ -57,6 +57,17 @@ class GetUserProfileInput(UserScopedInput):
 
 class GetWorkoutPlanInput(UserScopedInput):
     plan_id: ResourceId
+    # another of the user's plans, to say what differs between the two
+    compare_with_plan_id: ResourceId | None = None
+
+
+class ListWorkoutPlansInput(UserScopedInput):
+    # only the plans in this status; every plan when not given
+    status: WorkoutPlanStatus | None = None
+
+
+class GetPendingProposalInput(UserScopedInput):
+    pass
 
 
 class GetWorkoutSessionInput(UserScopedInput):
@@ -149,6 +160,19 @@ class ProposeWorkoutPlanInput(UserScopedInput):
     unavailable_equipment: Annotated[
         list[EquipmentName], Field(max_length=MAX_UNAVAILABLE_EQUIPMENT)
     ] = []
+    # the user's saved plan it revises, when they asked to change, rewrite or
+    # replace one, and how: approving it then cancels that plan
+    revises_plan_id: ResourceId | None = None
+    revision: RevisionKind | None = None
+
+    @model_validator(mode="after")
+    def revision_of_a_plan(self) -> Self:
+        if (self.revises_plan_id is None) != (self.revision is None):
+            raise ValueError(
+                "revises_plan_id and revision go together: give both to revise a saved plan, "
+                "or neither for a new workout"
+            )
+        return self
 
 
 class GetExerciseInput(ToolInput):
@@ -169,7 +193,10 @@ class SearchExercisesInput(ToolInput):
     available_equipment: Annotated[
         list[EquipmentName], Field(max_length=MAX_SEARCH_EQUIPMENT)
     ] | None = None
-    equipment_id: ResourceId | None = None
+    # One piece the exercise must use, by the catalog's name or a common one for
+    # it (read by app.tools.equipment, as available_equipment is). Never an id:
+    # no tool gives the model an equipment id, so none could be grounded.
+    equipment: EquipmentName | None = None
     movement_pattern: MovementPattern | None = None
     difficulty: Difficulty | None = None
 
@@ -178,7 +205,7 @@ class SearchExercisesInput(ToolInput):
         # without a filter the search would return the whole catalog
         if self.model_dump(exclude_none=True) == {}:
             raise ValueError(
-                "at least one of use, muscle, available_equipment, equipment_id, "
+                "at least one of use, muscle, available_equipment, equipment, "
                 "movement_pattern, difficulty is required"
             )
         return self
@@ -230,6 +257,36 @@ class PlanExerciseOutput(BaseModel):
     notes: str | None
 
 
+class ExerciseChangeOutput(BaseModel):
+    """An exercise one workout has and the other has not, or has with another
+    prescription, as "3 sets of 10 reps, 60 s rest"."""
+
+    section: PlanSection
+    exercise_name: str
+    before: str | None
+    after: str | None
+
+
+class WorkoutChangesOutput(BaseModel):
+    """What differs between two workouts, worked out by Formiq from what each
+    prescribes, by section and exercise: nothing else differs."""
+
+    # the saved plan the workout is compared with
+    compared_with_plan_id: int
+    compared_with_plan_name: str
+    # the exercises only the workout has, those only the plan has, and those
+    # both have with another prescription; in section order
+    added: list[ExerciseChangeOutput]
+    removed: list[ExerciseChangeOutput]
+    changed: list[ExerciseChangeOutput]
+    # the exercises both have, prescribed alike, by name
+    unchanged: list[str]
+    name_changed: bool
+    scheduled_date_changed: bool
+    # true when the two prescribe the same workout
+    identical: bool
+
+
 class WorkoutPlanOutput(BaseModel):
     plan_id: int
     name: str
@@ -238,6 +295,41 @@ class WorkoutPlanOutput(BaseModel):
     # ordered by exercise_order
     exercises: list[PlanExerciseOutput]
     # true when exercises beyond the tool's limit were left out
+    truncated: bool
+    # with compare_with_plan_id: how this plan differs from that one
+    changes: WorkoutChangesOutput | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+class PlanSummaryOutput(BaseModel):
+    """One of the user's saved plans, in short."""
+
+    plan_id: int
+    name: str
+    status: WorkoutPlanStatus
+    scheduled_date: date | None
+    # scheduled_date - today, in days: 0 today, 1 tomorrow, -1 yesterday
+    days_from_today: int | None
+    # the first main exercises' names (at most 8), in order, and how many
+    # exercises it has in all
+    main_exercises: list[str]
+    exercise_count: int
+    # whether it is the plan get_current_workout_plan returns
+    is_current: bool
+
+
+class WorkoutPlanListOutput(BaseModel):
+    """The user's saved plans: PLANNED first, the next one first, then the
+    others, the latest scheduled first."""
+
+    today: date
+    plans: list[PlanSummaryOutput]
+    # how many are returned, and how many match in all
+    count: int
+    total: int
+    # how many of them are PLANNED, whether or not they were all returned
+    planned: int
     truncated: bool
 
 
@@ -266,6 +358,9 @@ class SessionExerciseOutput(BaseModel):
     exercise_order: int
     # ordered by set_number
     sets: list[WorkoutSetOutput]
+    # how many of its logged sets are marked completed: an exercise with none
+    # was not done, whatever the plan says
+    completed_sets: int
 
 
 class WorkoutSessionOutput(BaseModel):
@@ -322,6 +417,39 @@ class ProposedWorkoutPlanOutput(BaseModel):
     # whether the main workout fulfils its focus, and what is missing when not
     coverage: ProposalCoverage
     expires_at: datetime
+    # the saved plan its approval would replace; left out for a new workout
+    revision: ProposalRevision | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class PendingProposalOutput(BaseModel):
+    """The workout Formiq proposed to the user earlier, still awaiting their
+    approval, from Formiq's records: not saved, and unchanged since it was
+    shown. Only the user's approval in Formiq saves it."""
+
+    status: Literal["awaiting_user_approval"] = "awaiting_user_approval"
+    name: str
+    scheduled_date: date
+    days_from_today: int
+    # how long it still waits for the user's approval
+    expires_in_minutes: int
+    # ordered by exercise_order: the warm-up, the main workout, the cool-down
+    exercises: list[ProposedExerciseOutput]
+    warm_up_minutes: int
+    main_minutes: int
+    cool_down_minutes: int
+    estimated_minutes: int
+    # as when it was proposed; null for a proposal made before Formiq recorded it
+    coverage: ProposalCoverage | None
+    # the saved plan its approval replaces; null for a new workout
+    revision: ProposalRevision | None
+    # whether that plan is still as it was when proposed: if not, approving
+    # the proposal fails, and a new one is needed
+    replaced_plan_unchanged: bool | None
+    # how it differs from the plan it revises, or else from the current plan
+    # (null when there is neither)
+    changes: WorkoutChangesOutput | None
+    # other proposals of the user's still awaiting approval, made before it
+    earlier_proposals_awaiting_approval: int
 
 
 class MuscleOutput(BaseModel):
@@ -375,3 +503,8 @@ class SearchExercisesOutput(BaseModel):
     # how many are returned, and how many match in all
     count: int
     total_matches: int
+    # for a workout (a search by use): the equipment the user said they lack,
+    # which no exercise returned needs; left out when they said nothing
+    excluded_equipment: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )

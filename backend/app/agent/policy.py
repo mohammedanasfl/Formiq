@@ -88,11 +88,18 @@ _USER_DATA_TOOLS = frozenset(
     {
         "get_user_profile",
         "get_workout_plan",
+        "list_workout_plans",
         "get_workout_session",
         "get_current_workout_plan",
         "get_latest_workout_session",
+        "get_pending_proposal",
     }
 )
+
+# The reads a proposal rests on, in the order Formiq loads them: the profile it
+# is built for, the current plan it must not duplicate, and the last workout it
+# must not train again. The same three a recommendation for today rests on.
+PROPOSAL_CONTEXT = ("get_user_profile", "get_current_workout_plan", "get_latest_workout_session")
 
 POLICY: dict[Intent, IntentPolicy] = {
     Intent.GENERAL_FITNESS: IntentPolicy(
@@ -109,8 +116,16 @@ POLICY: dict[Intent, IntentPolicy] = {
         frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
     ),
     Intent.WORKOUT_PLAN: IntentPolicy(
-        "One of the user's workout plans: what was prescribed.",
-        frozenset({"get_workout_plan", "get_current_workout_plan"}),
+        "The user's workout plans: what one prescribes, which plans they have, or the "
+        "workout you proposed that awaits their approval.",
+        frozenset(
+            {
+                "get_workout_plan",
+                "get_current_workout_plan",
+                "list_workout_plans",
+                "get_pending_proposal",
+            }
+        ),
         frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
     ),
     Intent.WORKOUT_HISTORY: IntentPolicy(
@@ -137,9 +152,7 @@ POLICY: dict[Intent, IntentPolicy] = {
         "last workout checked in this turn, together.",
         _USER_DATA_TOOLS,
         frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
-        checked_tools=frozenset(
-            {"get_user_profile", "get_current_workout_plan", "get_latest_workout_session"}
-        ),
+        checked_tools=frozenset(PROPOSAL_CONTEXT),
     ),
     Intent.SAFETY_SENSITIVE: IntentPolicy(
         "Pain or injury, medical conditions, diagnosis or treatment, potentially "
@@ -162,6 +175,59 @@ POLICY: dict[Intent, IntentPolicy] = {
         frozenset({Decision.CANNOT_ANSWER}),
     ),
 }
+
+# Words that make a request about fitness, whatever else it says: an OUT_OF_SCOPE
+# decision for it is rejected (check_scope), so a workout, equipment or body
+# request is never met with Formiq's redirect. Only words that are about
+# fitness in a coach's conversation, never ordinary words with other senses
+# ("training", "running", "sets", "weights", "plan", "back", "core").
+_FITNESS_WORDS = re.compile(
+    r"\b(?:work[- ]?outs?|exercis(?:e|es|ing)|gym|fitness|equipment|dumb[- ]?bells?|"
+    r"barbells?|kettle[- ]?bells?|resistance bands?|push[- ]?ups?|pull[- ]?ups?|chin[- ]?ups?|"
+    r"sit[- ]?ups?|squats?|lunges?|planks?|deadlifts?|burpees?|warm[- ]?ups?|cool[- ]?downs?|"
+    r"cardio|stretch(?:es|ing)?|muscles?|abs|glutes|biceps|triceps|hamstrings?|quads|"
+    r"neck|mobility|reps|strength training|weight[- ]?lifting|lose weight|weight loss|"
+    r"protein|calories|diet|nutrition|macros|jogging|soreness)\b",
+    re.IGNORECASE,
+)
+# A short follow-up asking to change something just discussed: in a coach's
+# conversation, about the workout ("make it shorter", "an easier alternative").
+_FOLLOW_UP_WORDS = re.compile(
+    r"\b(?:shorter|longer|easier|harder|lighter|heavier|simpler|alternatives?|swap|"
+    r"replace|rewrite|revise|adjust|intensity)\b",
+    re.IGNORECASE,
+)
+_FOLLOW_UP_MAX_WORDS = 12
+
+
+def fitness_terms(message: str, has_conversation: bool) -> list[str]:
+    """The words that make the message about fitness: fitness words, or, in a
+    conversation, a short follow-up asking to change what was discussed."""
+    terms = list(dict.fromkeys(match.casefold() for match in _FITNESS_WORDS.findall(message)))
+    if has_conversation and len(message.split()) <= _FOLLOW_UP_MAX_WORDS:
+        terms += [
+            match.casefold()
+            for match in _FOLLOW_UP_WORDS.findall(message)
+            if match.casefold() not in terms
+        ]
+    return terms
+
+
+def check_scope(intent: Intent, terms: Sequence[str]) -> str | None:
+    """Why an OUT_OF_SCOPE decision cannot end the turn: the request is about
+    fitness (terms, from fitness_terms()). None when it can, or the intent is
+    another. Formiq's redirect is for requests outside fitness only; one it
+    cannot do, or that is unsafe, is answered as what it is."""
+    if intent is not Intent.OUT_OF_SCOPE or not terms:
+        return None
+    named = ", ".join(repr(term) for term in terms[:3])
+    return (
+        f"this request is about fitness (it says {named}), so it is not OUT_OF_SCOPE: use "
+        "the intent that fits it. If Formiq cannot do what it asks, say so in your own reply, "
+        "with what it can do instead, as CANNOT_ANSWER or ASK_CLARIFICATION; if it is risky, "
+        "SAFETY_SENSITIVE"
+    )
+
 
 # Formiq's reply to an OUT_OF_SCOPE request, whatever the model wrote: no
 # general answer reaches the user, only the coach's scope.
@@ -330,24 +396,130 @@ def has_data(result: ToolResult) -> bool:
     return data_status(result.result) in (DataStatus.AVAILABLE, DataStatus.INCOMPLETE)
 
 
+class ContextState(StrEnum):
+    """Where one of the reads a proposal rests on stands in this turn. A read
+    that failed says nothing about the data, so it is never the same as a read
+    that found none."""
+
+    # no result for it in this turn
+    NOT_LOADED = "not_loaded"
+    # read, and the data exists
+    LOADED = "loaded"
+    # read, and there is none: a user with no plan or no workout yet
+    LOADED_EMPTY = "loaded_empty"
+    # every attempt failed (or was compacted away from the evidence): not a check
+    FAILED = "failed"
+
+
+def context_states(results: Iterable[ToolResult]) -> dict[str, ContextState]:
+    """The state of each of PROPOSAL_CONTEXT, from the turn's tool results: any
+    successful read of it counts, whatever failed before or after."""
+    found: dict[str, set[DataStatus]] = {name: set() for name in PROPOSAL_CONTEXT}
+    for result in results:
+        if result.call.name in found:
+            found[result.call.name].add(data_status(result.result))
+    states = {}
+    for name, statuses in found.items():
+        if statuses & {DataStatus.AVAILABLE, DataStatus.INCOMPLETE}:
+            states[name] = ContextState.LOADED
+        elif DataStatus.MISSING in statuses:
+            states[name] = ContextState.LOADED_EMPTY
+        elif statuses:
+            states[name] = ContextState.FAILED
+        else:
+            states[name] = ContextState.NOT_LOADED
+    return states
+
+
+@dataclass(frozen=True)
+class ContextGap:
+    """What stands between the turn and a proposal: the reads not made, the
+    reads that failed, and whether the profile is missing for good."""
+
+    not_loaded: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
+    # the profile was read and there is none: the plan has nothing to be built for
+    no_profile: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return not (self.not_loaded or self.failed or self.no_profile)
+
+    @property
+    def message(self) -> str | None:
+        """What the model is told, or None when nothing stands in the way."""
+        if unchecked := sorted((*self.not_loaded, *self.failed)):
+            failed = (
+                f" ({', '.join(sorted(self.failed))} failed: a read that failed is not a check)"
+                if self.failed
+                else ""
+            )
+            return (
+                f"check {', '.join(unchecked)} before proposing a plan{failed}: a suitable "
+                "planned workout is recommended, not duplicated"
+            )
+        if self.no_profile:
+            return (
+                "the user has no fitness profile to build a plan for: ask about their "
+                "experience and equipment, or suggest they set up their profile"
+            )
+        return None
+
+
+def proposal_context_gap(results: Iterable[ToolResult]) -> ContextGap:
+    """What a proposal still needs, given the turn's tool results: like a
+    recommendation for today, it rests on the profile, current plan and last
+    workout checked in this turn, so a suitable plan is seen before another is
+    made (a user with no plan or no workout yet is checked all the same); and
+    it needs the profile's data, which the plan is built for."""
+    states = context_states(results)
+    return ContextGap(
+        not_loaded=tuple(n for n in PROPOSAL_CONTEXT if states[n] is ContextState.NOT_LOADED),
+        failed=tuple(n for n in PROPOSAL_CONTEXT if states[n] is ContextState.FAILED),
+        no_profile=states["get_user_profile"] is ContextState.LOADED_EMPTY,
+    )
+
+
 def check_proposal(results: Sequence[ToolResult]) -> str | None:
     """Why a workout plan cannot be proposed yet, given the tool results of the
-    turn so far; None when it can. Like a recommendation for today, a proposal
-    rests on the profile, current plan and last workout checked in this turn, so
-    a suitable plan is seen before another is made; and it needs the profile's
-    data, which the plan is built for."""
-    checked = {result.call.name for result in results if data_status(result.result) in _CHECKED}
-    if unchecked := POLICY[Intent.DAILY_WORKOUT].checked_tools - checked:
-        return (
-            f"check {', '.join(sorted(unchecked))} before proposing a plan: a suitable "
-            "planned workout is recommended, not duplicated"
-        )
-    if not any(result.call.name == "get_user_profile" and has_data(result) for result in results):
-        return (
-            "the user has no fitness profile to build a plan for: ask about their "
-            "experience and equipment, or suggest they set up their profile"
-        )
-    return None
+    turn so far; None when it can (proposal_context_gap())."""
+    return proposal_context_gap(results).message
+
+
+# The decisions that answer the user, and so may show them a proposal: the one the
+# turn made, or the one awaiting their approval that the turn read again.
+ANSWERS = frozenset({Decision.ANSWER, Decision.RETRIEVE_THEN_ANSWER})
+
+# What a user says when they want a workout changed, not explained: the verbs
+# for it, the words for a different one, and "make it ...". A question about
+# the proposal ("why these?", "what changed?") has none of them.
+_CHANGE_REQUEST = re.compile(
+    r"\b(?:swap|replace|rewrite|revise|adjust|modify|redo|rework|alter|tweak|update|shorten|"
+    r"lengthen|shorter|longer|easier|harder|lighter|heavier|simpler|different|another|"
+    r"alternatives?|instead|remove|drop|add|fewer|more|less|without|cancel|reschedule|move)\b"
+    r"|\bchange\s+(?:it|this|that|the|my|these|those|them)\b"
+    r"|\bmake\s+(?:it|this|that|them)\b",
+    re.IGNORECASE,
+)
+
+
+def asks_for_change(message: str) -> bool:
+    """Whether the user's message asks for a workout to be changed or replaced,
+    in words (the user's own, which the model cannot alter): then no reply may
+    say it was, unless the turn proposed it."""
+    return _CHANGE_REQUEST.search(message) is not None
+
+
+def pending_proposal_shown(results: Iterable[ToolResult]) -> bool:
+    """Whether the turn read the proposal awaiting the user's approval in a form
+    Formiq shows them again with the reply: one with its coverage recorded
+    (an older proposal is not shown again, so its reply cannot point to it)."""
+    return any(
+        result.call.name == "get_pending_proposal"
+        and isinstance(output := result.result.get("output"), dict)
+        and output.get("coverage") is not None
+        for result in results
+    )
 
 
 def tools_used(results: Iterable[ToolResult]) -> tuple[str, ...]:
@@ -410,11 +582,16 @@ _NUMBER = re.compile(r"\d+")
 
 def known_ids(user_message: str, results: Iterable[ToolResult]) -> set[int]:
     """The ids the turn may use: numbers the user wrote, and ids that tools
-    returned in this turn."""
+    returned in this turn, in their data or in the catalog exercises Formiq
+    suggested to correct a refused call."""
     ids = {int(number) for number in _NUMBER.findall(user_message)}
     for result in results:
         if isinstance(result.result.get("output"), dict):
             ids.update(_ids_in(result.result["output"]))
+        elif isinstance(error := result.result.get("error"), dict) and isinstance(
+            error.get("suggestions"), list
+        ):
+            ids.update(_ids_in(error["suggestions"]))
     return ids
 
 

@@ -11,8 +11,14 @@ turn; a rejected one goes back to the model as the respond call's result, so
 the model can retrieve what it needs or decide differently.
 
 After MAX_TOOL_ITERATIONS rounds the model may only call respond, and if that
-decision is rejected too the turn ends with CANNOT_ANSWER. So a turn makes at
-most MAX_TOOL_ITERATIONS + 1 model requests.
+decision is rejected too the turn ends with CANNOT_ANSWER. One exception: when
+the turn's last proposal was refused for a reason a corrected proposal fixes
+(and none was accepted), the model gets PROPOSAL_RETRY_ROUNDS more rounds in
+which it may only propose again or decide. So a turn makes at most
+MAX_TOOL_ITERATIONS + PROPOSAL_RETRY_ROUNDS + 1 model requests. A turn that
+tried to propose and ends without a decision says that nothing was proposed.
+A turn accepts one proposal; a call repeating one the model already has the
+result of is answered with that, not run again.
 
 Safety comes first. Both nodes run the deterministic safety backstop
 (app.agent.safety) on the user's message. When it flags the request, the model
@@ -43,8 +49,9 @@ context's user only. Nothing is kept after the turn.
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Literal, Protocol
 
 from langgraph.graph import END, START, StateGraph
@@ -60,19 +67,28 @@ from app.agent.context import (
     render_conversation,
 )
 from app.agent.policy import (
+    ANSWERS,
     OUT_OF_SCOPE_REPLY,
     POLICY,
+    PROPOSAL_CONTEXT,
     RESPOND,
     SAFETY_POLICY,
     CoachDecision,
+    ContextGap,
+    ContextState,
     Decision,
     Intent,
     Respond,
     SafetyPolicy,
+    asks_for_change,
     check_decision,
-    check_proposal,
     check_safety,
+    check_scope,
+    context_states,
+    fitness_terms,
     known_ids,
+    pending_proposal_shown,
+    proposal_context_gap,
     tools_used,
     ungrounded_ids,
 )
@@ -96,8 +112,16 @@ from app.observability import Failure, Observation, RunTrace, no_trace, tool_fai
 
 logger = logging.getLogger(__name__)
 
-# Rounds of tool calls in one turn. Most questions need one or two.
+# Rounds of tool calls in one turn. Most questions need one or two; a new
+# workout needs two (the reads and searches, then the proposal), and one or two
+# more when Formiq refuses the first proposal.
 MAX_TOOL_ITERATIONS = 5
+# Rounds beyond them, only to correct a proposal Formiq refused in the last of
+# them: the model may then only propose again, or decide. Without it, a refusal
+# in the last round (or after a last search for what it lacked) left no way to
+# propose the corrected workout, and the turn ended with nothing (live QA,
+# 2026-10-15).
+PROPOSAL_RETRY_ROUNDS = 1
 # Tool calls the model may request in one of its turns. The tools run only the
 # first few of them (MAX_EXECUTED_TOOL_CALLS_PER_TURN) and answer the rest with
 # an error; a turn requesting more than this is rejected, so neither the state
@@ -106,12 +130,20 @@ MAX_REQUESTED_TOOL_CALLS_PER_TURN = 20
 # A backstop for the loop above: LangGraph's limit on graph steps, one more than
 # the longest legal turn takes (a coach and a tools step per round, the last
 # round being the forced decision). LangGraph's own default allows about 10,000.
-MAX_GRAPH_STEPS = 2 * (MAX_TOOL_ITERATIONS + 1) + 1
+MAX_GRAPH_STEPS = 2 * (MAX_TOOL_ITERATIONS + PROPOSAL_RETRY_ROUNDS + 1) + 1
 
 # the reply when the model reaches no acceptable decision within the limit
 CANNOT_ANSWER_REPLY = (
     "I could not get the information I need to answer that reliably. Please try again, "
     "or ask in a different way."
+)
+
+# the reply when a turn that tried to propose a workout ends without a decision:
+# whatever the model wrote, nothing was proposed
+PROPOSAL_NOT_MADE_REPLY = (
+    "I couldn't put together a workout that passes Formiq's checks this time, so nothing was "
+    "proposed. Please try again, or tell me more about what you need, such as how much time "
+    "you have, your equipment or the part of the body to train."
 )
 
 # error codes of the results that the graph itself gives the model
@@ -120,6 +152,45 @@ DECISION_REJECTED = "DECISION_REJECTED"
 WRITE_NOT_AUTHORIZED = "WRITE_NOT_AUTHORIZED"
 PROPOSAL_REFUSED = "PROPOSAL_REFUSED"
 UNKNOWN_TOOL = "UNKNOWN_TOOL"
+DUPLICATE_CALL = "DUPLICATE_CALL"
+# A proposal made before the reads it rests on. Formiq has them now: it loaded
+# the ones the model had not called for, and handed them over with this refusal.
+CONTEXT_MISSING = "CONTEXT_MISSING"
+# the reads whose results are workout sessions: what the user did
+SESSION_READS = frozenset({"get_workout_session", "get_latest_workout_session"})
+# A refused proposal that proposing again can correct: Formiq named what is
+# wrong (the tools' INVALID_INPUT, with suggestions), an id it was not given, the
+# reads it rests on (which Formiq has loaded by then), or the call was beyond the
+# per-turn limit. A profile that does not exist, a read that failed, or another
+# user's plan is not one of them.
+CORRECTABLE_PROPOSAL_ERRORS = frozenset(
+    {"INVALID_INPUT", ID_NOT_GROUNDED, CONTEXT_MISSING, "TOOL_LIMIT_REACHED"}
+)
+# What the graph itself answers a call with, before the call reaches the tools:
+# the call did not run, so no result came back that running it again would
+# return. Such a refusal says what the evidence lacked then, and is not a
+# result "had" (repeats_seen_call).
+GRAPH_REFUSALS = frozenset(
+    {
+        PROPOSAL_REFUSED,
+        CONTEXT_MISSING,
+        ID_NOT_GROUNDED,
+        DUPLICATE_CALL,
+        DECISION_REJECTED,
+        WRITE_NOT_AUTHORIZED,
+    }
+)
+
+
+class Round(StrEnum):
+    """What the model may call in a round."""
+
+    # any tool, or respond
+    OPEN = "open"
+    # only propose_workout_plan, to correct a refused proposal, or respond
+    PROPOSAL_RETRY = "proposal_retry"
+    # only respond
+    DECISION = "decision"
 
 
 def _intent_guide() -> str:
@@ -142,7 +213,11 @@ COACH_INSTRUCTIONS = (
     "without tools.\n"
     "- Never invent or guess the user's profile, plans or workout history. Do not say "
     "that the user did a workout, an exercise or a set unless a workout session shows "
-    "it: a plan is a prescription, not proof that it was done.\n"
+    "it: a plan is a prescription, not proof that it was done, and an exercise of a "
+    "session with completed_sets 0 was not done.\n"
+    "- Their saved plans: list_workout_plans lists them (an empty list when there are "
+    "none). To say how two plans differ, call get_workout_plan with compare_with_plan_id "
+    "and describe only the differences its changes lists.\n"
     "- The user's current workout plan and last workout are read without an id "
     "(get_current_workout_plan, get_latest_workout_session). Any other plan or "
     "session is read by its id: if you need one and do not know its id, ask the user "
@@ -165,7 +240,7 @@ COACH_INSTRUCTIONS = (
     "together, then recommend one thing, briefly: a workout, a shorter or lighter "
     "version of it, or rest.\n"
     "- A plan for today (days_from_today 0) that suits the user: recommend it, never a "
-    "new one. Name each exercise with its sets and reps, and its weight only when the "
+    "new one, unless they ask to change it. Name each exercise with its sets and reps, and its weight only when the "
     "plan prescribes one, and its warm-up and cool-down when it has them. Add one "
     "sentence on why it fits today, from their goal or last workout.\n"
     "- No plan for today: say when the next one is. After a workout yesterday, suggest "
@@ -190,9 +265,18 @@ COACH_INSTRUCTIONS = (
     "propose_workout_plan, from exercises search_exercises returned. Fit it to the "
     "user's goal, experience, training location, and what they said about time, "
     "equipment and energy; give max_minutes, and available_equipment ([] for none) or "
-    "unavailable_equipment, when they said. "
+    "unavailable_equipment, when they said. Formiq also holds what the user said about "
+    "their equipment in this conversation: it leaves out what they lack, and refuses "
+    "available_equipment naming what they did not say they have. "
     "Do not train again the muscles their last workout trained yesterday. Prescribe "
     "sets, reps and rest, never weights.\n"
+    "- You have only a few rounds of tool calls, so batch them: in the first round call "
+    "get_user_profile, get_current_workout_plan and get_latest_workout_session with every "
+    "search the workout needs (MAIN_WORKOUT, WARM_UP and COOL_DOWN), all together, and "
+    "propose in the next round. When Formiq refuses a proposal, it names everything that "
+    "is wrong and suggests catalog exercises that fix it (suggestions): correct it all in "
+    "one new proposal, with those ids if they fit, instead of searching again. Formiq "
+    "accepts one proposal a turn.\n"
     "- A proposal is a complete session for its focus: FULL_BODY unless the user asks "
     "for one part of the body. A full-body workout trains the lower body, an upper-body "
     "push and an upper-body pull, with 4 to 6 main exercises of 2 or 3 sets for a "
@@ -202,8 +286,9 @@ COACH_INSTRUCTIONS = (
     "missing: search for it and propose again.\n"
     "- Every proposal has a warm-up, the main exercises and a cool-down, all from the "
     "catalog. Search for them together, in one turn: search_exercises with use "
-    "MAIN_WORKOUT, WARM_UP and COOL_DOWN, each with available_equipment for what the "
-    "user has ([] for no equipment: bodyweight exercises need none), and difficulty "
+    "MAIN_WORKOUT, WARM_UP and COOL_DOWN, each with available_equipment when the user "
+    "said what they have ([] for no equipment: bodyweight exercises need none), never "
+    "guessed from their training location, and difficulty "
     "BEGINNER for a beginner. If the main results miss a region the focus needs, also "
     "search use MAIN_WORKOUT with a muscle of it, such as Upper Back or Lats for a pull.\n"
     "- Choose the main exercises first. Then each warm-up and cool-down activity must be "
@@ -217,6 +302,25 @@ COACH_INSTRUCTIONS = (
     "- Leave out any activity that conflicts with what the user said they cannot do or "
     "use (such as kneeling, jumping or equipment they lack) and choose another, such as "
     "an easy walk. Present stretches as optional, never as required.\n"
+    "- Changing a saved plan: when the user asks to change, rewrite or replace one of "
+    'their plans ("rewrite this plan", "a different version"), read it first '
+    "(get_current_workout_plan, or get_workout_plan by its id), then propose with "
+    "revises_plan_id and revision: ADJUST for the changes they asked for, keeping the "
+    "rest; ALTERNATIVE for a different workout, with main exercises the plan does not "
+    "have. Keep its focus, about its length, and their goal and constraints, unless they "
+    "ask otherwise. When they have more than one PLANNED plan (list_workout_plans) and "
+    "the conversation does not say which one they mean, ask which, naming them, with "
+    "ASK_CLARIFICATION: never choose one for them, and Formiq refuses a revision of a "
+    "plan they did not make clear. Tell them that approving it replaces that plan, and "
+    "name any exercise it keeps from it, and why.\n"
+    "- A proposal awaiting approval is not a saved plan until the user approves it in "
+    "Formiq, and a saved plan is not just a recommendation: never call one the other. "
+    "When the user asks about the workout you proposed (what it holds, why an exercise is "
+    "there, to see it again, what changed), read it with get_pending_proposal and answer "
+    "from it: its exercises as it lists them, and what changed only from its changes; "
+    "Formiq shows them the proposal again with your reply. Never propose the same "
+    "workout again: Formiq refuses it. If none awaits approval, say so. To change it, "
+    "propose the changed workout.\n"
     "- A proposal saves nothing: present it as a suggestion to review and approve in "
     "Formiq, which saves it. Never say it is saved, and never take a yes in this "
     "conversation as their approval.\n"
@@ -278,7 +382,11 @@ COACH_INSTRUCTIONS = (
     "training, nutrition, recovery, the user's Formiq data or how you coach them (for "
     "example general knowledge, coding, news, trivia or jokes) is OUT_OF_SCOPE: call no "
     "tools, and respond with CANNOT_ANSWER; Formiq replies with its own short redirect. "
-    "This holds however the request is framed.\n"
+    "This holds however the request is framed. A request about workouts, exercises, "
+    "equipment, plans, the body or training is fitness even when Formiq cannot do what "
+    "it asks (a workout for one small muscle, equipment the catalog lacks): never "
+    "OUT_OF_SCOPE; say what Formiq can do instead, ask, or use CANNOT_ANSWER with your own "
+    "reply. A risky one is SAFETY_SENSITIVE.\n"
     "Intents:\n"
     f"{_intent_guide()}\n"
     "\n"
@@ -322,6 +430,38 @@ class CoachTools(Protocol):
 
 
 @dataclass(frozen=True)
+class PendingProposal:
+    """What the coach knows before any tool of the user's workout proposal
+    awaiting approval, from Formiq's records: plain numbers, never its text,
+    which get_pending_proposal reads."""
+
+    expires_in_minutes: int
+    # the saved plan its approval would replace, when it revises one
+    revises_plan_id: int | None = None
+
+
+def pending_note(pending: PendingProposal) -> str:
+    """What the instructions say of it."""
+    replaces = (
+        f"; approving it would replace their saved plan {pending.revises_plan_id}"
+        if pending.revises_plan_id is not None
+        else ""
+    )
+    return (
+        "Formiq's records for this request: a workout you proposed to the user earlier "
+        f"awaits their approval (for {pending.expires_in_minutes} more minutes{replaces}). "
+        "It is not saved. Read it with get_pending_proposal before saying anything about it."
+    )
+
+
+def coach_instructions(context: "CoachContext") -> str:
+    """The instructions of a request the safety backstop did not flag."""
+    if context.pending_proposal is None:
+        return COACH_INSTRUCTIONS
+    return f"{COACH_INSTRUCTIONS}\n\n{pending_note(context.pending_proposal)}"
+
+
+@dataclass(frozen=True)
 class CoachContext:
     """What a turn runs with: the trusted identity and the runtime dependencies.
 
@@ -345,6 +485,10 @@ class CoachContext:
     # request began: a reply may then point them to it. Never taken from the
     # model or the conversation, and it approves nothing.
     proposal_awaiting_approval: bool = False
+    # When one does, what the instructions say of it (PendingProposal): plain
+    # numbers from the same records, so the model reads it before answering
+    # about it. It approves nothing either.
+    pending_proposal: PendingProposal | None = None
 
 
 def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, Any]:
@@ -353,7 +497,7 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
     iteration = state["iteration_count"]
     assessment = assess_safety(state["user_message"])
     safety = SAFETY_POLICY.get(assessment.category)
-    within_limit = iteration < context.max_tool_iterations
+    kind = round_of(iteration, tool_results(state["messages"]), context)
     if not state["messages"]:
         # the turn's first request: the safety check came before anything else
         with trace.child(
@@ -375,16 +519,21 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
         declarations = [safety.respond]
         instructions = safety_instructions(safety)
     else:
-        declarations = [*context.tools.declarations, RESPOND]
-        instructions = COACH_INSTRUCTIONS
-        if not within_limit:
+        declarations = offered(kind, context)
+        instructions = coach_instructions(context)
+        if kind is not Round.OPEN:
             logger.warning(
-                "The coach reached %d rounds of tool calls; asking for its decision",
-                context.max_tool_iterations,
+                "The coach reached %d rounds of tool calls; asking for its %s",
+                iteration,
+                "corrected proposal" if kind is Round.PROPOSAL_RETRY else "decision",
             )
 
     with trace.child(
-        "model_turn", "chain", iteration=iteration, decision_only=not within_limit
+        "model_turn",
+        "chain",
+        iteration=iteration,
+        decision_only=kind is Round.DECISION,
+        proposal_retry=kind is Round.PROPOSAL_RETRY,
     ) as step:
         with step.child("context_fit") as fitting:
             fit = fit_messages(state, state["messages"], instructions, context)
@@ -442,7 +591,7 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
                 offered_tools=[tool.name for tool in declarations],
             ) as generation:
                 turn = model_turn(
-                    fit.contents, context, declarations, instructions, within_limit, safety
+                    fit.contents, context, declarations, instructions, safety, kind
                 )
                 generation.usage(turn.usage)
                 generation.content(
@@ -491,25 +640,27 @@ def model_turn(
     context: CoachContext,
     declarations: list[ToolDeclaration],
     instructions: str,
-    within_limit: bool,
     safety: SafetyPolicy | None,
+    kind: Round = Round.OPEN,
 ) -> ModelTurn:
     """The model's next turn; AIProviderError when it fails or breaks the turn's
-    rules."""
+    rules. Every turn is tool calls, of the tools the round offers: past the
+    limit, a corrected proposal or the decision, then only the decision. Within
+    it, a call of another name is answered by the tools node, as a refusal."""
+    names = [tool.name for tool in declarations]
     turn = context.provider.generate_turn(
         contents,
         instructions=instructions,
         tools=declarations,
-        # every turn is tool calls; past the limit, only the decision
-        required_tool_names=(
-            [tool.name for tool in declarations] if within_limit else [RESPOND.name]
-        ),
+        required_tool_names=names,
     )
     if not turn.tool_calls:
         # the provider should have refused; a turn must end with a decision
         raise AIModelOutputError("the model answered without calling respond")
-    if safety is None and not within_limit and any(
-        call.name != RESPOND.name for call in turn.tool_calls
+    if (
+        safety is None
+        and kind is not Round.OPEN
+        and any(call.name not in names for call in turn.tool_calls)
     ):
         # the provider should have refused; the loop must end regardless
         raise AIModelOutputError("the model called a tool after the tool limit")
@@ -533,7 +684,7 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
         return end_safely(
             turn.tool_calls if turn else None, assessment, safety, tool_names(context), trace
         )
-    earlier = [message for message in state["messages"] if isinstance(message, ToolResult)]
+    earlier = tool_results(state["messages"])
     if turn is None:
         # the coach sent no request: its context was over the budget
         return finish(
@@ -541,22 +692,27 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
             CoachDecision(Intent.AMBIGUOUS, Decision.CANNOT_ANSWER, tools_used(earlier)),
         )
     calls = turn.tool_calls
+    kind = round_of(iteration, earlier, context)
+    seen = seen_results(state, context)
 
     respond = None
     if len(calls) == 1 and calls[0].name == RESPOND.name:
-        seen = seen_results(state, context)
         respond, rejection = check_respond(
             calls[0], seen, assessment, COACH_INSTRUCTIONS, tool_names(context), trace,
             iteration=iteration, compacted_excluded=len(earlier) - len(seen),
             proposed=proposed(earlier), awaiting_approval=context.proposal_awaiting_approval,
-        )
+            explaining=pending_proposal_shown(seen) and not asks_for_change(state["user_message"]),
+            fitness=fitness_terms(state["user_message"], state["conversation"].size > 0),
+        )  # fmt: skip
         if rejection is None:
             trace.update(termination="decision_accepted")
             return accept(respond, earlier, assessment)
         results = [error_result(DECISION_REJECTED, rejection)]
     else:
         with trace.child("tool_calls", iteration=iteration, requested=len(calls)) as batch:
-            results = run_calls(calls, state["user_message"], earlier, context, batch, iteration)
+            results = run_calls(
+                calls, state["user_message"], earlier, seen, context, batch, iteration
+            )
 
     update: dict[str, Any] = {
         "messages": [
@@ -565,11 +721,17 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
         ],
         "iteration_count": state["iteration_count"] + 1,
     }
-    if state["iteration_count"] >= context.max_tool_iterations:
+    if kind is Round.DECISION:
         # past the limit only a decision could end the turn, and none was accepted
         logger.warning("The coach reached no acceptable decision: %s", results[0])
         trace.update(termination="retry_limit_reached")
-        update["final_response"] = CANNOT_ANSWER_REPLY
+        # a turn that tried to propose says that nothing was, whatever the model wrote
+        attempted = any(access_of(result.call.name) is Access.PROPOSE for result in earlier)
+        update["final_response"] = (
+            PROPOSAL_NOT_MADE_REPLY
+            if attempted and not proposed(earlier)
+            else CANNOT_ANSWER_REPLY
+        )
         update["decision"] = CoachDecision(
             respond.intent if respond else Intent.AMBIGUOUS,
             Decision.CANNOT_ANSWER,
@@ -585,12 +747,12 @@ def seen_results(state: CoachState, context: CoachContext) -> list[ToolResult]:
     tool again for its data; its ids stay grounded (run_calls reads every
     result)."""
     before = state["messages"][:-1]
-    sent = fit_messages(state, before, COACH_INSTRUCTIONS, context)
-    return [
+    sent = fit_messages(state, before, coach_instructions(context), context)
+    return evidence(
         message
         for index, message in enumerate(before)
         if isinstance(message, ToolResult) and index not in sent.omitted
-    ]
+    )
 
 
 def fit_messages(
@@ -671,18 +833,31 @@ def run_calls(
     calls: Sequence[ToolCall],
     user_message: str,
     earlier: Sequence[ToolResult],
+    seen: Sequence[ToolResult],
     context: CoachContext,
     batch: Observation,
     iteration: int,
 ) -> list[dict[str, Any]]:
     """One result per call: the tools' results for the calls they may run, and an
     error for a respond call among other calls, a write, a proposal made before
-    its reads, or an id nobody gave. Each call is a tool observation under the
-    batch; the tools run all of a turn's calls at once (their per-turn limit
-    spans them), so each spans that run."""
+    its reads (CONTEXT_MISSING), a second proposal in the turn, an id nobody
+    gave, or a call the model already has the result of (seen: the results its
+    request held; a refusal before a call ran is not one).
+    Each call is a tool observation under the batch; the tools run all of a
+    turn's calls at once (their per-turn limit spans them), so each spans that
+    run.
+
+    A proposal made before the reads it rests on waits for the rest of the
+    batch, and Formiq then reads, for the user of the request, what neither an
+    earlier round nor this batch read (at most once each in a turn): the proposal
+    is refused with those results in hand for the model (context_refusal), so the
+    model never has to call for them, and may propose again."""
     results: dict[int, dict[str, Any]] = {}
     known = known_ids(user_message, earlier)
+    accepted = proposed(earlier)
+    proposing = False
     runnable = []
+    waiting = []
     for index, call in enumerate(calls):
         if call.name == RESPOND.name:
             results[index] = error_result(
@@ -695,28 +870,130 @@ def run_calls(
             # argument or text can give; an operation Formiq does not know never
             # runs either.
             results[index] = write_refusal(call)
-        elif access is Access.PROPOSE and (refusal := check_proposal(earlier)):
-            results[index] = error_result(PROPOSAL_REFUSED, refusal)
+        elif access is Access.PROPOSE and (accepted or proposing):
+            # one proposal a turn: the one the user is shown
+            results[index] = error_result(
+                PROPOSAL_REFUSED,
+                "Formiq already accepted a proposal in this turn, which is the one the user "
+                "will see: do not propose another; call respond"
+                if accepted
+                else "propose one workout at a time",
+            )
+        elif access is Access.PROPOSE and not (gap := proposal_context_gap(earlier)).ok:
+            if gap.not_loaded:
+                # its reads are still to come: from this batch, or from Formiq
+                waiting.append(index)
+                proposing = True
+            else:
+                # a read that failed, or no profile: nothing Formiq loads fixes it
+                results[index] = error_result(PROPOSAL_REFUSED, str(gap.message))
         elif ungrounded := ungrounded_ids(call, known):
             results[index] = error_result(
                 ID_NOT_GROUNDED,
                 f"{', '.join(ungrounded)}: neither the user nor a tool gave this id; ask "
                 "the user for it instead of guessing",
             )
+        elif repeats_seen_call(call, seen):
+            results[index] = error_result(
+                DUPLICATE_CALL,
+                "this exact call already returned its result earlier in this turn, which you "
+                "have: use it instead of calling it again",
+            )
         else:
             runnable.append(index)
+            proposing |= access is Access.PROPOSE
     observed = [
         batch.start(call.name, "tool", iteration=iteration, **call_metadata(call))
         for call in calls
     ]
+    unread: list[ToolCall] = []
+    unread_observed: list[Observation] = []
+    unread_results: dict[int, dict[str, Any]] = {}
     try:
         if runnable:
             # the trusted user of the request, whatever the calls' arguments say
             ran = context.tools.run([calls[index] for index in runnable], user_id=context.user_id)
             results.update(zip(runnable, ran, strict=True))
+        if waiting:
+            unread = unread_context(earlier, [calls[index] for index in runnable])
+            if unread:
+                unread_observed = [
+                    batch.start(
+                        call.name, "tool", iteration=iteration, origin="formiq", **call_metadata(call)
+                    )
+                    for call in unread
+                ]
+                ran = context.tools.run(unread, user_id=context.user_id)
+                unread_results = dict(enumerate(ran))
+            holding = [
+                *(ToolResult(calls[index], results[index]) for index in runnable),
+                *(ToolResult(call, unread_results[n]) for n, call in enumerate(unread)),
+            ]
+            for index in waiting:
+                results[index] = context_refusal(
+                    calls[index],
+                    proposal_context_gap([*earlier, *holding]),
+                    holding[len(runnable) :],
+                    known_ids(user_message, [*earlier, *holding]),
+                )
     finally:
         record_tool_results(context.trace, calls, results, runnable, observed)
+        if unread:
+            record_tool_results(
+                context.trace, unread, unread_results, list(range(len(unread))), unread_observed,
+                requested=False,
+            )  # fmt: skip
     return [results[index] for index in range(len(calls))]
+
+
+def unread_context(earlier: Sequence[ToolResult], batch: Sequence[ToolCall]) -> list[ToolCall]:
+    """The reads a proposal rests on that no earlier round and nothing in this
+    batch made: Formiq makes them, once, with no arguments (they read the
+    request's user). One that was tried and failed is not made again."""
+    states = context_states(earlier)
+    coming = {call.name for call in batch}
+    return [
+        ToolCall(name=name, arguments={})
+        for name in PROPOSAL_CONTEXT
+        if states[name] is ContextState.NOT_LOADED and name not in coming
+    ]
+
+
+def context_refusal(
+    call: ToolCall, gap: ContextGap, loaded: Sequence[ToolResult], known: set[int]
+) -> dict[str, Any]:
+    """The answer to a proposal made before its reads, once the reads were made
+    (by the model in this batch, or by Formiq: loaded, handed over here, and
+    evidence for the turn like any result). With them all checked it is the
+    correctable CONTEXT_MISSING: propose again if a new workout still suits the
+    user. Otherwise nothing proposing again fixes: a read failed, or there is
+    no profile. It also names an exercise id nobody gave, so one new proposal
+    corrects both."""
+    if gap.ok:
+        code = CONTEXT_MISSING
+        if loaded:
+            message = (
+                f"Formiq read {', '.join(item.call.name for item in loaded)} for you, which a "
+                "proposal rests on: their results are in loaded. Check that no planned workout "
+                "already suits the user, then propose again; if one does, tell the user "
+                "instead of proposing"
+            )
+        else:
+            message = (
+                "the reads a proposal rests on were made in this same round: propose in the "
+                "next round, from their results"
+            )
+    else:
+        code, message = PROPOSAL_REFUSED, str(gap.message)
+    if ungrounded := ungrounded_ids(call, known):
+        message += (
+            f". Also {', '.join(ungrounded)}: neither the user nor a tool gave this id; "
+            "search the catalog for the exercises first"
+        )
+    error: dict[str, Any] = {"code": code, "message": message}
+    if loaded:
+        error["loaded"] = [{"tool": item.call.name, "result": item.result} for item in loaded]
+    return {"error": error}
 
 
 def write_refusal(call: ToolCall) -> dict[str, Any]:
@@ -737,9 +1014,15 @@ def record_tool_results(
     results: dict[int, dict[str, Any]],
     runnable: Sequence[int],
     observed: Sequence[Observation],
+    *,
+    requested: bool = True,
 ) -> None:
-    """Each call's outcome, in its tool observation, and the trace's counts."""
-    trace.count("tool_calls_requested", sum(call.name != RESPOND.name for call in calls))
+    """Each call's outcome, in its tool observation, and the trace's counts. The
+    calls Formiq made itself (requested false) were not requested by the model."""
+    if requested:
+        trace.count("tool_calls_requested", sum(call.name != RESPOND.name for call in calls))
+    else:
+        trace.count("tool_calls_loaded", len(calls))
     trace.count("tool_calls_executed", len(runnable))
     for index, observation in enumerate(observed):
         call = calls[index]
@@ -777,6 +1060,8 @@ def check_respond(
     compacted_excluded: int = 0,
     proposed: bool = False,
     awaiting_approval: bool = False,
+    explaining: bool = False,
+    fitness: Sequence[str] = (),
 ) -> tuple[Respond | None, str | None]:
     """The respond call's arguments, and why its decision cannot end the turn
     (None when it can): the decision policy, the safety policy, then the reply
@@ -802,7 +1087,10 @@ def check_respond(
             check.content(output={"accepted": False, "rejection": problems})
             return None, f"invalid respond call: {problems}"
         check.update(intent=respond.intent, decision=respond.decision)
-        policy = check_decision(respond.intent, respond.decision, results)
+        # a fitness request is never out of scope, then the decision policy
+        policy = check_scope(respond.intent, fitness) or check_decision(
+            respond.intent, respond.decision, results
+        )
         rejection = policy or check_safety(
             assessment, respond.intent, respond.decision, respond.reply
         )
@@ -823,6 +1111,9 @@ def check_respond(
             names,
             proposed=proposed,
             awaiting_approval=awaiting_approval,
+            # the user is shown the proposal again only with an answer
+            explaining=explaining and respond.decision in ANSWERS,
+            not_done=undone_exercises(results),
         )
         reply_check.content(
             input=respond.reply, output={"accepted": rejection is None, "rejection": rejection}
@@ -840,6 +1131,113 @@ def proposed(results: Sequence[ToolResult]) -> bool:
     return any(
         access_of(result.call.name) is Access.PROPOSE and "output" in result.result
         for result in results
+    )
+
+
+def undone_exercises(results: Sequence[ToolResult]) -> list[str]:
+    """The exercises the workout sessions read in the turn show no completed set
+    of, by name, and no session shows done: a reply may not say they were."""
+    undone, done = set(), set()
+    for result in results:
+        output = result.result.get("output")
+        if result.call.name not in SESSION_READS or not isinstance(output, dict):
+            continue
+        for item in output.get("exercises") or []:
+            if isinstance(item, dict) and isinstance(name := item.get("exercise_name"), str):
+                (done if item.get("completed_sets") else undone).add(name)
+    return sorted(undone - done)
+
+
+def tool_results(messages: Sequence[CoachMessage]) -> list[ToolResult]:
+    """The tool results among the messages, and what Formiq loaded for the model
+    with them (evidence())."""
+    return evidence(message for message in messages if isinstance(message, ToolResult))
+
+
+def evidence(results: Iterable[ToolResult]) -> list[ToolResult]:
+    """The results the turn holds as evidence: each one, and after a refused
+    proposal the reads Formiq itself made for it (context_refusal), which came
+    back to the model inside the refusal. Only the graph writes them there, and
+    only for the reads a proposal rests on."""
+    held: list[ToolResult] = []
+    for result in results:
+        held.append(result)
+        error = result.result.get("error")
+        items = error.get("loaded") if isinstance(error, dict) else None
+        if access_of(result.call.name) is Access.PROPOSE and isinstance(items, list):
+            held.extend(
+                ToolResult(ToolCall(name=item["tool"], arguments={}), item["result"])
+                for item in items
+                if isinstance(item, dict)
+                and item.get("tool") in PROPOSAL_CONTEXT
+                and isinstance(item.get("result"), dict)
+            )
+    return held
+
+
+def round_of(iteration: int, results: Sequence[ToolResult], context: CoachContext) -> Round:
+    """What the model may call in the round after these results: anything
+    within the limit; past it, a corrected proposal when the turn's last one
+    was refused for a reason proposing again can fix (for
+    PROPOSAL_RETRY_ROUNDS rounds); otherwise only the decision."""
+    if iteration < context.max_tool_iterations:
+        return Round.OPEN
+    if iteration < context.max_tool_iterations + PROPOSAL_RETRY_ROUNDS and proposal_correctable(
+        results
+    ):
+        return Round.PROPOSAL_RETRY
+    return Round.DECISION
+
+
+def proposal_correctable(results: Sequence[ToolResult]) -> bool:
+    """Whether the turn's last proposal was refused for a reason a corrected
+    proposal fixes, and none was accepted."""
+    attempts = [result for result in results if access_of(result.call.name) is Access.PROPOSE]
+    if not attempts or proposed(results):
+        return False
+    error = attempts[-1].result.get("error")
+    return isinstance(error, dict) and error.get("code") in CORRECTABLE_PROPOSAL_ERRORS
+
+
+def offered(kind: Round, context: CoachContext) -> list[ToolDeclaration]:
+    """The tools the model may call in a round of this kind."""
+    if kind is Round.OPEN:
+        return [*context.tools.declarations, RESPOND]
+    if kind is Round.PROPOSAL_RETRY:
+        return [
+            *(
+                tool
+                for tool in context.tools.declarations
+                if access_of(tool.name) is Access.PROPOSE
+            ),
+            RESPOND,
+        ]
+    return [RESPOND]
+
+
+# the errors a call may get once and not again: an unexpected failure, or the
+# per-turn limit
+PASSING_ERRORS = frozenset({"TOOL_ERROR", "TOOL_LIMIT_REACHED"})
+# The calls a turn never repeats word for word: catalog searches and lookups,
+# and proposals, whose results are the same again (a read of the user's own
+# data may be repeated).
+NOT_REPEATED = frozenset({"search_exercises", "get_exercise", "propose_workout_plan"})
+
+
+def repeats_seen_call(call: ToolCall, seen: Sequence[ToolResult]) -> bool:
+    """Whether the call is a search, lookup or proposal (NOT_REPEATED) whose
+    result the model has, word for word: the same tool with the same
+    arguments, which the tools would answer the same. Only a call that ran and
+    came back is one: a result that failed for a passing reason, a compacted
+    one, and a refusal before the call ran (GRAPH_REFUSALS: a read not made yet,
+    an id nobody had given yet) are not. After one of those the evidence may
+    have changed, and the same call may now run; if it did not, the same gate
+    refuses it again, and nothing ran."""
+    return call.name in NOT_REPEATED and any(
+        result.call.name == call.name
+        and result.call.arguments == call.arguments
+        and (result.result.get("error") or {}).get("code") not in PASSING_ERRORS | GRAPH_REFUSALS
+        for result in seen
     )
 
 

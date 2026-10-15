@@ -68,6 +68,27 @@ class BodyRegion(StrEnum):
     CORE = "CORE"
 
 
+class RevisionKind(StrEnum):
+    """How a proposal revises one of the user's plans: the changes they asked
+    for, keeping the rest (ADJUST), or a different workout for the same
+    purpose (ALTERNATIVE)."""
+
+    ADJUST = "ADJUST"
+    ALTERNATIVE = "ALTERNATIVE"
+
+
+class ProposalRevision(BaseModel):
+    """The saved plan a proposal revises: approving the proposal saves it as a
+    new plan and cancels that one, in one transaction."""
+
+    replaces_plan_id: int
+    replaces_plan_name: str
+    kind: RevisionKind
+    # the main exercises it keeps from that plan, by name: an ALTERNATIVE
+    # keeps only those the catalog has no other suitable exercise for
+    kept_exercises: list[str]
+
+
 class CoverageLimitation(BaseModel):
     """Why a proposed workout falls short of its focus: Formiq's catalog has
     no exercise, or too few, that the user can do for it."""
@@ -115,7 +136,7 @@ class WorkoutPlanProposalResponse(BaseModel):
     """A workout plan the coach proposed to the signed-in user: a warm-up, the
     main workout and a cool-down. It is not saved: approving it, with POST
     /coach/proposals/{proposal_id}/approve and its binding, saves all of it as
-    a PLANNED plan."""
+    a PLANNED plan (and cancels the plan it revises, when it revises one)."""
 
     proposal_id: str
     # the digest of this exact proposal, every section included: an approval
@@ -133,6 +154,8 @@ class WorkoutPlanProposalResponse(BaseModel):
     estimated_minutes: int
     # whether the main workout fulfils its focus, and what is missing when not
     coverage: ProposalCoverage
+    # the saved plan it would replace, when it revises one; null for a new workout
+    revision: ProposalRevision | None = None
 
 
 class CoachMessageResponse(BaseModel):

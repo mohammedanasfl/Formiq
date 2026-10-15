@@ -31,7 +31,9 @@ then checks the model.
 ## 1. Identity
 
 - **Authentication is the only source of a request's identity.** Routes that act for a user
-  require a Bearer access token, a JWT issued by `POST /auth/login`, signed with
+  require a Bearer access token, a JWT issued by `POST /auth/login` (or by `POST /auth/register`,
+  which creates a new account with its password and never gives an existing one a password; no
+  other route creates a user, so no one can take an email before its owner signs up), signed with
   `AUTH_JWT_SECRET` and verified by `get_current_user`. A missing, malformed, wrongly signed or
   expired token, or one for a user that no longer exists, ends the request with 401 before
   anything is read. Without a signing secret those routes answer 503: there is no anonymous
@@ -78,7 +80,11 @@ then checks the model.
   model request.
 - **Formiq answers fitness only.** A request outside fitness, the user's Formiq data or how Formiq
   coaches ends with Formiq's fixed redirect, never the model's text. Deciding what is fitness is
-  the model's classification; the redirect and safety's precedence are enforced in code.
+  the model's classification; the redirect and safety's precedence are enforced in code, and so is
+  one veto: a request that names fitness (a workout, an exercise, equipment, a muscle, nutrition),
+  or, in a conversation, a short follow-up asking to change what was discussed ("make it
+  shorter"), is never out of scope. Its OUT_OF_SCOPE decision goes back to the model, which
+  answers it as what it is, says what Formiq cannot do, asks, or redirects it for safety.
 
 ## 4. Tool boundaries
 
@@ -86,12 +92,20 @@ then checks the model.
   and model-provider code import no database, model, repository or service code.
 - **The tools are Formiq's reads and one proposal, and nothing else.** A model's call can run only a
   read tool or `propose_workout_plan`, which writes nothing (section 8). Any other name is refused
-  by the graph before it reaches the tools.
+  by the graph before it reaches the tools. The reads include the user's saved plans
+  (`list_workout_plans`, and two plans compared by `get_workout_plan`), and the user's proposal
+  awaiting approval (`get_pending_proposal`), from Formiq's records for the request's user only:
+  never its id, and reading it approves nothing.
+- **A turn does not repeat itself.** A catalog search or lookup, or a proposal, that the model
+  already has the result of, word for word, is answered with `DUPLICATE_CALL` and not run (a read
+  of the user's own data may be repeated, and a compacted result is not "had").
 - **Inputs are validated, results are bounded.** Arguments are checked against strict schemas; an
   invalid call is refused with a description that never repeats its values. Results have limited
   lists and cut text.
 - **Tool errors are controlled.** Each failure has a code and a plain message. An unexpected
-  exception becomes a generic tool error; its cause goes to the server log only.
+  exception becomes a generic tool error; its cause goes to the server log only. A refused proposal
+  names everything wrong with it at once, and may carry Formiq's `suggestions`: catalog exercises
+  the user can do that would fix it, whose ids are then grounded for the turn.
 - **Tool results are data.** Free text inside them (plan names, notes, descriptions) is never
   followed as an instruction.
 
@@ -106,12 +120,18 @@ Code checks it against what the turn actually retrieved.
 - **A recommendation for today checks before it answers.** It is accepted only once the user's
   profile, current plan and last workout were each read in this turn, returning data or
   confirming there is none. A failed read is not a check.
-- **Ambiguous requests are clarified, not guessed.**
+- **Ambiguous requests are clarified, not guessed.** A revision of one of several PLANNED plans
+  is refused unless the conversation makes the plan clear (its id or name, today's or the next
+  workout for the current plan, or the plan the proposal awaiting approval revises): the coach asks
+  which.
 - **Invalid decisions fail closed.** A malformed or disallowed decision goes back to the model,
   within the iteration limit. If no acceptable decision comes, the turn ends with Formiq's own
   "cannot answer" reply. A rejected decision never reaches the user.
 - **Replies are checked.** A reply that repeats the coach's instructions, claims a change was made,
-  or shows internal labels is rejected.
+  or shows internal labels is rejected; so is one that says the coach made or changed a workout,
+  or that a new version is ready or to be approved, when the turn made no proposal (every form of
+  the making and changing verbs, `app.agent.trust`), and one that says the user did an exercise
+  the workout session read in the turn shows no completed set of.
 
 ## 6. Resource limits
 
@@ -120,16 +140,24 @@ Every request is bounded. As of Phase 5:
 | Limit | Value |
 |---|---|
 | Tool calls a model turn may request | 20 (more makes the turn invalid) |
-| Tool calls run per turn | 5 (the rest are refused) |
-| Rounds of tool calls per request | 5, so at most 6 model requests |
-| Graph steps | 13, a backstop beyond the longest legal turn |
-| Items in a result | 10 search results, 30 exercises, 15 sets, 12 instruction steps; 500 characters of free text |
+| Tool calls run per turn | 8 (the rest are refused): the reads and searches a workout needs, together |
+| Rounds of tool calls per request | 5, and 1 more only to correct a refused proposal (below), so at most 7 model requests |
+| Proposals accepted per turn | 1 (another is refused) |
+| Graph steps | 15, a backstop beyond the longest legal turn |
+| Items in a result | 10 search results, 30 exercises, 15 sets, 12 instruction steps, 20 plans listed, 3 suggestions for each thing a refused proposal must correct; 500 characters of free text |
 | Current message | 4,000 characters |
 | Reply | 8,000 characters |
 | A proposed plan | 1 to 10 main exercises of 1 to 10 sets of 1 to 30 reps, at most 300 s of rest, no weight; today to 14 days ahead |
 | Its warm-up and cool-down | 1 to 5 activities each, of 1 to 3 sets of 1 to 20 reps or 10 to 600 s, no rest or weight; at most 15 minutes each, and a warm-up of at least 3 unless the session is short |
 | Its completeness | at least 4 different main exercises of 2 or more sets for a full body, 3 for a focus, 2 when the user has under 30 minutes (a short session); every region its focus needs; at least half the user's stated time, up to 45 minutes |
 | A proposal's approval | within 30 minutes |
+
+The round beyond the five is given only when the turn's last proposal was refused for something a
+corrected proposal fixes (`INVALID_INPUT`, an id it was not given, or the per-turn limit), and no
+proposal was accepted; in it the model may only propose again or decide. A turn that tried to
+propose and ends with no acceptable decision says that nothing was proposed (never the model's
+text). The live QA of 2026-10-15 found proposal turns ending with nothing after a refusal in the
+last rounds: this is the bounded room to correct one, not a larger general budget.
 
 Failures fail closed and say nothing internal:
 
@@ -148,9 +176,10 @@ Failures fail closed and say nothing internal:
   and that turn text cannot close or forge.
 - **History cannot change policy, identity, safety, grounding or authorization.** A safety risk in
   a left-out turn is kept as a note to the model, but never flags or unflags the current request.
-- **A model request is at most 350,000 characters.** Over budget, the oldest tool results are
-  compacted first; the latest round, errors and the current message never are. At most 6 requests
-  per turn may be compacted, and compacted results are no evidence.
+- **A model request is at most 500,000 characters** (one round of the 8 largest results, and the
+  rest). Over budget, the oldest tool results are compacted first; the latest round, errors and
+  the current message never are. At most 7 requests per turn may be compacted, and compacted
+  results are no evidence.
 - **An accepted proposal supersedes its candidates.** Once Formiq has accepted a proposed workout,
   later requests in the turn send the catalog search results from the rounds before it as a short
   note, whatever the budget: the proposal lists the exercises chosen. Like compacted results, they
@@ -166,21 +195,40 @@ Failures fail closed and say nothing internal:
   approve a proposal when there is none: none made in the turn, and none of theirs awaiting
   approval (pending and unexpired in PostgreSQL, read by the coach service when the request
   begins, never taken from the model or the history). A reply may point the user to such an
-  earlier proposal, but not present a new or changed one unless the turn proposed it.
+  earlier proposal, but not present a new or changed one unless the turn proposed it, nor say it
+  created a workout or plan ("I've created a core workout for you") unless the turn proposed one.
 - **The model may only propose a new workout plan** (`propose_workout_plan`), and only after the
   user's profile, current plan and last workout were checked in the turn, with a profile to build
   for. Formiq builds the proposal: the trusted user, active catalog exercises whose ids a tool
   returned, bounded prescriptions, no weights, and the user's stated time and equipment (what
-  they have, `[]` for none, or what they cannot use, named as the catalog names it: an unknown
-  name is refused, never ignored). It has
+  they have, `[]` for none, or what they cannot use, by the catalog's name, its plural or a common
+  other name, `app/tools/equipment.py`: an unknown name is refused, never ignored, and a name for
+  what the user has that negates or doubts itself, "no dumbbells", is refused too). What the user
+  wrote about their equipment in the conversation the model sees holds whatever the model gives:
+  a piece they said they lack ("I don't have any equipment", "I only have dumbbells") is never in
+  a proposal or a workout search, and `available_equipment` may name only what they said they
+  have (mentioning a piece is not having it). It has
   three sections, each holding only exercises whose `uses` (Formiq's own classification of the
   catalog, kept apart from an imported exercise's upstream category) include it: a warm-up of
   light (BEGINNER) `WARM_UP` activities, the `MAIN_WORKOUT` exercises, and a cool-down of light
   `COOL_DOWN` activities; a warm-up or cool-down activity must work a muscle the main exercises
   train, unless it is easy CARDIO. The coach service keeps the proposal it shows the user in
   PostgreSQL (`workout_plan_proposals`, through `PlanProposalService`), with its binding, a digest
-  of the exact proposal, every section included; no tool stores anything. A flagged request runs
-  no tool, so it gets no proposal.
+  of the exact proposal, every section included, and its focus, the user's time and how it
+  revises a plan, so it can be read back; no tool stores anything. A flagged request runs no tool,
+  so it gets no proposal. The same workout as the user's proposal awaiting approval (the same day,
+  plan revised and prescription) is not proposed again.
+- **A revision replaces a saved plan only on approval.** When the user asks to change, rewrite or
+  replace one of their plans, the proposal names it (`revises_plan_id`, an id a tool returned in
+  the turn, of the user's own PLANNED plan, which the conversation makes clear when they have
+  several, section 5) and how (`revision`: `ADJUST`, the changes asked for,
+  which must change something; or `ALTERNATIVE`, a different workout, which may keep a main
+  exercise of the plan only when the catalog has no other the user can do for its part of the
+  body: Formiq checks this, with no fixed share). The proposal records the plan's id and a digest
+  of what it prescribes, and its response says what it keeps (`revision`). It changes nothing.
+  Its approval saves the new plan and cancels the original in one transaction, with both rows
+  locked, and only if the original is still PLANNED and unchanged: otherwise 409, nothing saved,
+  and the proposal still pending. The original is cancelled, never edited or deleted.
 - **A proposal is a complete session for its focus, judged in code** (`app/tools/completeness.py`).
   The model names the focus (full body by default, or upper body, lower body, push, pull or
   core); each main exercise belongs to the body regions of its primary muscles, and covers a
@@ -209,9 +257,14 @@ Failures fail closed and say nothing internal:
   arguments, a model-supplied user, a claim of earlier permission, a forged system message or a
   "yes" in the conversation is refused, or is no approval.
 - The agent reaches only the read/propose/write classification. The tools build proposals, but
-  never store, record or use a decision. The one fact about stored proposals the coach runs with
-  is `CoachContext.proposal_awaiting_approval`, a plain bool `CoachService` reads before the run,
-  for the reply check: nothing to call, store or decide with. A proposal outlives a restart and is shared by every
+  never store, record or use a decision. The facts about stored proposals the coach runs with are
+  `CoachContext.proposal_awaiting_approval`, a plain bool `CoachService` reads before the run, for
+  the reply check, and `CoachContext.pending_proposal`, plain numbers from the same records (how
+  long the latest waits, and the plan it would replace) that the instructions state so the model
+  reads it before answering about it: nothing to call, store or decide with. The model reads the
+  proposal itself with `get_pending_proposal`, for the request's user only, never with its id;
+  when the turn read it and answered, the response shows it to the user again, as it is kept,
+  with its own binding (the same approval, once). A proposal outlives a restart and is shared by every
   worker process, since it is kept in the database; `app/approvals` itself holds only the rules
   and reaches no data.
 
@@ -237,12 +290,20 @@ Failures fail closed and say nothing internal:
 What is **not** guaranteed today:
 
 1. **Authentication is minimal.** A token cannot be revoked before it expires (30 minutes by
-   default); there is no logout, refresh token, key rotation, rate limiting or lockout. Login
-   matches the email exactly as stored, and passwords are set with a command, not through the API.
+   default); there is no logout, refresh token, key rotation, rate limiting or lockout. An email
+   is one account whatever its case: sign-up stores it in lower case and refuses it in any case,
+   and login matches it so; accounts made earlier that differ only in case are kept apart, and
+   only the exact email logs in to one of them. No database constraint holds the rule for those
+   earlier accounts (only the exact-email one). A new account gets its password at sign-up; an existing
+   account's password is set or changed with a command, not through the API. Sign-up says whether
+   an email already has an account, and nothing limits how often it is tried.
 2. **The safety rules are keyword and threshold guardrails, not a medical classifier.** Negation is
    not read, and subtle risks are left to the model and the decision policy. A follow-up message
    without its own risk signal is not flagged.
-3. **The fitness-only boundary depends on the model's classification.**
+3. **The fitness-only boundary depends on the model's classification,** apart from the veto for
+   requests that name fitness (section 3), whose word list is short and precise: a fitness
+   request in other words can still get the redirect, and an unrelated one using a fitness word
+   goes back to the model.
 4. **A running turn cannot be cancelled,** because the endpoint is synchronous; its reply is
    dropped and it holds nothing once it ends.
 5. **Tracing gaps:** tool timing is per batch; an interrupted request's trace has no final status;
@@ -260,6 +321,15 @@ What is **not** guaranteed today:
 9. **Deterministic tests use scripted models.** They prove what Formiq enforces whatever the model
    does, not how well a real model behaves. The optional live smoke run
    (`tests/integration/test_agent_scenarios.py`) checks only the enforced guarantees.
+10. **What the user said about their equipment is read by phrase rules, in English.** A piece
+    counts as theirs only with words that say so ("I have", "my", "with", "only", a plain list);
+    other phrasings are missed, so a proposal naming that piece is refused until the model leaves
+    it out. Only the conversation the model sees (its last 6 turns) is read.
+11. **The reply checks read claims by their wording.** A false claim in words outside the making
+    and changing verbs, or in another language, can still pass; a comparison's differences are
+    worked out by Formiq (`changes`), but the reply that describes them is the model's.
+12. **Proposals made before the 2026-10-15 fix pass** record no focus or revision kind: they are
+    read back without their coverage, and are not shown to the user again.
 
 Changing a guarantee here is an architectural decision: it needs an explicit decision, an update to
 this document, and tests. It is never a test to relax.

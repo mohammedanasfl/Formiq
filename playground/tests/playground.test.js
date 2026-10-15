@@ -255,7 +255,7 @@ test("a proposal's coverage is shown as the API's structured data, limitations i
     complete: true,
     status: "Complete",
     focus: "FULL_BODY",
-    counted: "4 of 4 main exercises",
+    counted: "4 counted, at least 4 needed",
     trained: ["LOWER_BODY", "UPPER_PUSH", "UPPER_PULL", "CORE"],
     missing: [],
     limitations: [],
@@ -264,11 +264,16 @@ test("a proposal's coverage is shown as the API's structured data, limitations i
     complete: false,
     status: "INCOMPLETE",
     focus: "FULL_BODY",
-    counted: "4 of 4 main exercises",
+    counted: "4 counted, at least 4 needed",
     trained: ["LOWER_BODY", "UPPER_PUSH", "CORE"],
     missing: ["UPPER_PULL"],
     limitations: [{ code: "NO_SUITABLE_EXERCISE", region: "UPPER_PULL", message: "No pull." }],
   });
+  // a short session needs fewer: more than the minimum reads as such, never "4 of 2"
+  assert.equal(
+    P.coverageDetails({ ...PROPOSAL, coverage: { ...coverage, main_exercises_required: 2 } }).counted,
+    "4 counted, at least 2 needed"
+  );
   // complete only when the API says so
   assert.equal(P.coverageDetails({ ...PROPOSAL, coverage: { ...coverage, complete: "yes" } }).complete, false);
   assert.equal(P.coverageDetails(PROPOSAL), null);
@@ -427,6 +432,75 @@ test("a plan exercise without catalog details says so", () => {
   assert.deepEqual([walk.description, walk.instructions], [null, []]);
   assert.equal(walk.missing.length, 1);
   assert.match(walk.missing[0], /no catalog details/);
+});
+
+test("a pending proposal never reads as saved; only the API's 201 makes it saved", () => {
+  // as the API returned it: whatever the coach's reply says, it is a proposal
+  const session = P.recordExchange(signedIn(), "today?", "I saved your plan as plan 5.", PROPOSAL);
+
+  const pending = P.proposalState(session.proposal);
+  assert.equal(pending.saved, false);
+  assert.equal(pending.kicker, "Proposed, not saved until you approve it");
+  assert.doesNotMatch(JSON.stringify(pending), /Saved as|saved as plan|Approved/);
+  assert.equal(pending.action, "Approve and save");
+  // a refused approval (no plan id) leaves it pending
+  for (const plan of [null, { detail: "this proposal has expired" }, { id: "5" }]) {
+    assert.equal(P.proposalState(P.recordApproval(session, PROPOSAL.proposal_id, plan).proposal).saved, false);
+  }
+  // a proposal that arrives already claiming a plan id is read as not saved
+  const forged = P.recordExchange(signedIn(), "today?", "Plan.", { ...PROPOSAL, savedPlanId: 5 });
+  assert.equal(P.proposalState(forged.proposal).saved, false);
+
+  const approved = P.recordApproval(session, PROPOSAL.proposal_id, { id: 5, exercises: [] });
+  assert.deepEqual(P.proposalState(approved.proposal), {
+    saved: true,
+    kicker: "Approved and saved as plan 5",
+    revision: "",
+    action: "",
+  });
+});
+
+test("a revision says which saved plan approving it cancels, and what it keeps", () => {
+  const revision = {
+    replaces_plan_id: 4,
+    replaces_plan_name: "Core & Abs Focus",
+    kind: "ALTERNATIVE",
+    kept_exercises: ["3/4 Sit-Up", "Air Bike"],
+  };
+  const session = P.recordExchange(signedIn(), "rewrite it", "Here.", { ...PROPOSAL, revision });
+
+  assert.deepEqual(P.proposalState(session.proposal), {
+    saved: false,
+    kicker: "An alternative to plan 4, not saved until you approve it",
+    revision:
+      "Approving it saves it as a new plan and cancels plan 4 (Core & Abs Focus). " +
+      "It keeps 3/4 Sit-Up, Air Bike from that plan.",
+    action: "Approve and replace plan 4",
+  });
+  const adjust = { ...PROPOSAL, revision: { ...revision, kind: "ADJUST", kept_exercises: [] } };
+  assert.equal(
+    P.proposalState(P.readProposal(adjust)).revision,
+    "Approving it saves it as a new plan and cancels plan 4 (Core & Abs Focus). " +
+      "It repeats none of that plan's main exercises."
+  );
+
+  const approved = P.recordApproval(session, PROPOSAL.proposal_id, { id: 6, exercises: [] });
+  assert.deepEqual(P.proposalState(approved.proposal), {
+    saved: true,
+    kicker: "Approved and saved as plan 6",
+    revision: "It replaces plan 4 (Core & Abs Focus), which is now cancelled.",
+    action: "",
+  });
+});
+
+test("after an approval the saved plans are read again from the API", () => {
+  const session = P.recordPlans(P.recordExchange(signedIn(), "today?", "Plan.", PROPOSAL), [PLAN]);
+  assert.equal(session.plans.length, 1);
+
+  // the list read before the approval is out of date: it is dropped, to be read again
+  assert.equal(P.recordApproval(session, PROPOSAL.proposal_id, { ...PLAN, id: 42 }).plans, null);
+  // a refused approval changes nothing
+  assert.equal(P.recordApproval(session, PROPOSAL.proposal_id, null).plans, session.plans);
 });
 
 test("an approval puts the saved plan on the page; a reopened plan replaces it", () => {

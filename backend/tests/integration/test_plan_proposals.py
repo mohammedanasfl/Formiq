@@ -494,11 +494,13 @@ def test_a_warm_up_or_cool_down_activity_must_be_light(tools, user, ids, db_sess
 
     result = propose(tools, user, **arguments)
 
-    assert result["error"] == {
+    assert refusal(result) == {
         "code": "INVALID_INPUT",
         "message": f"exercise {hard.id} (Test Hard Drill) is not a light warm-up activity: "
         "choose a BEGINNER one",
     }
+    # and what could take its place: easy cardio, which suits any workout
+    assert suggested(result)[0] == ("Brisk Walk", "the warm-up")
 
 
 def test_a_user_without_equipment_can_say_so(tools, user, ids, db_session):
@@ -555,19 +557,24 @@ def test_every_warm_up_and_cool_down_misfit_is_named_at_once(tools, user, ids):
 
     result = propose(tools, user, **arguments)
 
-    assert result["error"] == {
-        "code": "INVALID_INPUT",
-        "message": (
-            f"exercise {ids['Arm Circles']} (Arm Circles) works none of the muscles the main "
-            "exercises train, so it does not belong in this warm-up; "
-            f"exercise {ids['Cross-Body Shoulder Stretch']} (Cross-Body Shoulder Stretch) works "
-            "none of the muscles the main exercises train, so it does not belong in this "
-            "cool-down: the main exercises "
-            "train Calves, Core, Glutes, Hamstrings, Lower Back, Quadriceps; choose activities "
-            "that "
-            "work one of them, or easy CARDIO"
-        ),
-    }
+    # with the rest of what is wrong (a legs-only workout is no full body): one
+    # correction fixes it all
+    assert problem(result).startswith(
+        f"exercise {ids['Arm Circles']} (Arm Circles) works none of the muscles the main "
+        "exercises train, so it does not belong in this warm-up; "
+        f"exercise {ids['Cross-Body Shoulder Stretch']} (Cross-Body Shoulder Stretch) works "
+        "none of the muscles the main exercises train, so it does not belong in this "
+        "cool-down: the main exercises "
+        "train Calves, Core, Glutes, Hamstrings, Lower Back, Quadriceps; choose activities "
+        "that "
+        "work one of them, or easy CARDIO; the main workout trains no upper-body push"
+    )
+    # easy cardio for each section, which suits any workout, never one already
+    # there, and what the main workout misses
+    assert {reason for _, reason in suggested(result)} == {
+        "the warm-up", "the cool-down", "the upper-body push", "the upper-body pull",
+    }  # fmt: skip
+    assert ("Brisk Walk", "the warm-up") not in suggested(result)
     assert tools.proposals == []
 
 
@@ -716,10 +723,14 @@ def test_a_retired_exercise_is_never_proposed(
 
     result = propose(tools, user, **arguments)
 
-    assert result["error"] == {
+    assert refusal(result) == {
         "code": "INVALID_INPUT",
         "message": f"exercise {retirable_exercise_id} is not an active Formiq catalog exercise",
     }
+    # and what may take its place, from the active catalog
+    assert retirable_exercise_id not in [
+        item["exercise_id"] for item in result["error"]["suggestions"]
+    ]
 
 
 # --- a complete workout ---
@@ -736,6 +747,17 @@ def every_piece_of_equipment(session):
 def problem(result):
     assert result["error"]["code"] == "INVALID_INPUT", result
     return result["error"]["message"]
+
+
+def refusal(result):
+    """A refused proposal's error, without the catalog exercises Formiq
+    suggests to correct it (suggested)."""
+    return {key: value for key, value in result["error"].items() if key != "suggestions"}
+
+
+def suggested(result):
+    """The names of the catalog exercises a refusal suggests, and what for."""
+    return [(item["name"], item["for"]) for item in result["error"].get("suggestions", [])]
 
 
 PUSH_HINT = (
@@ -873,10 +895,15 @@ def test_repeated_exercises_and_single_sets_do_not_make_a_workout_complete(
     renamed = propose(tools, user, **workout(ids, *three, exercise(push_ups.id)))
     one_set = propose(tools, user, **workout(ids, *three, exercise(ids["Bird Dog"], sets=1)))
 
+    # every problem at once: the repeat, and so one exercise too few
     assert problem(twice) == (
         f"exercise {ids['Push-Up']} (Push-Up) is in the main workout twice: list each main "
-        "exercise once, and give it more sets for more work"
+        "exercise once, and give it more sets for more work; the main workout has 3 exercises "
+        "that count for a FULL_BODY workout (each different, for lower body, upper-body push, "
+        "upper-body pull, core, of at least 2 sets), fewer than the 4 it needs: add main "
+        "exercises from the catalog"
     )
+    assert all(reason == "a FULL_BODY workout" for _, reason in suggested(twice))
     assert problem(renamed).startswith(
         f"exercise {push_ups.id} (Push-Ups) repeats exercise {ids['Push-Up']} (Push-Up)"
     )
@@ -1150,10 +1177,13 @@ def ask(client, use_provider, user_id, *turns, message="What should I do today?"
     return response.json(), provider
 
 
-def proposing(ids):
+def proposing(ids, push_up_sets=3):
     """A model that reads what today needs and the catalog (the main exercises,
     then the warm-up drills and the stretches), then proposes a full-body
-    workout that fits 30 minutes without dumbbells."""
+    workout that fits 30 minutes without dumbbells (push_up_sets sets of
+    push-ups: another number is another workout)."""
+    workout = bodyweight(ids)
+    workout["exercises"][0] = {**workout["exercises"][0], "sets": push_up_sets}
     return (
         daily_reads(
             call("search_exercises", movement_pattern="HORIZONTAL_PUSH"),
@@ -1165,7 +1195,7 @@ def proposing(ids):
             call("search_exercises", movement_pattern="MOBILITY"),
             call("search_exercises", movement_pattern="STRETCH"),
         ),
-        tool_turn(proposal(**bodyweight(ids), max_minutes=30, unavailable_equipment=["Dumbbell"])),
+        tool_turn(proposal(**workout, max_minutes=30, unavailable_equipment=["Dumbbell"])),
         recommend("Here is a short bodyweight workout. Review it, and approve it to save it."),
     )
 
@@ -1191,16 +1221,20 @@ def test_a_suitable_planned_workout_is_recommended_not_proposed_again(
         client,
         use_provider,
         me,
-        # proposing before looking at the plan is refused
+        # proposing before looking at the plan is refused, and Formiq reads it
         tool_turn(proposal(**bodyweight(ids))),
-        daily_reads(),
         recommend(answer),
     )
 
     assert body == {"reply": answer}
     refusal = received(provider, 1)["propose_workout_plan"]["error"]
-    assert refusal["code"] == "PROPOSAL_REFUSED"
-    assert "a suitable planned workout is recommended, not duplicated" in refusal["message"]
+    assert refusal["code"] == "CONTEXT_MISSING"
+    assert "no planned workout already suits the user" in refusal["message"]
+    # what Formiq read for the model is the user's own: their plan, by the trusted user
+    loaded = {item["tool"]: item["result"] for item in refusal["loaded"]}
+    assert list(loaded) == ["get_user_profile", "get_current_workout_plan", "get_latest_workout_session"]
+    assert loaded["get_current_workout_plan"]["output"]["plan_id"] == planned
+    assert "error" in loaded["get_latest_workout_session"]  # no workout yet: checked, none
     assert plans_of(test_engine, me) == [planned]
 
 
@@ -1594,7 +1628,8 @@ def test_an_approval_covers_only_the_proposal_shown_and_only_until_it_expires(
 ):
     me, _ = users
     first, _ = ask(client, use_provider, me, *proposing(ids))
-    second, _ = ask(client, use_provider, me, *proposing(ids))
+    # another workout: the same one again would not be proposed twice
+    second, _ = ask(client, use_provider, me, *proposing(ids, push_up_sets=2))
     first, second = first["proposal"], second["proposal"]
 
     # approving one proposal with what was shown of another approves nothing

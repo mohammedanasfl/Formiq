@@ -250,7 +250,7 @@ def test_a_tool_database_error_leaves_the_turns_other_calls_working(fixtures, se
     from app.services import CoachService, WorkoutPlanService
 
     session = database.SessionLocal()
-    tools = CoachService(session, None)._tools()
+    tools = CoachService(session, None)._tools(conversation=[])
 
     def broken(self, user_id, plan_id):
         self.plans.session.execute(text("SELECT 1/0"))

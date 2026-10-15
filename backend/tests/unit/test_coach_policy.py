@@ -79,8 +79,14 @@ def test_only_general_and_exercise_questions_may_be_answered_without_data():
 
 def test_questions_about_the_users_data_name_the_tools_that_hold_it():
     assert POLICY[Intent.PROFILE].data_tools == {"get_user_profile"}
-    # by id, or the current plan / last workout without one
-    assert POLICY[Intent.WORKOUT_PLAN].data_tools == {"get_workout_plan", "get_current_workout_plan"}
+    # by id, or the current plan / last workout without one; the list of plans,
+    # and the proposal awaiting approval
+    assert POLICY[Intent.WORKOUT_PLAN].data_tools == {
+        "get_workout_plan",
+        "get_current_workout_plan",
+        "list_workout_plans",
+        "get_pending_proposal",
+    }
     assert POLICY[Intent.WORKOUT_HISTORY].data_tools == {
         "get_workout_session",
         "get_latest_workout_session",
@@ -89,9 +95,11 @@ def test_questions_about_the_users_data_name_the_tools_that_hold_it():
     assert POLICY[Intent.ADAPTATION].data_tools == {
         "get_user_profile",
         "get_workout_plan",
+        "list_workout_plans",
         "get_workout_session",
         "get_current_workout_plan",
         "get_latest_workout_session",
+        "get_pending_proposal",
     }
     assert POLICY[Intent.DAILY_WORKOUT].data_tools == POLICY[Intent.ADAPTATION].data_tools
     # a decision answered from data needs a tool to get it from

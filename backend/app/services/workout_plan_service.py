@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import date
 
 from sqlalchemy.orm import Session
@@ -7,6 +9,7 @@ from app.repositories import ExerciseRepository, UserRepository, WorkoutPlanRepo
 from app.schemas import WorkoutPlanCreate, WorkoutPlanFilters, WorkoutPlanUpdate
 from app.services.exceptions import UserNotFoundError, WorkoutPlanNotDeletableError
 from app.services.workout_plan_rules import (
+    CANCELLED,
     DRAFT,
     PLANNED,
     REQUIRED_PLAN_FIELDS,
@@ -72,6 +75,48 @@ class WorkoutPlanService:
     def get_plan(self, user_id: int, plan_id: int) -> WorkoutPlan | None:
         """The user's plan, or None if the user has no plan with this id."""
         return self.plans.get_for_user(user_id, plan_id)
+
+    def lock_plan(self, user_id: int, plan_id: int) -> WorkoutPlan | None:
+        """The user's plan as it is now, locked until the transaction ends, or
+        None if the user has no plan with this id: for a caller that changes
+        it only if it is still as it was (app.services.plan_proposal_service)."""
+        return self.plans.get_for_user_for_update(user_id, plan_id)
+
+    def cancel_locked(self, plan: WorkoutPlan) -> None:
+        """Cancels the plan in the session's transaction, without committing
+        it, under the same status rules as update_plan: for a caller whose own
+        change must be saved with it, or not at all."""
+        check_status_change(plan.status, CANCELLED)
+        plan.status = CANCELLED
+        self.plans.update(plan)
+
+    @staticmethod
+    def version_of(plan: WorkoutPlan) -> str:
+        """A digest of what the plan prescribes: its name, status, date and
+        every exercise as prescribed. Any change to them gives another
+        version, so a change based on the plan as it was can tell that it
+        changed since."""
+        material = {
+            "name": plan.name,
+            "status": str(plan.status),
+            "scheduled_date": plan.scheduled_date,
+            "exercises": [
+                [
+                    item.exercise_id,
+                    item.exercise_order,
+                    str(item.section),
+                    item.sets,
+                    item.reps,
+                    item.duration_seconds,
+                    item.weight_kg,
+                    item.rest_seconds,
+                    item.notes,
+                ]
+                for item in sorted(plan.exercises, key=lambda item: (item.exercise_order, item.id))
+            ],
+        }
+        text = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(text.encode()).hexdigest()
 
     def get_current_plan(self, user_id: int, today: date) -> WorkoutPlan | None:
         """The user's current plan: their PLANNED plan scheduled for today, or

@@ -18,13 +18,14 @@ from app.schemas.coach import MAX_HISTORY_TEXT_LENGTH, MAX_HISTORY_TURNS
 from app.services import UserProfileService
 from tests.auth import bearer
 from tests.coach import call, fake_provider, respond_turn, sent_contents, tool_turn
+from tests.integration.users import create_user
 
 URL = "/coach/message"
 
 
 @pytest.fixture
-def user_id(client):
-    return client.post("/users", json={"email": "conversation@example.com"}).json()["id"]
+def user_id(client, test_engine):
+    return create_user(test_engine, email="conversation@example.com")
 
 
 @pytest.fixture

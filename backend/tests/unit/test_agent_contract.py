@@ -24,23 +24,29 @@ from app.tools import TOOL_DECLARATIONS
 
 APP = Path(app.__file__).parent
 
-# Formiq's limits and safety thresholds, as of Phase 4.
+# Formiq's limits and safety thresholds, as of Phase 4, with the tool budget
+# of the live QA fix pass (2026-10-15): one round beyond the limit only to
+# correct a refused proposal, and 8 calls run per round (the reads and searches
+# a workout needs, together), so a request holds one round of 8 results.
 PINNED = {
     "app.agent.graph": {
         "MAX_TOOL_ITERATIONS": 5,
+        "PROPOSAL_RETRY_ROUNDS": 1,
         "MAX_REQUESTED_TOOL_CALLS_PER_TURN": 20,
-        "MAX_GRAPH_STEPS": 13,
+        "MAX_GRAPH_STEPS": 15,
     },
     "app.tools.limits": {
-        "MAX_EXECUTED_TOOL_CALLS_PER_TURN": 5,
+        "MAX_EXECUTED_TOOL_CALLS_PER_TURN": 8,
         "MAX_SEARCH_RESULTS": 10,
         "MAX_EXERCISES": 30,
         "MAX_SETS": 15,
         "MAX_TEXT_LENGTH": 500,
+        "MAX_LISTED_PLANS": 20,
+        "MAX_SUGGESTIONS": 3,
     },
     "app.agent.context": {
-        "MAX_CONTEXT_COMPACTIONS": 6,
-        "CONTEXT_MAX_CHARS": 350_000,
+        "MAX_CONTEXT_COMPACTIONS": 7,
+        "CONTEXT_MAX_CHARS": 500_000,
         "CONTEXT_KEEP_RECENT_TURNS": 6,
         "CONTEXT_MAX_TURN_CHARS": 1_000,
         "CONTEXT_MAX_CONVERSATION_CHARS": 8_000,
@@ -64,9 +70,11 @@ READS = frozenset(
     {
         "get_user_profile",
         "get_workout_plan",
+        "list_workout_plans",
         "get_workout_session",
         "get_current_workout_plan",
         "get_latest_workout_session",
+        "get_pending_proposal",
         "get_exercise",
         "search_exercises",
     }

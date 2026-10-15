@@ -5,8 +5,9 @@ coach request, so the model cannot choose whose data it reads.
 """
 
 from app.ai import ToolDeclaration
-from app.schemas.coach import SessionFocus
+from app.schemas.coach import RevisionKind, SessionFocus
 from app.schemas.exercise import Difficulty, MovementPattern, WorkoutSection
+from app.schemas.workout_plan import WorkoutPlanStatus
 from app.tools.limits import (
     MAX_ACTIVITY_REPS,
     MAX_ACTIVITY_SECONDS,
@@ -48,13 +49,59 @@ GET_WORKOUT_PLAN = ToolDeclaration(
     description=(
         "Get one of the user's workout plans by its id: name, status, scheduled date and "
         "the prescribed exercises (section, sets, reps or duration, weight, rest). A plan is "
-        "what was prescribed, not what the user did: use get_workout_session for that."
+        "what was prescribed, not what the user did: use get_workout_session for that. With "
+        "compare_with_plan_id, also what differs between the two plans (changes), worked out "
+        "by Formiq: describe only those differences."
     ),
     parameters={
         "type": "object",
-        "properties": {"plan_id": {**ID, "description": "The workout plan's id."}},
+        "properties": {
+            "plan_id": {**ID, "description": "The workout plan's id."},
+            "compare_with_plan_id": {
+                **ID,
+                "description": "Another of the user's plans to compare it with, such as the "
+                "plan it replaced.",
+            },
+        },
         "required": ["plan_id"],
     },
+)
+
+LIST_WORKOUT_PLANS = ToolDeclaration(
+    name="list_workout_plans",
+    description=(
+        "List the user's saved workout plans, in short: each one's id, name, status, "
+        "scheduled date, main exercises and whether it is their current plan. PLANNED plans "
+        "come first, the next one first. Returns how many there are and how many are PLANNED: "
+        "none is an empty list, not an error. Use it when the user asks about their plans, or "
+        "to tell which plan they mean when they have several; read one in full with "
+        "get_workout_plan. A plan is saved; a proposal awaiting approval is not a plan "
+        "(get_pending_proposal)."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": [status.value for status in WorkoutPlanStatus],
+                "description": "Only the plans in this status.",
+            }
+        },
+    },
+)
+
+GET_PENDING_PROPOSAL = ToolDeclaration(
+    name="get_pending_proposal",
+    description=(
+        "Get the workout Formiq proposed to the user earlier that still awaits their approval, "
+        "from Formiq's records: not saved, and exactly as it was shown. Returns its name, "
+        "date, every exercise with its sets, reps or time and rest, the minutes each section "
+        "takes, its coverage, how long it still waits, the saved plan it would replace (if "
+        "any) and what differs from that plan, or else from the current plan (changes). Use "
+        "it when the user asks about the proposal: what it holds, why an exercise is there, "
+        "what changed, or to see it again. When none awaits approval, it says so. Takes no "
+        "arguments."
+    ),
 )
 
 GET_WORKOUT_SESSION = ToolDeclaration(
@@ -166,7 +213,9 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
         "estimate of each section's duration, and its coverage: when Formiq's catalog has "
         "nothing the user can do for part of the focus, the proposal is made incomplete "
         "(coverage.complete false) and its limitations say what is missing, which you must "
-        "tell the user."
+        "tell the user. When the user asks to change, rewrite or replace one of their saved "
+        "plans, give revises_plan_id and revision: approving the proposal then saves it and "
+        "cancels that plan, and its revision says which main exercises it keeps."
     ),
     parameters={
         "type": "object",
@@ -259,6 +308,28 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
                 "items": {"type": "string"},
                 "description": "Equipment, as the catalog names it, that the user cannot use.",
             },
+            "revises_plan_id": {
+                **ID,
+                "description": (
+                    "The id of the user's PLANNED plan this workout revises, as "
+                    "get_current_workout_plan or get_workout_plan returned it, when the user "
+                    "asked to change, rewrite or replace that plan. Leave it out for a new "
+                    "workout. With revision."
+                ),
+            },
+            "revision": {
+                "type": "string",
+                "enum": [kind.value for kind in RevisionKind],
+                "description": (
+                    "How it revises that plan: ADJUST for the changes the user asked for "
+                    "(shorter, easier, a swapped exercise), keeping the rest; ALTERNATIVE for "
+                    "a different workout for the same focus (rewrite it, another version, "
+                    "something different). An ALTERNATIVE may keep a main exercise of the plan "
+                    "only when the catalog has no other suitable exercise for its part of the "
+                    "body: Formiq rejects one that keeps more, naming them. An ADJUST must "
+                    "change something. With revises_plan_id."
+                ),
+            },
         },
         "required": ["name", "warm_up", "exercises", "cool_down"],
     },
@@ -319,7 +390,15 @@ SEARCH_EXERCISES = ToolDeclaration(
                     "none."
                 ),
             },
-            "equipment_id": {**ID, "description": "The id of equipment the exercise needs."},
+            "equipment": {
+                "type": "string",
+                "description": (
+                    "One piece of equipment the exercise must use, by the catalog's name or a "
+                    "common name for it, such as Kettlebell, Cable Machine or Pull Up Bar. "
+                    "Never an id. For exercises that need no equipment, use available_equipment "
+                    "with [] instead."
+                ),
+            },
             "movement_pattern": {
                 "type": "string",
                 "enum": [pattern.value for pattern in MovementPattern],
@@ -337,9 +416,11 @@ SEARCH_EXERCISES = ToolDeclaration(
 TOOL_DECLARATIONS = (
     GET_USER_PROFILE,
     GET_WORKOUT_PLAN,
+    LIST_WORKOUT_PLANS,
     GET_WORKOUT_SESSION,
     GET_CURRENT_WORKOUT_PLAN,
     GET_LATEST_WORKOUT_SESSION,
+    GET_PENDING_PROPOSAL,
     PROPOSE_WORKOUT_PLAN,
     GET_EXERCISE,
     SEARCH_EXERCISES,

@@ -34,6 +34,7 @@ from app.agent.graph import safety_instructions
 from app.agent.trust import (
     INSTRUCTION_ECHO_WORDS,
     REPLY_CLAIMS_APPROVAL,
+    REPLY_CLAIMS_CREATION,
     REPLY_CLAIMS_NEW_PROPOSAL,
     REPLY_CLAIMS_PROPOSAL,
     REPLY_SHOWS_INTERNALS,
@@ -601,6 +602,61 @@ def test_a_reply_never_says_the_coach_approved_a_proposal(reply, proposed, await
     )
 
     assert rejection == REPLY_CLAIMS_APPROVAL
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # as a live model wrote it (2026-10-14) for "a plan that focuses on my abs"
+        (
+            "I have created a core-focused workout plan for you, featuring exercises like "
+            "3/4 sit-ups, air bikes, and alternate heel touchers, complete with a warm-up and "
+            "cool-down."
+        ),
+        "I've created a core workout for you: 3 sets of crunches and 3 sets of leg raises.",
+        "We have put together a 20-minute ab routine for today.",
+        "I built you a plan: planks, dead bugs and side planks.",
+    ],
+)
+def test_a_reply_never_says_it_created_a_workout_formiq_did_not_propose(reply):
+    """Only a proposal made in the turn backs "I created a workout": before one
+    is made (none was asked for, or Formiq rejected it), nothing was created,
+    even if the reply asks for no approval. An earlier proposal awaiting
+    approval is not one made now."""
+    for awaiting_approval in (False, True):
+        assert (
+            reply_problem(
+                reply, COACH_INSTRUCTIONS, TOOL_NAMES, awaiting_approval=awaiting_approval
+            )
+            == REPLY_CLAIMS_CREATION
+        )
+    assert reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES, proposed=True) is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "I made sure the workout avoids kneeling.",
+        "Try this core workout: 3 sets of crunches and 3 sets of leg raises.",
+        "I can create a core workout for you to review: shall I?",
+        "Your plan was created by your trainer last week.",
+    ],
+)
+def test_a_reply_that_claims_no_creation_needs_no_proposal(reply):
+    assert reply_problem(reply, COACH_INSTRUCTIONS, TOOL_NAMES) is None
+
+
+def test_a_creation_claim_goes_back_to_the_model():
+    provider = fake_provider(
+        respond_turn("I've created a core workout for you: crunches and planks."),
+        respond_turn("Try this core workout: crunches and planks."),
+    )
+
+    state = run(provider, FakeTools(), "Make me an abs workout.")
+
+    (rejected,) = results_sent(provider, 1)
+    assert rejected["error"]["message"] == REPLY_CLAIMS_CREATION
+    assert state["final_response"] == "Try this core workout: crunches and planks."
 
 
 def test_a_proposal_id_in_a_reply_was_made_up():

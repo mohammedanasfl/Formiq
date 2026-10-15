@@ -81,6 +81,8 @@ def send_coach_message(
                     "coverage",
                 }
             ),
+            # always given: null for a new workout, so a client never infers it
+            revision=shown.revision,
         ),
     )
 

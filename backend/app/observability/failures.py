@@ -22,7 +22,18 @@ class Failure(StrEnum):
     # (Formiq does not tell them apart)
     OWNERSHIP_FAILURE = "ownership_failure"
     TOOL_LIMIT_REACHED = "tool_limit_reached"
+    # a search, lookup or proposal the turn already has the result of, word for
+    # word: not run (an unchanged duplicate)
+    DUPLICATE_CALL = "duplicate_call"
     ID_NOT_GROUNDED = "id_not_grounded"
+    # a proposal made before the reads it rests on (Formiq loads them)
+    MISSING_PREREQUISITE = "missing_prerequisite"
+    # a proposal Formiq refused for something proposing again can correct, or for
+    # something it cannot (no profile, a failed read, a second proposal)
+    PROPOSAL_REJECTED_CORRECTABLE = "proposal_rejected_correctable"
+    PROPOSAL_REJECTED_IRRECOVERABLE = "proposal_rejected_irrecoverable"
+    # the turn used all its rounds, or its context budget, without an answer
+    BUDGET_EXHAUSTED = "budget_exhausted"
     # the model asked for an operation that would change data
     WRITE_NOT_AUTHORIZED = "write_not_authorized"
     DECISION_REJECTED = "decision_rejected"
@@ -43,15 +54,25 @@ TOOL_ERROR_CODES = {
     "INVALID_INPUT": Failure.TOOL_VALIDATION_ERROR,
     "UNKNOWN_TOOL": Failure.TOOL_VALIDATION_ERROR,
     "TOOL_LIMIT_REACHED": Failure.TOOL_LIMIT_REACHED,
+    "DUPLICATE_CALL": Failure.DUPLICATE_CALL,
     "TOOL_ERROR": Failure.TOOL_ERROR,
     "ID_NOT_GROUNDED": Failure.ID_NOT_GROUNDED,
     "WRITE_NOT_AUTHORIZED": Failure.WRITE_NOT_AUTHORIZED,
     "DECISION_REJECTED": Failure.DECISION_REJECTED,
+    "CONTEXT_MISSING": Failure.MISSING_PREREQUISITE,
+    "PROPOSAL_REFUSED": Failure.PROPOSAL_REJECTED_IRRECOVERABLE,
 }
 
 
-def tool_failure(code: object) -> Failure:
-    return TOOL_ERROR_CODES.get(code, Failure.TOOL_ERROR) if isinstance(code, str) else Failure.TOOL_ERROR
+def tool_failure(code: object, tool: str | None = None) -> Failure:
+    """The failure a tool result's error code stands for. A proposal's
+    INVALID_INPUT is Formiq naming what to correct (with suggestions): a
+    correctable rejection, not a malformed call."""
+    if not isinstance(code, str):
+        return Failure.TOOL_ERROR
+    if code == "INVALID_INPUT" and tool == "propose_workout_plan":
+        return Failure.PROPOSAL_REJECTED_CORRECTABLE
+    return TOOL_ERROR_CODES.get(code, Failure.TOOL_ERROR)
 
 
 def classify(error: BaseException) -> Failure:

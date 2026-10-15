@@ -420,6 +420,6 @@ def test_requested_calls_beyond_the_executed_limit_get_an_error_result():
     )
 
     codes = [message.result["error"]["code"] for message in state["messages"][1:-1]]
-    assert MAX_EXECUTED_TOOL_CALLS_PER_TURN == 5
-    assert catalog.get_exercise_by_id.call_count == 5
-    assert codes == ["RESOURCE_NOT_FOUND"] * 5 + ["TOOL_LIMIT_REACHED"] * 15
+    assert MAX_EXECUTED_TOOL_CALLS_PER_TURN == 8
+    assert catalog.get_exercise_by_id.call_count == 8
+    assert codes == ["RESOURCE_NOT_FOUND"] * 8 + ["TOOL_LIMIT_REACHED"] * 12

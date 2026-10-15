@@ -38,6 +38,27 @@ class WorkoutPlanProposalRepository:
             )
         )
 
+    def list_unexpired(
+        self, user_id: int, *, action: str, status: str, now: datetime
+    ) -> list[WorkoutPlanProposal]:
+        """The user's proposals of this action, in this status, that have not
+        expired by now: the most recently made first."""
+        return list(
+            self.session.scalars(
+                select(WorkoutPlanProposal)
+                .where(
+                    WorkoutPlanProposal.user_id == user_id,
+                    WorkoutPlanProposal.action == action,
+                    WorkoutPlanProposal.status == status,
+                    WorkoutPlanProposal.expires_at > now,
+                )
+                .order_by(
+                    WorkoutPlanProposal.created_at.desc(),
+                    WorkoutPlanProposal.recorded_at.desc(),
+                )
+            )
+        )
+
     def delete_expired(self, user_id: int, *, status: str, now: datetime) -> None:
         """Deletes the user's proposals in this status that expired by now."""
         self.session.execute(

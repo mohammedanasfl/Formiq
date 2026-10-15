@@ -18,9 +18,14 @@ class ToolErrorCode(StrEnum):
 
 
 class ToolError(Exception):
-    """A tool could not return its data, for a reason the model may be told."""
+    """A tool could not return its data, for a reason the model may be told,
+    and, when it helps correct the call, catalog exercises that would: Formiq's
+    suggestions, whose ids the model may then use."""
 
-    def __init__(self, code: ToolErrorCode, message: str) -> None:
+    def __init__(
+        self, code: ToolErrorCode, message: str, suggestions: list[dict] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.suggestions = suggestions or []

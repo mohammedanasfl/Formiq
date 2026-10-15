@@ -279,7 +279,7 @@ def test_compaction_is_traced_and_a_compacted_result_stays_out_of_the_evidence()
     provider = fake_provider(
         tool_turn(call("get_workout_plan", plan_id=12)),
         tool_turn(call("search_exercises", difficulty="BEGINNER")),
-        tool_turn(call("search_exercises", difficulty="BEGINNER")),
+        tool_turn(call("search_exercises", difficulty="INTERMEDIATE")),
         respond_turn("Plan 12 has one exercise.", "WORKOUT_PLAN", "RETRIEVE_THEN_ANSWER"),
         tool_turn(call("get_workout_plan", plan_id=12)),
         respond_turn("Plan 12 has one exercise.", "WORKOUT_PLAN", "RETRIEVE_THEN_ANSWER"),

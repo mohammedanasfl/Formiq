@@ -2,7 +2,6 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.api.dependencies import DbSession, PathUserIsCurrentUser, UserId
 from app.schemas import (
-    UserCreate,
     UserProfileCreate,
     UserProfileResponse,
     UserProfileUpdate,
@@ -11,8 +10,6 @@ from app.schemas import (
 from app.services import UserProfileService, UserService
 from app.services.exceptions import (
     InvalidProfileUpdateError,
-    InvalidUserError,
-    UserAlreadyExistsError,
     UserNotFoundError,
     UserProfileAlreadyExistsError,
     UserProfileNotFoundError,
@@ -20,19 +17,11 @@ from app.services.exceptions import (
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-# Every route with a user_id is the signed-in user's own: any other id is not
-# found. Creating a user needs no sign-in, and gives no way to sign in.
+# Every route here is the signed-in user's own: any other id is not found.
+# There is no route that creates a user: an account is made by signing up
+# (POST /auth/register), which gives it its password. A user made without one
+# could never log in, and would keep its email from signing up.
 OWN = [PathUserIsCurrentUser]
-
-
-@router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def create_user(user_data: UserCreate, db: DbSession):
-    try:
-        return UserService(db).create_user(user_data)
-    except UserAlreadyExistsError as error:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-    except InvalidUserError as error:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
 
 @router.get("/{user_id}", response_model=UserResponse, dependencies=OWN)

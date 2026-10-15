@@ -92,6 +92,7 @@ class GeminiProvider:
                     for call in function_calls
                 ),
                 usage=token_usage(response),
+                model=response.model_version,
             )
         if required_tool_names is not None:
             logger.warning("%s answered without the required tool call", self.model)
@@ -101,7 +102,10 @@ class GeminiProvider:
             logger.warning("%s returned no text: %s", self.model, response.prompt_feedback)
             raise AIModelOutputError(f"{self.model} returned no text")
         return ModelTurn(
-            content=response.candidates[0].content, text=response.text, usage=token_usage(response)
+            content=response.candidates[0].content,
+            text=response.text,
+            usage=token_usage(response),
+            model=response.model_version,
         )
 
     def _generate_content(
@@ -122,8 +126,12 @@ class GeminiProvider:
 
 def token_usage(response: types.GenerateContentResponse) -> dict[str, int] | None:
     """The token counts Gemini reported for the response, or None when it reported
-    none. Only counts: nothing of the content. As Gemini counts them, the input
-    includes its cached part, and the output excludes the thinking."""
+    none. Only counts: nothing of the content; a count Gemini did not report is
+    left out, never estimated. As Gemini counts them, the input includes its
+    cached part, the output excludes the thinking, and the total is Gemini's own
+    (it also holds the tool-use input, which a function-calling request, as
+    Formiq's, normally does not report). google-genai 2.30 gives these in
+    usage_metadata, and the answering model in model_version."""
     usage = response.usage_metadata
     if usage is None:
         return None
@@ -132,6 +140,7 @@ def token_usage(response: types.GenerateContentResponse) -> dict[str, int] | Non
         "cached_input_tokens": usage.cached_content_token_count,
         "output_tokens": usage.candidates_token_count,
         "reasoning_tokens": usage.thoughts_token_count,
+        "tool_use_input_tokens": usage.tool_use_prompt_token_count,
         "total_tokens": usage.total_token_count,
     }
     return {name: count for name, count in counts.items() if isinstance(count, int)} or None

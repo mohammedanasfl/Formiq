@@ -1,4 +1,5 @@
 import logging
+import math
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.agent import (
     CoachContext,
+    PendingProposal,
     CoachDecision,
     ConversationTurn,
     Decision,
@@ -14,6 +16,7 @@ from app.agent import (
     coach_graph,
     initial_state,
 )
+from app.agent.policy import ANSWERS
 from app.ai import GeminiProvider
 from app.approvals import ProposalTerms, WriteProposal
 from app.observability import TRACING_OFF, Failure, RunTrace, Tracer, classify
@@ -31,15 +34,16 @@ from app.tools.schemas import ProposedWorkoutPlanOutput
 logger = logging.getLogger(__name__)
 
 # the decisions that answer the user, and so may show them a proposed plan
-_ANSWERS = frozenset({Decision.ANSWER, Decision.RETRIEVE_THEN_ANSWER})
+_ANSWERS = ANSWERS
 
 
 @dataclass(frozen=True)
 class CoachAnswer:
     reply: str
     # The workout plan the coach proposed in this turn, for the user to review
-    # and approve, and how it was described: the last one, when the turn ended
-    # with an answer. Kept for the user's approval; not a saved plan.
+    # and approve, and how it was described, when the turn ended with an
+    # answer; or else the one awaiting their approval, when the turn read it
+    # (get_pending_proposal), as it is kept. Not a saved plan.
     proposal: tuple[WriteProposal, ProposedWorkoutPlanOutput] | None = None
 
 
@@ -98,6 +102,10 @@ class CoachService:
                     # Kept for the user's approval: only the proposal they are
                     # shown. The coach saves no plan; only their approval does.
                     PlanProposalService(self.session, self.proposal_terms).register(proposal[0])
+                elif answered and tools.pending_shown is not None:
+                    # the proposal awaiting their approval, which the turn read
+                    # again: shown again as it is kept, with its own binding
+                    proposal = tools.pending_shown
             except Exception as error:
                 failure = (
                     Failure.USER_NOT_FOUND
@@ -130,10 +138,20 @@ class CoachService:
         if self.users.get_by_id(user_id) is None:
             raise UserNotFoundError(f"user {user_id} does not exist")
         # From Formiq's records, not the conversation: whether a proposal made
-        # earlier awaits the user's approval, so the reply may point them to it
-        awaiting_approval = self.proposal_terms is not None and PlanProposalService(
-            self.session, self.proposal_terms
-        ).awaits_approval(user_id)
+        # earlier awaits the user's approval, so the reply may point them to it,
+        # and the model is told to read it before saying anything about it
+        waiting = (
+            []
+            if self.proposal_terms is None
+            else PlanProposalService(self.session, self.proposal_terms).awaiting_approval(user_id)
+        )
+        pending = None
+        if waiting:
+            left = waiting[0].expires_at - self.proposal_terms.clock()
+            pending = PendingProposal(
+                expires_in_minutes=max(1, math.ceil(left.total_seconds() / 60)),
+                revises_plan_id=waiting[0].parameters.get("replaces_plan_id"),
+            )
         # End the read transaction, so its connection goes back to the pool
         # while the model answers, which can take seconds. The tools end theirs
         # the same way.
@@ -141,23 +159,31 @@ class CoachService:
 
         # The user goes into the run's context, never into the state: the model
         # cannot choose or change whose data the tools read.
-        tools = self._tools()
+        state = initial_state(message, history)
+        # The conversation the model sees, the user's message last: what the
+        # user said there (about their equipment, which plan they mean) holds
+        # for the tools. Context, never authority: identity, ownership and the
+        # approval stay with Formiq.
+        tools = self._tools(
+            [*((turn.role, turn.text) for turn in state["conversation"].turns), ("user", message)]
+        )
         state = coach_graph.invoke(
-            initial_state(message, history),
+            state,
             context=CoachContext(
                 user_id=user_id,
                 provider=self.provider,
                 tools=tools,
                 trace=trace,
-                proposal_awaiting_approval=awaiting_approval,
+                proposal_awaiting_approval=bool(waiting),
+                pending_proposal=pending,
             ),
         )
         trace.update(iterations=state["iteration_count"], compactions=state["context_compactions"])
         return state["final_response"], state["decision"], tools
 
-    def _tools(self) -> FormiqTools:
+    def _tools(self, conversation: Sequence[tuple[str, str]]) -> FormiqTools:
         """The coach's tools, reading through the services on this session, and
-        proposing plans on the proposal terms."""
+        proposing plans on the proposal terms, in this conversation."""
         return FormiqTools(
             users=UserService(self.session),
             profiles=UserProfileService(self.session),
@@ -166,6 +192,12 @@ class CoachService:
             catalog=ExerciseCatalogService(self.session),
             end_read=self.session.rollback,
             proposal_terms=self.proposal_terms,
+            pending_proposals=(
+                None
+                if self.proposal_terms is None
+                else PlanProposalService(self.session, self.proposal_terms)
+            ),
+            conversation=conversation,
         )
 
 

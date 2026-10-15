@@ -16,6 +16,7 @@ from app.api.dependencies import get_ai_provider
 from app.main import app
 from tests.auth import bearer
 from tests.coach import fake_provider, respond_turn
+from tests.integration.users import create_user
 
 API_KEY = "test-secret-key"
 URL = "/coach/message"
@@ -43,8 +44,8 @@ def respond_response(reply, intent, decision):
 
 
 @pytest.fixture
-def user_id(client):
-    return client.post("/users", json={"email": "coach-api@example.com"}).json()["id"]
+def user_id(client, test_engine):
+    return create_user(test_engine, email="coach-api@example.com")
 
 
 @pytest.fixture

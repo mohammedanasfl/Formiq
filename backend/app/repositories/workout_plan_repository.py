@@ -30,6 +30,18 @@ class WorkoutPlanRepository:
             .where(WorkoutPlan.id == plan_id, WorkoutPlan.user_id == user_id)
         ).one_or_none()
 
+    def get_for_user_for_update(self, user_id: int, plan_id: int) -> WorkoutPlan | None:
+        """The user's plan as it is now, with its row locked until the
+        transaction ends: a second change to it waits, then sees what the first
+        one did. None if it does not exist or belongs to another user."""
+        return self.session.scalars(
+            select(WorkoutPlan)
+            .options(*LOAD_EXERCISES)
+            .where(WorkoutPlan.id == plan_id, WorkoutPlan.user_id == user_id)
+            .with_for_update(of=WorkoutPlan)
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+
     def find_by_user(
         self,
         user_id: int,

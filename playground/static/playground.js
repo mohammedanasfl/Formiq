@@ -9,6 +9,9 @@
 
   const COACH_PATH = "/coach/message";
   const LOGIN_PATH = "/auth/login";
+  const REGISTER_PATH = "/auth/register";
+  // the API's shortest password (app.schemas.auth.MIN_PASSWORD_LENGTH)
+  const MIN_PASSWORD_LENGTH = 8;
   // Formiq's proposal ids and bindings (app.api.routes.coach, app.schemas.coach)
   const PROPOSAL_ID = /^[0-9a-f]{32}$/;
   const BINDING = /^[0-9a-f]{64}$/;
@@ -28,19 +31,19 @@
   // is the workout plan the coach's latest reply proposed, if any; plans the
   // user's saved plans as last listed, and plan the saved plan on the page.
   function createSession() {
-    return { email: null, token: null, history: [], proposal: null, plans: null, plan: null, epoch: 0 };
+    return { email: null, token: null, history: [], proposal: null, plans: null, plan: null, profile: null, epoch: 0 };
   }
 
   // Signing in, as anyone, starts a new conversation: nothing is carried over
   // from the previous user, their saved plans included. The epoch tells a late
   // reply it belongs to a conversation that no longer exists.
   function signIn(session, email, token) {
-    return { email, token, history: [], proposal: null, plans: null, plan: null, epoch: session.epoch + 1 };
+    return { email, token, history: [], proposal: null, plans: null, plan: null, profile: null, epoch: session.epoch + 1 };
   }
 
   // Signing out forgets the token, the conversation and the saved plans shown.
   function signOut(session) {
-    return { email: null, token: null, history: [], proposal: null, plans: null, plan: null, epoch: session.epoch + 1 };
+    return { email: null, token: null, history: [], proposal: null, plans: null, plan: null, profile: null, epoch: session.epoch + 1 };
   }
 
   function clearConversation(session) {
@@ -50,6 +53,28 @@
   // The login body, exactly as POST /auth/login takes it.
   function buildLogin(email, password) {
     return { email: String(email).trim(), password: String(password) };
+  }
+
+  // The sign-up body, exactly as POST /auth/register takes it, or the problem
+  // to fix first: the API checks it again.
+  function buildRegistration(email, password, confirm) {
+    const address = String(email).trim();
+    if (!/^[^@\s]+@[^@\s]+$/.test(address)) return { problem: "Enter your email address." };
+    if (String(password).length < MIN_PASSWORD_LENGTH) {
+      return { problem: `Use a password of at least ${MIN_PASSWORD_LENGTH} characters.` };
+    }
+    if (password !== confirm) return { problem: "The two passwords are not the same." };
+    return { body: { email: address, password: String(password) } };
+  }
+
+  function describeRegisterError(status) {
+    if (status === 409) return "An account with this email already exists. Sign in instead.";
+    if (status === 422 || status === 400) {
+      return `Check your email, and use a password of at least ${MIN_PASSWORD_LENGTH} characters.`;
+    }
+    if (status === 503) return "Accounts are not configured (AUTH_JWT_SECRET is not set).";
+    if (status === 0) return MESSAGES[0];
+    return `The account was not created (HTTP ${status}).`;
   }
 
   // The coach request body, exactly as the API takes it: the message and the
@@ -133,7 +158,9 @@
       complete: coverage.complete === true,
       status: coverage.complete === true ? "Complete" : "INCOMPLETE",
       focus: String(coverage.focus ?? ""),
-      counted: `${coverage.main_exercises_counted} of ${coverage.main_exercises_required} main exercises`,
+      // the main exercises that count towards the focus, and Formiq's minimum (lower
+      // in a short session): more than the minimum is fine, so never "4 of 2"
+      counted: `${coverage.main_exercises_counted} counted, at least ${coverage.main_exercises_required} needed`,
       trained: list(coverage.trained_regions),
       missing: list(coverage.missing_regions),
       limitations,
@@ -170,6 +197,55 @@
       ...session,
       proposal: { ...proposal, savedPlanId: plan.id, savedCounts: sectionCounts(plan) },
       plan: readPlan(plan) || session.plan,
+      // the list read before is out of date (a new plan, and maybe one
+      // cancelled): read it again from the API when the tab opens
+      plans: null,
+    };
+  }
+
+  // The saved plan a proposal revises, as the API described it, or null.
+  function readRevision(value) {
+    if (!value || typeof value !== "object" || !Number.isInteger(value.replaces_plan_id)) return null;
+    return {
+      planId: value.replaces_plan_id,
+      planName: String(value.replaces_plan_name ?? ""),
+      kind: value.kind === "ADJUST" ? "ADJUST" : "ALTERNATIVE",
+      kept: Array.isArray(value.kept_exercises) ? value.kept_exercises.map(String) : [],
+    };
+  }
+
+  // What the proposal card says of the proposal's state, from the API's data
+  // only, never from the coach's reply. It is saved only once the approval
+  // answered 201 with the plan (savedPlanId, recordApproval); until then it is
+  // a proposal, and a revision says which saved plan approving it cancels.
+  function proposalState(proposal) {
+    const revision = readRevision(proposal && proposal.revision);
+    const plan = revision ? `plan ${revision.planId} (${revision.planName})` : "";
+    if (proposal && Number.isInteger(proposal.savedPlanId)) {
+      return {
+        saved: true,
+        kicker: `Approved and saved as plan ${proposal.savedPlanId}`,
+        revision: revision ? `It replaces ${plan}, which is now cancelled.` : "",
+        action: "",
+      };
+    }
+    if (!revision) {
+      return {
+        saved: false,
+        kicker: "Proposed, not saved until you approve it",
+        revision: "",
+        action: "Approve and save",
+      };
+    }
+    const what = revision.kind === "ADJUST" ? "A change to" : "An alternative to";
+    const kept = revision.kept.length
+      ? `It keeps ${revision.kept.join(", ")} from that plan.`
+      : "It repeats none of that plan's main exercises.";
+    return {
+      saved: false,
+      kicker: `${what} plan ${revision.planId}, not saved until you approve it`,
+      revision: `Approving it saves it as a new plan and cancels ${plan}. ${kept}`,
+      action: `Approve and replace plan ${revision.planId}`,
     };
   }
 
@@ -263,6 +339,139 @@
     return value ? { ...session, plan: value } : session;
   }
 
+  // --- the user's profile ---
+
+  // GET, POST and PATCH /users/{id}/profile: the signed-in user's own.
+  function profilePath(session) {
+    const userId = tokenUserId(session.token);
+    return userId === null ? null : `/users/${userId}/profile`;
+  }
+
+  // The profile the coach reads (app.schemas.user_profile). The API takes
+  // free text; where the coach reads a value (experience, goal, location,
+  // activity), the page offers the values Formiq uses, such as "beginner".
+  const PROFILE_FIELDS = [
+    { name: "first_name", label: "First name", kind: "text", required: true, max: 100 },
+    { name: "last_name", label: "Last name", kind: "text", required: false, max: 100 },
+    { name: "age", label: "Age", kind: "int", required: true, min: 1 },
+    {
+      name: "gender",
+      label: "Gender",
+      kind: "choice",
+      required: true,
+      choices: [["female", "Female"], ["male", "Male"], ["other", "Other"]],
+    },
+    { name: "height_cm", label: "Height (cm)", kind: "number", required: true, positive: true },
+    { name: "weight_kg", label: "Weight (kg)", kind: "number", required: true, positive: true },
+    {
+      name: "fitness_experience",
+      label: "Training experience",
+      kind: "choice",
+      required: true,
+      choices: [["beginner", "Beginner"], ["intermediate", "Intermediate"], ["advanced", "Advanced"]],
+    },
+    {
+      name: "goal",
+      label: "Main goal",
+      kind: "choice",
+      required: true,
+      choices: [
+        ["general_fitness", "General fitness"],
+        ["muscle_gain", "Build muscle"],
+        ["fat_loss", "Lose fat"],
+        ["strength", "Get stronger"],
+        ["endurance", "Build endurance"],
+      ],
+    },
+    { name: "training_frequency_per_week", label: "Workouts per week", kind: "int", required: true, min: 0 },
+    {
+      name: "training_location",
+      label: "Where you train",
+      kind: "choice",
+      required: true,
+      choices: [["gym", "At a gym"], ["home", "At home"], ["outdoors", "Outdoors"]],
+    },
+    {
+      name: "activity_level",
+      label: "Daily activity",
+      kind: "choice",
+      required: true,
+      choices: [
+        ["sedentary", "Mostly sitting"],
+        ["light", "Lightly active"],
+        ["moderate", "Moderately active"],
+        ["active", "Active"],
+        ["very_active", "Very active"],
+      ],
+    },
+    { name: "sleep_hours", label: "Sleep per night (hours)", kind: "number", required: true, positive: false },
+    { name: "target_weight_kg", label: "Target weight (kg)", kind: "number", required: false, positive: true },
+    { name: "goal_period_weeks", label: "Weeks to reach your goal", kind: "int", required: false, min: 1 },
+    { name: "dietary_preference", label: "Dietary preference", kind: "text", required: false, max: 50 },
+  ];
+
+  // The profile body from the form's values (strings), or the first problem
+  // to fix. creating: a blank optional field is left out; when updating it is
+  // cleared (null), as PATCH takes it.
+  function buildProfile(values, { creating }) {
+    const body = {};
+    for (const field of PROFILE_FIELDS) {
+      const raw = String(values[field.name] ?? "").trim();
+      if (raw === "") {
+        if (field.required) return { problem: `${field.label} is required.` };
+        if (!creating) body[field.name] = null;
+        continue;
+      }
+      if (field.kind === "int") {
+        const number = Number(raw);
+        if (!/^\d+$/.test(raw) || number < field.min || number > 2147483647) {
+          return { problem: `${field.label} must be a whole number of at least ${field.min}.` };
+        }
+        body[field.name] = number;
+      } else if (field.kind === "number") {
+        const number = Number(raw);
+        if (!Number.isFinite(number) || number < 0 || (field.positive && number === 0)) {
+          return { problem: `${field.label} must be a number${field.positive ? " above 0" : ""}.` };
+        }
+        body[field.name] = number;
+      } else {
+        const limit = field.max ?? 50;
+        if (raw.length > limit) return { problem: `${field.label} has at most ${limit} characters.` };
+        body[field.name] = raw;
+      }
+    }
+    return { body };
+  }
+
+  // A stored profile as the form's values (strings); blanks for no profile.
+  function profileValues(profile) {
+    const values = {};
+    for (const field of PROFILE_FIELDS) {
+      const value = profile ? profile[field.name] : null;
+      values[field.name] = value === null || value === undefined ? "" : String(value);
+    }
+    return values;
+  }
+
+  // The profile as the API returned it, or the session unchanged.
+  function recordProfile(session, profile) {
+    if (!profile || typeof profile !== "object" || !Number.isInteger(profile.user_id)) return session;
+    return { ...session, profile };
+  }
+
+  const PROFILE_MESSAGES = {
+    400: "The profile could not be saved: a required field was empty.",
+    409: "You already have a profile. Reload it and save your changes there.",
+    422: "The profile could not be saved: check the values.",
+  };
+
+  function describeProfileError(status) {
+    return {
+      message: PROFILE_MESSAGES[status] || MESSAGES[status] || `The profile could not be saved (HTTP ${status}).`,
+      technical: { status },
+    };
+  }
+
   // A failed read of the saved plans: a fixed message by status.
   const PLAN_MESSAGES = {
     404: "Not found: the signed-in user has no such workout plan.",
@@ -351,12 +560,22 @@
   const Playground = {
     COACH_PATH,
     LOGIN_PATH,
+    REGISTER_PATH,
+    MIN_PASSWORD_LENGTH,
+    PROFILE_FIELDS,
     MAX_HISTORY_TURNS,
     createSession,
     signIn,
     signOut,
     clearConversation,
     buildLogin,
+    buildRegistration,
+    describeRegisterError,
+    profilePath,
+    buildProfile,
+    profileValues,
+    recordProfile,
+    describeProfileError,
     buildRequest,
     requestHeaders,
     recordExchange,
@@ -368,6 +587,7 @@
     approvalPath,
     buildApproval,
     recordApproval,
+    proposalState,
     tokenUserId,
     plansPath,
     planPath,

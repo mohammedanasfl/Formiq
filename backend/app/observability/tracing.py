@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from typing import Any, Literal, Protocol
 
 from app.observability.failures import classify
+from app.observability.trajectory import TurnRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,9 @@ Metadata = dict[str, bool | int | float | str | list[bool | int | float | str] |
 
 # the longest string value recorded: names, categories and ids, not text
 MAX_VALUE_CHARS = 100
-# the longest list value recorded, such as the tools a turn used
-MAX_LIST_ITEMS = 25
+# The longest list value recorded, such as the tools a turn used, or the
+# short codes of a turn's events (app.observability.trajectory): 64, up from 25.
+MAX_LIST_ITEMS = 64
 
 _PRIMITIVES = (bool, int, float, str)
 
@@ -229,6 +231,10 @@ class RunTrace(Observation):
         self.request_id = request_id
         self.counts: dict[str, int] = {}
         self.status: str | None = None
+        # The ordered, safe record of the turn (app.observability.trajectory): kept
+        # whether or not a backend is listening, so the summary and the log line
+        # exist with tracing off.
+        self.trajectory = TurnRecorder(request_id)
 
     def count(self, name: str, amount: int = 1) -> None:
         self.counts[name] = self.counts.get(name, 0) + amount

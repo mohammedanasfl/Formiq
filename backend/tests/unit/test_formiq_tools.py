@@ -34,9 +34,11 @@ from app.tools.schemas import (
     GetCurrentWorkoutPlanInput,
     GetExerciseInput,
     GetLatestWorkoutSessionInput,
+    GetPendingProposalInput,
     GetUserProfileInput,
     GetWorkoutPlanInput,
     GetWorkoutSessionInput,
+    ListWorkoutPlansInput,
     ProposeWorkoutPlanInput,
     SearchExercisesInput,
     UserScopedInput,
@@ -47,9 +49,11 @@ TOOLS = Path(__file__).resolve().parents[2] / "app" / "tools"
 INPUTS = {
     "get_user_profile": GetUserProfileInput,
     "get_workout_plan": GetWorkoutPlanInput,
+    "list_workout_plans": ListWorkoutPlansInput,
     "get_workout_session": GetWorkoutSessionInput,
     "get_current_workout_plan": GetCurrentWorkoutPlanInput,
     "get_latest_workout_session": GetLatestWorkoutSessionInput,
+    "get_pending_proposal": GetPendingProposalInput,
     "propose_workout_plan": ProposeWorkoutPlanInput,
     "get_exercise": GetExerciseInput,
     "search_exercises": SearchExercisesInput,
@@ -102,7 +106,7 @@ def exercise(exercise_id, name="Push-Up", **fields):
 # declarations
 
 
-def test_there_are_seven_reads_and_one_proposal():
+def test_there_are_nine_reads_and_one_proposal():
     assert [tool.name for tool in TOOL_DECLARATIONS] == list(INPUTS)
 
 
@@ -132,7 +136,7 @@ def test_declared_enums_are_the_catalog_values():
 
 @pytest.mark.parametrize(
     "arguments",
-    [{}, {"equipment_id": None, "movement_pattern": None, "difficulty": None}],
+    [{}, {"equipment": None, "movement_pattern": None, "difficulty": None}],
     ids=["no filters", "only nulls"],
 )
 def test_search_needs_a_filter(arguments):
@@ -155,7 +159,8 @@ def test_search_needs_a_filter(arguments):
         (GetWorkoutPlanInput, {"user_id": 1, "plan_id": True}),
         (GetWorkoutSessionInput, {"user_id": 1, "session_id": "+7"}),
         (GetExerciseInput, {"exercise_id": "7.0"}),
-        (SearchExercisesInput, {"equipment_id": "1_0"}),
+        (SearchExercisesInput, {"equipment_id": 1}),  # an id is not an argument: only a name
+
         (GetWorkoutPlanInput, {"user_id": 1, "plan_id": 7.0}),
     ],
     ids=[
@@ -170,7 +175,7 @@ def test_search_needs_a_filter(arguments):
         "plan_id true",
         "session_id +7",
         "exercise_id 7.0 string",
-        "equipment_id 1_0",
+        "equipment_id at all",
         "plan_id 7.0 float",
     ],
 )
@@ -458,13 +463,15 @@ def test_tools_call_only_read_methods_of_the_services():
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Attribute)
-        and node.value.attr in {"users", "profiles", "plans", "sessions", "catalog"}
+        and node.value.attr
+        in {"users", "profiles", "plans", "sessions", "catalog", "pending_proposals"}
     }
 
     assert called == {
         "get_user_by_id",
         "get_profile_by_user_id",
         "get_plan",
+        "list_plans",
         "get_session",
         "get_current_plan",
         "get_latest_completed_session",
@@ -473,4 +480,8 @@ def test_tools_call_only_read_methods_of_the_services():
         # to find a search's muscle group and equipment by name
         "list_muscle_groups",
         "list_equipment",
+        # a digest of a plan already read, which a revision's approval checks
+        "version_of",
+        # the user's own proposals awaiting approval, read, never approved
+        "awaiting_approval",
     }

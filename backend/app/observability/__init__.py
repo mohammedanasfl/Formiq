@@ -1,4 +1,5 @@
 from app.observability.failures import Failure, classify, tool_failure
+from app.observability.trajectory import TurnRecorder
 from app.observability.tracing import (
     TRACING_OFF,
     Observation,
@@ -14,6 +15,7 @@ __all__ = [
     "Observation",
     "RunTrace",
     "Tracer",
+    "TurnRecorder",
     "classify",
     "no_trace",
     "safe_metadata",

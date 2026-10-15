@@ -59,113 +59,200 @@
 
   // --- rendering ---
 
+  // What the page shows besides the session: the open tab, the drawer, and
+  // the message on its way to the coach (with when it was sent), shown until
+  // the reply arrives. It joins the history only with its reply.
+  let tab = "coach";
+  let devOpen = false;
+  let pending = null;
+  let pendingTimer = null;
+
+  const FOCUS_NAMES = {
+    FULL_BODY: "full body",
+    UPPER_BODY: "upper body",
+    LOWER_BODY: "lower body",
+    PUSH: "push",
+    PULL: "pull",
+    CORE: "core",
+  };
+  const REGION_NAMES = {
+    LOWER_BODY: "lower body",
+    UPPER_PUSH: "upper-body push",
+    UPPER_PULL: "upper-body pull",
+    CORE: "core",
+  };
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  // "2026-10-14" as "Wed 14 Oct", read as a calendar date (no time zone shift)
+  function dayName(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+    if (!match) return "no date";
+    const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  }
+
+  function regions(list) {
+    return list.map((region) => REGION_NAMES[region] || region).join(", ") || "none";
+  }
+
+  // Signed out: the sign-in screen. Signed in: the app, on its open tab.
+  function renderView() {
+    const signedIn = Boolean(session.token);
+    $("login-view").hidden = signedIn;
+    $("app-view").hidden = !signedIn;
+    $("coach-view").hidden = tab !== "coach";
+    $("plans-view").hidden = tab !== "plans";
+    $("tab-coach").setAttribute("aria-current", tab === "coach" ? "page" : "false");
+    $("tab-plans").setAttribute("aria-current", tab === "plans" ? "page" : "false");
+    $("dev-panel").hidden = !devOpen;
+    $("dev-toggle").setAttribute("aria-expanded", String(devOpen));
+  }
+
   function renderConversation() {
     const list = $("conversation");
     list.replaceChildren();
     for (const turn of session.history) {
-      const item = document.createElement("li");
-      item.className = `turn ${turn.role}${turn.injected ? " injected" : ""}`;
-      const who = document.createElement("span");
-      who.className = "who";
-      who.textContent =
-        (turn.role === "user" ? `You (${session.email || "not signed in"})` : "Coach") +
-        (turn.injected ? " · injected by hand, not a real exchange" : "");
-      item.append(who, document.createTextNode(turn.text));
+      const item = el("li", `turn ${turn.role}${turn.injected ? " injected" : ""}`);
+      if (turn.injected) item.append(el("span", "who", `Added by hand as ${turn.role}: not a real exchange`));
+      item.append(document.createTextNode(turn.text));
       list.append(item);
     }
+    const waiting = pending !== null && pending.epoch === session.epoch;
+    if (waiting) {
+      list.append(el("li", "turn user pending", pending.text));
+      const working = el("li", "turn coach working");
+      working.setAttribute("role", "status");
+      working.append(el("span", "dot"), el("span", "", "Working on it"), el("span", "seconds", ""));
+      list.append(working);
+      updateWaiting();
+    }
+    $("empty-chat").hidden = session.history.length > 0 || Boolean(session.proposal) || waiting;
     $("turn-count").textContent = `(${session.history.length} turns in memory)`;
     $("active-user").textContent = session.email || "not signed in";
     $("logout").disabled = busy || !session.token;
+    renderView();
     renderProposal();
     renderPlans();
     renderPlan();
   }
 
-  // The latest reply's proposal, as the API returned it, section by section.
-  // The saved message appears only once the API answered 201 with the plan.
+  // How long the coach has been working: a proposal can take a minute, as
+  // the coach searches the catalog and Formiq checks the workout.
+  function updateWaiting() {
+    const seconds = $("conversation").querySelector(".working .seconds");
+    if (!seconds || !pending) return;
+    const elapsed = Math.floor((Date.now() - pending.started) / 1000);
+    seconds.textContent =
+      elapsed < 15 ? ` ${elapsed} s` : ` ${elapsed} s. Building a workout can take a minute.`;
+  }
+
+  // After a reply: the latest question at the top, so its reply and any
+  // proposal read from the start.
+  function scrollToLatest() {
+    const questions = $("conversation").querySelectorAll(".turn.user");
+    const latest = questions[questions.length - 1];
+    if (latest) latest.scrollIntoView({ block: "start" });
+  }
+
+  // The latest reply's proposal, as the API returned it: the session bar, its
+  // coverage and each section. It is marked saved only once the API answered
+  // 201 with the plan.
   function renderProposal() {
     const proposal = session.proposal;
-    $("proposal").hidden = !proposal;
+    // while a new message is on its way, the earlier proposal steps aside
+    $("proposal").hidden = !proposal || (pending !== null && pending.epoch === session.epoch);
     if (!proposal) return;
-    renderFacts("proposal-facts", [
-      ["Name", proposal.name],
-      ["Date", proposal.scheduled_date],
-      [
-        "Estimated",
-        `${proposal.estimated_minutes} min (warm-up ${proposal.warm_up_minutes}, ` +
-          `main ${proposal.main_minutes}, cool-down ${proposal.cool_down_minutes})`,
-      ],
-      ["Approve before", new Date(proposal.expires_at).toLocaleString()],
-      ["Proposal", proposal.proposal_id],
-    ]);
-    renderCoverage(P.coverageDetails(proposal));
+    // its state from the API's data, never from the reply: saved only after a 201
+    const state = P.proposalState(proposal);
+    $("proposal").classList.toggle("is-saved", state.saved);
+    $("proposal-kicker").textContent = state.kicker;
+    $("proposal-revision").hidden = !state.revision;
+    $("proposal-revision").textContent = state.revision;
+    const details = P.coverageDetails(proposal);
+    const complete = Boolean(details && details.complete);
+    const focus = details ? FOCUS_NAMES[details.focus] || details.focus : "its focus";
+    $("proposal").classList.toggle("incomplete", !complete);
+    $("proposal-name").textContent = proposal.name;
+    $("proposal-when").textContent =
+      `For ${dayName(proposal.scheduled_date)}, about ${proposal.estimated_minutes} minutes`;
+    const status = $("proposal-status");
+    status.className = `status${complete ? "" : " incomplete"}`;
+    status.textContent = complete ? `Covers ${focus}` : `Incomplete ${focus}`;
+
+    const bar = $("proposal-bar");
+    bar.replaceChildren();
+    const parts = P.proposalSections(proposal);
+    for (const part of parts) {
+      const segment = el("span", part.section === "MAIN_WORKOUT" ? "main" : "", `${part.title} ${part.minutes ?? "?"} min`);
+      segment.style.flexGrow = String(Math.max(Number(part.minutes) || 0, 1));
+      bar.append(segment);
+    }
+
+    renderCoverage(details);
+
     const sections = $("proposal-sections");
     sections.replaceChildren();
-    for (const part of P.proposalSections(proposal)) {
-      const heading = document.createElement("h3");
-      heading.textContent = `${part.title} · about ${part.minutes ?? "?"} min`;
-      const list = document.createElement("ol");
-      list.className = "exercises";
+    for (const part of parts) {
+      const heading = el("h4", "", part.title);
+      heading.append(el("span", "sub", `  about ${part.minutes ?? "?"} minutes`));
+      const list = el("ul", "exercises");
       for (const exercise of part.exercises) {
-        const item = document.createElement("li");
-        const note = exercise.notes ? ` · ${exercise.notes}` : "";
-        const equipment = (exercise.equipment || []).join(", ") || "no equipment";
-        item.textContent =
-          `${exercise.exercise_name} (${equipment}): ${P.prescription(exercise)}${note}`;
+        const item = el("li");
+        item.append(el("span", "dose", P.prescription(exercise)), el("strong", "", exercise.exercise_name));
+        // what it needs, when it needs anything, and the coach's note
+        const needs = (exercise.equipment || []).join(", ");
+        const note = [needs && `Needs ${needs}`, exercise.notes].filter(Boolean).join(". ");
+        if (note) item.append(el("span", "note", note));
         list.append(item);
       }
-      if (!part.exercises.length) {
-        const item = document.createElement("li");
-        item.textContent = "none";
-        list.append(item);
-      }
+      if (!part.exercises.length) list.append(el("li", "note", "Nothing in this section."));
       sections.append(heading, list);
     }
-    const saved = proposal.savedPlanId !== null;
+
+    const saved = state.saved;
     $("approve").hidden = saved;
+    $("approve").textContent = state.action || "Approve and save";
     $("approve").disabled = busy;
+    $("proposal-expiry").hidden = saved;
+    $("proposal-expiry").textContent = `Approve before ${new Date(proposal.expires_at).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    })} to save it.`;
     $("proposal-saved").hidden = !saved;
     const counts = proposal.savedCounts;
-    $("proposal-saved").textContent = saved
-      ? `Saved as workout plan ${proposal.savedPlanId}: ${counts.WARM_UP} warm-up, ` +
+    $("proposal-saved-text").textContent = saved
+      ? `Saved as plan ${proposal.savedPlanId}: ${counts.WARM_UP} warm-up, ` +
         `${counts.MAIN_WORKOUT} main and ${counts.COOL_DOWN} cool-down exercises.`
       : "";
   }
 
-  // The proposal's coverage, from the API's structured data: its status, the
-  // regions trained and missing, and each limitation.
+  // The proposal's coverage, from the API's structured data: the regions
+  // trained and missing, and what the catalog could not provide.
   function renderCoverage(details) {
     const box = $("proposal-coverage");
     box.replaceChildren();
-    box.className = "coverage";
     if (!details) {
-      box.textContent = "Coverage: the API returned none.";
+      box.textContent = "The API returned no coverage for this proposal.";
       return;
     }
-    if (!details.complete) box.classList.add("incomplete");
-    const status = document.createElement("p");
-    status.textContent = `Coverage: ${details.status} · ${details.focus} · ${details.counted}`;
-    const facts = document.createElement("dl");
-    facts.className = "facts";
-    box.append(status, facts);
+    const facts = el("dl");
     for (const [name, value] of [
-      ["Trained", details.trained.join(", ") || "none"],
-      ["Missing", details.missing.join(", ") || "none"],
+      ["Trains", regions(details.trained)],
+      ["Missing", regions(details.missing)],
+      ["Main exercises", details.counted],
     ]) {
-      const term = document.createElement("dt");
-      term.textContent = name;
-      const detail = document.createElement("dd");
-      detail.textContent = value;
-      facts.append(term, detail);
+      facts.append(el("dt", "", name), el("dd", "", value));
     }
+    box.append(facts);
     if (!details.limitations.length) return;
-    const list = document.createElement("ul");
-    for (const limitation of details.limitations) {
-      const item = document.createElement("li");
-      const where = limitation.region ? ` (${limitation.region})` : "";
-      item.textContent = `${limitation.code}${where}: ${limitation.message}`;
-      list.append(item);
-    }
+    const list = el("ul");
+    for (const limitation of details.limitations) list.append(el("li", "", limitation.message));
     box.append(list);
   }
 
@@ -174,80 +261,63 @@
     const list = $("plans");
     list.replaceChildren();
     $("load-plans").disabled = busy || !session.token;
-    if (session.plans === null) return;
+    if (session.plans === null) {
+      list.append(el("li", "sub", "Loading your plans…"));
+      return;
+    }
     if (!session.plans.length) {
-      const item = document.createElement("li");
-      item.className = "note";
-      item.textContent = "No saved plans.";
-      list.append(item);
+      list.append(
+        el("li", "sub", "No saved plans yet. Approve a workout the coach proposes and it appears here.")
+      );
       return;
     }
     for (const plan of session.plans) {
-      const item = document.createElement("li");
-      const button = document.createElement("button");
+      const item = el("li");
+      const button = el("button");
       button.type = "button";
-      button.textContent =
-        `${plan.id} · ${plan.name} · ${plan.scheduled_date ?? "no date"} · ${plan.status}`;
+      button.setAttribute("aria-current", String(Boolean(session.plan && session.plan.id === plan.id)));
+      button.append(
+        el("span", "plan-name", plan.name),
+        el("span", "plan-meta", `${dayName(plan.scheduled_date)}, ${String(plan.status).toLowerCase()}`)
+      );
       button.addEventListener("click", () => openPlan(plan.id));
       item.append(button);
       list.append(item);
     }
   }
 
-  // The saved plan on the page: each exercise with its prescription, and the
-  // description and instructions the catalog has, or a note that it has none.
+  // The saved plan: each exercise with its prescription, and the description
+  // and instructions the catalog has, or a note that it has none.
   function renderPlan() {
     const plan = session.plan;
     $("plan").hidden = !plan;
+    $("plan-empty").hidden = Boolean(plan);
     if (!plan) return;
+    $("plan-title").textContent = plan.name;
     renderFacts("plan-facts", [
+      ["Date", dayName(plan.scheduled_date)],
+      ["Status", String(plan.status).toLowerCase()],
       ["Plan", plan.id],
-      ["Name", plan.name],
-      ["Date", plan.scheduled_date],
-      ["Status", plan.status],
     ]);
     const sections = $("plan-sections");
     sections.replaceChildren();
     for (const part of P.planSections(plan)) {
-      const heading = document.createElement("h3");
-      heading.textContent = part.title;
-      const list = document.createElement("ol");
-      list.className = "exercises";
+      const list = el("ul", "exercises");
       for (const exercise of part.exercises) {
-        const item = document.createElement("li");
-        item.className = "plan-exercise";
-        const title = document.createElement("strong");
-        title.textContent = exercise.name;
-        const note = exercise.notes ? ` · ${exercise.notes}` : "";
-        item.append(title, document.createTextNode(`: ${exercise.prescription}${note}`));
-        if (exercise.description) {
-          const description = document.createElement("p");
-          description.textContent = exercise.description;
-          item.append(description);
-        }
+        const item = el("li", "plan-exercise");
+        item.append(el("span", "dose", exercise.prescription), el("strong", "", exercise.name));
+        if (exercise.notes) item.append(el("span", "note", exercise.notes));
+        if (exercise.description) item.append(el("p", "how", exercise.description));
         if (exercise.instructions.length) {
-          const steps = document.createElement("ol");
-          for (const step of exercise.instructions) {
-            const stepItem = document.createElement("li");
-            stepItem.textContent = step;
-            steps.append(stepItem);
-          }
+          const steps = el("ol");
+          for (const step of exercise.instructions) steps.append(el("li", "", step));
           item.append(steps);
         }
-        for (const missing of exercise.missing) {
-          const absent = document.createElement("p");
-          absent.className = "missing";
-          absent.textContent = missing;
-          item.append(absent);
-        }
+        for (const missing of exercise.missing) item.append(el("p", "missing", missing));
         list.append(item);
       }
-      if (!part.exercises.length) {
-        const item = document.createElement("li");
-        item.textContent = "none";
-        list.append(item);
-      }
-      sections.append(heading, list);
+      if (!part.exercises.length) list.append(el("li", "note", "Nothing in this section."));
+      sections.append(el("h4", "", part.title), list);
     }
   }
 
@@ -298,6 +368,12 @@
   }
 
   function showError(error) {
+    // signed out (such as an expired token): the sign-in screen says why
+    if (!session.token) {
+      $("login-error").textContent = error.message;
+      $("login-error").hidden = false;
+      return;
+    }
     $("error").hidden = false;
     $("error-message").textContent = error.message;
     const technical = Object.entries(error.technical).map(([name, value]) => [
@@ -334,6 +410,13 @@
     hideError();
     notice("");
     setBusy(true);
+    pending = { text: message, started: Date.now(), epoch };
+    // shown as sent; back in the box if it fails
+    $("message").value = "";
+    updateLength();
+    renderConversation();
+    $("thread").scrollTop = $("thread").scrollHeight;
+    pendingTimer = setInterval(updateWaiting, 1000);
     const started = performance.now();
     let status = 0;
     let execution = null;
@@ -352,7 +435,10 @@
     } catch {
       status = 0;
     } finally {
+      clearInterval(pendingTimer);
+      pending = null;
       setBusy(false);
+      renderConversation();
     }
     const latencyMs = performance.now() - started;
     renderExecution(execution, latencyMs, status);
@@ -371,11 +457,14 @@
     }
     if (status === 200 && data && typeof data.reply === "string") {
       session = P.recordExchange(session, message, data.reply, data.proposal);
-      $("message").value = "";
-      updateLength();
       renderConversation();
+      scrollToLatest();
     } else {
-      // nothing joins the history on a failure: the message stays in the box
+      // nothing joins the history on a failure: the message goes back in the box
+      if (!$("message").value) {
+        $("message").value = message;
+        updateLength();
+      }
       if (status === 401 && session.token) {
         // the token expired or no longer works: forget it, and the conversation
         session = P.signOut(session);
@@ -429,7 +518,7 @@
     if (saved) {
       session = P.recordApproval(session, proposal.proposal_id, data);
       renderConversation();
-      notice(`Saved: workout plan ${data.id}, "${data.name}", on ${data.scheduled_date ?? "no date"}.`);
+      notice(`Saved "${data.name}" as plan ${data.id}. Find it under Saved plans.`);
     } else {
       if (status === 401 && session.token) {
         session = P.signOut(session);
@@ -507,6 +596,7 @@
     const body = P.buildLogin(email, $("password").value);
     // the password is sent once and never kept, whatever the answer
     $("password").value = "";
+    $("login-error").hidden = true;
     hideError();
     notice("");
     setBusy(true);
@@ -529,28 +619,30 @@
     }
     if (status === 200 && data && typeof data.access_token === "string") {
       session = P.signIn(session, body.email, data.access_token);
+      tab = "coach";
       renderConversation();
-      notice(
-        `Signed in as ${body.email}. The conversation was cleared: ` +
-          "nothing from a previous user is sent."
-      );
+      $("message").focus();
     } else {
-      showError({ message: P.describeLoginError(status), technical: { status } });
+      $("login-error").textContent = P.describeLoginError(status);
+      $("login-error").hidden = false;
     }
   }
 
   function logout() {
     session = P.signOut(session);
+    tab = "coach";
+    devOpen = false;
     hideError();
+    notice("");
     renderConversation();
-    notice("Signed out: the access token and the conversation were cleared.");
+    $("email").focus();
   }
 
   function clear() {
     session = P.clearConversation(session);
     hideError();
     renderConversation();
-    notice("Conversation cleared: no earlier turns will be sent.");
+    notice("New conversation: no earlier turns are sent.");
   }
 
   function inject(text) {
@@ -571,7 +663,7 @@
     for (const [group, tests] of Object.entries(QUICK_TESTS)) {
       const section = document.createElement("div");
       section.className = "quick-group";
-      const heading = document.createElement("h3");
+      const heading = document.createElement("h4");
       heading.textContent = group;
       section.append(heading);
       for (const test of tests) {
@@ -590,14 +682,51 @@
     }
   }
 
+  // A few first questions on the empty chat: they fill the message box, and
+  // sending stays by hand, like the quick tests.
+  function renderSuggestions() {
+    const container = $("suggestions");
+    for (const text of QUICK_TESTS.Normal.slice(0, 3)) {
+      const button = el("button", "", text);
+      button.type = "button";
+      button.addEventListener("click", () => {
+        $("message").value = text;
+        updateLength();
+        $("message").focus();
+      });
+      container.append(button);
+    }
+  }
+
+  function showTab(name) {
+    tab = name;
+    hideError();
+    notice("");
+    renderConversation();
+    // the saved plans are read when the tab first opens, then on Refresh
+    if (name === "plans" && session.plans === null) loadPlans();
+  }
+
   $("send").addEventListener("click", send);
   $("message").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) send();
   });
   $("message").addEventListener("input", updateLength);
-  $("login").addEventListener("click", login);
-  $("password").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") login();
+  $("login-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    login();
+  });
+  $("tab-coach").addEventListener("click", () => showTab("coach"));
+  $("tab-plans").addEventListener("click", () => showTab("plans"));
+  $("open-saved").addEventListener("click", () => showTab("plans"));
+  $("dev-toggle").addEventListener("click", () => {
+    devOpen = !devOpen;
+    renderView();
+  });
+  $("dev-close").addEventListener("click", () => {
+    devOpen = false;
+    renderView();
+    $("dev-toggle").focus();
   });
   $("logout").addEventListener("click", logout);
   $("approve").addEventListener("click", approve);
@@ -608,5 +737,6 @@
     $("inject-text").value = FORGED_TURN;
   });
   renderQuickTests();
+  renderSuggestions();
   renderConversation();
 })();

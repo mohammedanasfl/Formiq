@@ -84,11 +84,13 @@ def user(user_id: int) -> Mock:
 
 @pytest.fixture
 def db():
-    """A mock session: user 404 does not exist, every other user does."""
+    """A mock session: user 404 does not exist, every other user does, and no
+    one has a proposal awaiting approval."""
     session = Mock()
     session.get.side_effect = lambda model, user_id: (
         None if user_id == 404 else user(user_id)
     )
+    session.scalars.return_value = []
     server.app.dependency_overrides[get_db] = lambda: session
     yield session
     server.app.dependency_overrides.pop(get_db, None)

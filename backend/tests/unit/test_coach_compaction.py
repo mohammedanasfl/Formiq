@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime
 import pytest
 
 from app.agent import COACH_INSTRUCTIONS, MAX_TOOL_ITERATIONS, SafetyCategory
+from app.agent.graph import PROPOSAL_RETRY_ROUNDS
 from app.agent import context as ctx
 from app.agent.context import (
     COMPACTED_RESULT,
@@ -30,18 +31,28 @@ from app.agent.context import (
 )
 from app.agent.policy import INTERNAL_LABELS, MAX_REPLY_LENGTH
 from app.ai import ToolResult, conversation, user_content
-from app.schemas.coach import MAX_HISTORY_TEXT_LENGTH
+from app.schemas.coach import MAX_HISTORY_TEXT_LENGTH, ProposalRevision
 from app.tools.limits import (
     MAX_EXECUTED_TOOL_CALLS_PER_TURN,
     MAX_EXERCISES,
+    MAX_LISTED_PLAN_EXERCISES,
+    MAX_LISTED_PLANS,
+    MAX_PROPOSED_EXERCISES,
+    MAX_SECTION_ACTIVITIES,
     MAX_SETS,
     MAX_TEXT_LENGTH,
 )
 from app.tools.schemas import (
     CurrentWorkoutPlanOutput,
+    ExerciseChangeOutput,
     LatestWorkoutSessionOutput,
+    PendingProposalOutput,
     PlanExerciseOutput,
+    PlanSummaryOutput,
+    ProposedExerciseOutput,
     SessionExerciseOutput,
+    WorkoutChangesOutput,
+    WorkoutPlanListOutput,
     WorkoutSetOutput,
 )
 from tests.coach import call, tool_turn
@@ -499,10 +510,95 @@ def largest_session():
                     )
                     for _ in range(MAX_SETS)
                 ],
+                completed_sets=2**31 - 1,
             )
             for _ in range(MAX_EXERCISES)
         ],
         truncated=True,
+    )
+
+
+def largest_plan_list():
+    summary = PlanSummaryOutput(
+        plan_id=2**31 - 1,
+        name="P" * 150,
+        status="CANCELLED",
+        scheduled_date=date.max,
+        days_from_today=-(10**6),
+        main_exercises=["N" * 150] * MAX_LISTED_PLAN_EXERCISES,
+        exercise_count=2**31 - 1,
+        is_current=False,
+    )
+    return WorkoutPlanListOutput(
+        today=date.max,
+        plans=[summary] * MAX_LISTED_PLANS,
+        count=MAX_LISTED_PLANS,
+        total=2**31 - 1,
+        planned=2**31 - 1,
+        truncated=True,
+    )
+
+
+def largest_changes(count):
+    change = ExerciseChangeOutput(
+        section="COOL_DOWN",
+        exercise_name="N" * 150,
+        before="9999 sets of 9999 reps at 9999.99 kg, 9999 s rest",
+        after="9999 sets of 9999 reps at 9999.99 kg, 9999 s rest",
+    )
+    return WorkoutChangesOutput(
+        compared_with_plan_id=2**31 - 1,
+        compared_with_plan_name="P" * 150,
+        added=[change] * count,
+        removed=[change] * MAX_EXERCISES,
+        changed=[],
+        unchanged=[],
+        name_changed=True,
+        scheduled_date_changed=True,
+        identical=False,
+    )
+
+
+def largest_plan_compared():
+    plan = largest_plan()
+    plan.changes = largest_changes(MAX_EXERCISES)
+    return plan
+
+
+def largest_pending_proposal():
+    exercise = ProposedExerciseOutput(
+        exercise_order=9_999,
+        section="COOL_DOWN",
+        exercise_id=2**31 - 1,
+        exercise_name="N" * 150,
+        equipment=["E" * 100] * 3,
+        sets=9_999,
+        reps=9_999,
+        duration_seconds=9_999,
+        rest_seconds=9_999,
+        notes="x" * MAX_TEXT_LENGTH,
+    )
+    count = MAX_PROPOSED_EXERCISES + 2 * MAX_SECTION_ACTIVITIES
+    return PendingProposalOutput(
+        name="P" * 150,
+        scheduled_date=date.max,
+        days_from_today=-(10**6),
+        expires_in_minutes=2**31 - 1,
+        exercises=[exercise] * count,
+        warm_up_minutes=9_999,
+        main_minutes=9_999,
+        cool_down_minutes=9_999,
+        estimated_minutes=9_999,
+        coverage=None,
+        revision=ProposalRevision(
+            replaces_plan_id=2**31 - 1,
+            replaces_plan_name="P" * 150,
+            kind="ALTERNATIVE",
+            kept_exercises=["N" * 150] * MAX_PROPOSED_EXERCISES,
+        ),
+        replaced_plan_unchanged=False,
+        changes=largest_changes(count),
+        earlier_proposals_awaiting_approval=2**31 - 1,
     )
 
 
@@ -533,7 +629,16 @@ def largest_plan():
     )
 
 
-@pytest.mark.parametrize("output", [largest_session, largest_plan])
+@pytest.mark.parametrize(
+    "output",
+    [
+        largest_session,
+        largest_plan,
+        largest_plan_compared,
+        largest_plan_list,
+        largest_pending_proposal,
+    ],
+)
 def test_the_largest_tool_result_is_within_its_bound(output):
     result = {"output": output().model_dump(mode="json")}
 
@@ -546,7 +651,7 @@ def test_the_largest_legal_request_fits_the_budget():
     largest = {"output": largest_session().model_dump(mode="json")}
     not_run = {"error": {"code": "TOOL_LIMIT_REACHED", "message": "x" * 200}}
     messages = []
-    for _ in range(MAX_TOOL_ITERATIONS):
+    for _ in range(MAX_TOOL_ITERATIONS + PROPOSAL_RETRY_ROUNDS):
         calls = [call("get_workout_session", session_id=45) for _ in range(20)]
         messages.append(tool_turn(*calls))
         messages += [
@@ -562,4 +667,4 @@ def test_the_largest_legal_request_fits_the_budget():
 
 
 def test_compactions_are_bounded_by_the_coachs_requests():
-    assert MAX_CONTEXT_COMPACTIONS == MAX_TOOL_ITERATIONS + 1
+    assert MAX_CONTEXT_COMPACTIONS == MAX_TOOL_ITERATIONS + PROPOSAL_RETRY_ROUNDS + 1

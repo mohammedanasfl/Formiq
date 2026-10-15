@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import User
@@ -29,6 +29,16 @@ class UserRepository:
         return self.session.execute(
             select(User).where(User.email == email)
         ).scalar_one_or_none()
+
+    def list_by_normalized_email(self, normalized: str) -> list[User]:
+        """The users whose email, in lower case, is this one (app.core.emails),
+        by id: more than one only for accounts made before emails were
+        normalized."""
+        return list(
+            self.session.scalars(
+                select(User).where(func.lower(User.email) == normalized).order_by(User.id)
+            )
+        )
 
     def get_by_phone(self, phone: str) -> User | None:
         return self.session.execute(
