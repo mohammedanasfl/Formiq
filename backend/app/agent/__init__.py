@@ -3,6 +3,7 @@ from app.agent.context import (
     NO_CONVERSATION,
     ConversationContext,
     ConversationTurn,
+    EquipmentSaid,
 )
 from app.agent.graph import (
     CANNOT_ANSWER_REPLY,
@@ -46,6 +47,7 @@ __all__ = [
     "PendingProposal",
     "ConversationTurn",
     "Decision",
+    "EquipmentSaid",
     "Intent",
     "SafetyAssessment",
     "SafetyCategory",

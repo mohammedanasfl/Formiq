@@ -2,6 +2,10 @@
 
 # exercises returned by search_exercises
 MAX_SEARCH_RESULTS = 10
+# exercises a search that found none for its section names, which match its other
+# filters but are used for another section (a rowing machine exercise a search
+# for the main workout does not return, but the warm-up uses)
+MAX_OTHER_USE_MATCHES = 3
 # equipment names a search may say the user has
 MAX_SEARCH_EQUIPMENT = 20
 # an exercise's instruction steps returned by get_exercise (each cut to

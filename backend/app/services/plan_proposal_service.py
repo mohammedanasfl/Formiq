@@ -11,6 +11,7 @@ from app.approvals import (
     safety_of,
 )
 from app.models import WorkoutPlan, WorkoutPlanProposal
+from app.observability.trajectory import log_proposal_approved
 from app.repositories import WorkoutPlanProposalRepository
 from app.schemas import WorkoutPlanCreate, WorkoutPlanStatus
 from app.services.exceptions import ProposalNotApprovableError, ProposalNotFoundError
@@ -169,4 +170,6 @@ class PlanProposalService:
             raise
 
         self.session.refresh(plan)
+        # after the commit: only an approval that saved a plan is an approval event
+        log_proposal_approved(proposal_ref=proposal_id, plan_id=plan.id)
         return plan

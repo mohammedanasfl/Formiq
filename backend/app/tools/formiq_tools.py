@@ -9,9 +9,9 @@ the user's own approval of it may later save the plan
 """
 
 import logging
-import time
 import math
 import re
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime
@@ -64,6 +64,7 @@ from app.tools.limits import (
     MAX_INSTRUCTION_STEPS,
     MAX_LISTED_PLAN_EXERCISES,
     MAX_LISTED_PLANS,
+    MAX_OTHER_USE_MATCHES,
     MAX_SUGGESTIONS,
     MAX_PROPOSAL_DAYS_AHEAD,
     MAX_SEARCH_RESULTS,
@@ -87,6 +88,8 @@ from app.tools.schemas import (
     GetWorkoutPlanInput,
     GetWorkoutSessionInput,
     LatestWorkoutSessionOutput,
+    OtherUseExerciseOutput,
+    OtherUseMatchesOutput,
     ListWorkoutPlansInput,
     MuscleOutput,
     PendingProposalOutput,
@@ -183,7 +186,10 @@ class FormiqTools:
 
     With user_words, what the user wrote, the equipment they said they lack
     is left out of every proposal and workout search, and a proposal may say
-    they have only equipment they said they have.
+    they have only equipment they said they have. The coach service reads that
+    from every user turn the client sent, and gives it as stated, so what the
+    tools hold is what the model's context says of it, however long ago the
+    user said it; without stated, it is read from user_words.
     """
 
     declarations = TOOL_DECLARATIONS
@@ -201,6 +207,7 @@ class FormiqTools:
         proposal_terms: ProposalTerms | None = None,
         pending_proposals: "PlanProposalService | None" = None,
         conversation: Sequence[tuple[str, str]] | None = None,
+        stated: StatedEquipment | None = None,
     ) -> None:
         self.users = users
         self.profiles = profiles
@@ -223,7 +230,10 @@ class FormiqTools:
             if conversation is None
             else [text for role, text in conversation if role == "user"]
         )
-        self._stated: StatedEquipment | None = None
+        # What the user said about their equipment: read from user_words when first
+        # needed, unless the caller read it from the whole conversation (stated).
+        self._stated: StatedEquipment | None = stated
+        self._equipment_known = stated is not None or self.user_words is not None
         # the main exercises this request's searches returned, by id, with the
         # muscles they train: what a warm-up or cool-down search says each
         # activity suits (suited_main)
@@ -1296,19 +1306,41 @@ class FormiqTools:
             else _equipment_needed(catalog_equipment, request.equipment)
         )
         # active exercises only, the catalog API's default
+        filters = {
+            "muscle_group_id": muscle_group_id,
+            "equipment_id": None if needed is None else needed.id,
+            "movement_pattern": request.movement_pattern,
+            "difficulty": request.difficulty,
+        }
         matches = self.catalog.list_exercises(
-            ExerciseFilters(
-                use=request.use,
-                muscle_group_id=muscle_group_id,
-                equipment_id=None if needed is None else needed.id,
-                movement_pattern=request.movement_pattern,
-                difficulty=request.difficulty,
-            ),
-            available_equipment_ids=available,
+            ExerciseFilters(use=request.use, **filters), available_equipment_ids=available
         )
         exercises = most_relevant(matches, use=request.use, muscle=request.muscle)[
             :MAX_SEARCH_RESULTS
         ]
+        other_uses = None
+        if request.use is not None and not matches:
+            # Nothing is used for this section, which says nothing of the catalog as a
+            # whole: name what matches every other filter, and is used for another
+            # section (a rowing machine exercise for the warm-up, none for the main
+            # workout). Apart from the results, and not one to choose for this use.
+            beyond = self.catalog.list_exercises(
+                ExerciseFilters(**filters), available_equipment_ids=available
+            )
+            if beyond:
+                other_uses = OtherUseMatchesOutput(
+                    total=len(beyond),
+                    exercises=[
+                        OtherUseExerciseOutput(
+                            name=exercise.name,
+                            uses=exercise.uses,
+                            equipment=[item.name for item in exercise.equipment],
+                        )
+                        for exercise in most_relevant(beyond, use=None, muscle=request.muscle)[
+                            :MAX_OTHER_USE_MATCHES
+                        ]
+                    ],
+                )
         if request.use == MAIN:
             self.main_candidates.update(
                 (exercise.id, muscles_of(exercise)) for exercise in exercises
@@ -1332,6 +1364,7 @@ class FormiqTools:
             count=len(exercises),
             total_matches=len(matches),
             excluded_equipment=sorted(item.name for item in excluded) or None,
+            matches_for_other_uses=other_uses,
         )
 
     def _stated_equipment(self) -> StatedEquipment:
@@ -1360,7 +1393,7 @@ class FormiqTools:
         or None: a piece they said they lack, or one they never said they have
         (mentioning it is not having it). Nothing to check when the proposal
         says nothing, or what the user wrote is not known."""
-        if names is None or self.user_words is None:
+        if names is None or not self._equipment_known:
             return None
         catalog = self.catalog.list_equipment(is_active=True)
         have, _ = _equipment_named(catalog, names, hint=AVAILABLE_EQUIPMENT_HINT)

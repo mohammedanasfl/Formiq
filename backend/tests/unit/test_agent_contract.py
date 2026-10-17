@@ -38,6 +38,7 @@ PINNED = {
     "app.tools.limits": {
         "MAX_EXECUTED_TOOL_CALLS_PER_TURN": 8,
         "MAX_SEARCH_RESULTS": 10,
+        "MAX_OTHER_USE_MATCHES": 3,
         "MAX_EXERCISES": 30,
         "MAX_SETS": 15,
         "MAX_TEXT_LENGTH": 500,
@@ -108,7 +109,9 @@ def test_the_model_can_reach_only_formiqs_reads_and_its_proposal():
 def test_the_model_controls_only_its_calls_and_its_respond_arguments():
     # what a model returns: calls by name with arguments, and nothing that
     # reaches identity, safety, limits or authorization
-    assert set(ModelTurn.__dataclass_fields__) == {"content", "text", "tool_calls", "usage"}
+    # usage and model are what the provider reported (token counts, the model that
+    # answered), for observability only: neither is the model's output
+    assert set(ModelTurn.__dataclass_fields__) == {"content", "text", "tool_calls", "usage", "model"}
     assert set(ToolCall.__dataclass_fields__) == {"name", "arguments", "id"}
     # its decision is an intent, a decision and a reply, from fixed enums
     for declaration in (RESPOND, *(policy.respond for policy in SAFETY_POLICY.values())):

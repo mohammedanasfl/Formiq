@@ -29,7 +29,7 @@ from app.repositories import UserRepository
 from app.services import CoachService, UserProfileService
 from tests.auth import bearer
 from tests.integration.agent_fixtures import create_fixtures
-from tests.observability import FailingBackend
+from tests.observability import FailingBackend, comparable
 from tests.reliability import (
     EchoModel,
     api_error,
@@ -191,7 +191,7 @@ def test_a_repeated_provider_failure_never_builds_up(api, fixtures, test_engine,
     assert {response.status_code for response in responses} == {502}
     # one attempt each, never more as failures accumulate
     assert len(model.requests("f")) == 10
-    traces = [{**root.metadata, "request_id": None} for root in backend.roots()]
+    traces = [comparable(root.metadata) for root in backend.roots()]
     assert all(trace == traces[0] for trace in traces)
     assert traces[0]["model_requests"] == 1
     assert test_engine.pool.checkedout() == 0
@@ -215,7 +215,7 @@ def test_a_repeated_tool_failure_never_builds_up(api, fixtures, monkeypatch):
     ]
 
     assert replies == [{"reply": "f error=tool_error"}] * 10
-    traces = [{**root.metadata, "request_id": None} for root in backend.roots()]
+    traces = [comparable(root.metadata) for root in backend.roots()]
     assert all(trace == traces[0] for trace in traces)
     assert traces[0]["tool_tool_error"] == 1
     assert traces[0]["model_requests"] == 2

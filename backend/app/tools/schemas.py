@@ -497,6 +497,27 @@ class ExerciseSummaryOutput(BaseModel):
     )
 
 
+class OtherUseExerciseOutput(BaseModel):
+    """An exercise that matches a search's other filters but that Formiq does not
+    use for the section searched. It has no id: it is not a choice for that
+    section, and no proposal may be built from it."""
+
+    name: str
+    # the sections Formiq does use it for; empty when it uses it for none
+    uses: list[WorkoutSection]
+    equipment: list[str]
+
+
+class OtherUseMatchesOutput(BaseModel):
+    """What a search for a section that found nothing leaves out only because of
+    that section: so that "nothing found" is not said of the catalog as a whole."""
+
+    # how many such exercises there are, and a few of them (at most
+    # MAX_OTHER_USE_MATCHES, the most relevant first)
+    total: int
+    exercises: list[OtherUseExerciseOutput]
+
+
 class SearchExercisesOutput(BaseModel):
     # the most relevant first (app.tools.formiq_tools.most_relevant)
     exercises: list[ExerciseSummaryOutput]
@@ -506,5 +527,12 @@ class SearchExercisesOutput(BaseModel):
     # for a workout (a search by use): the equipment the user said they lack,
     # which no exercise returned needs; left out when they said nothing
     excluded_equipment: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # For a search by use that found nothing: the exercises that match every other
+    # filter but are used for another section only (or for none). They are not
+    # results for this use; they say that the catalog does have such exercises.
+    # Left out when the search found something, or nothing matched without the use.
+    matches_for_other_uses: OtherUseMatchesOutput | None = Field(
         default=None, exclude_if=lambda value: value is None
     )

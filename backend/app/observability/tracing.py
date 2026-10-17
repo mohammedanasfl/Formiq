@@ -239,6 +239,12 @@ class RunTrace(Observation):
     def count(self, name: str, amount: int = 1) -> None:
         self.counts[name] = self.counts.get(name, 0) + amount
 
+    def terminate(self, termination: str, **metadata: Any) -> None:
+        """How the turn ended (an accepted decision, the limit, a safety
+        fallback, a budget failure): on the trace, and in the trajectory."""
+        self.trajectory.termination = str(termination)
+        self._update({**metadata, "termination": str(termination)})
+
     def finish(self, status: str, **metadata: Any) -> None:
         """The request's outcome, with its counters."""
         self.status = status

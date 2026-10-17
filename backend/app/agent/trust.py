@@ -37,6 +37,7 @@ no reliable list of them, and the code above does not depend on finding them.
 import re
 import unicodedata
 from collections.abc import Iterable
+from dataclasses import dataclass
 from functools import lru_cache
 
 # Untrusted text cannot contain these: they would let it open or close a
@@ -84,6 +85,18 @@ REPLY_CLAIMS_CREATION = (
     "Propose it with propose_workout_plan, or give the workout as a suggestion, or describe "
     "the proposal awaiting approval as it is, without saying you made or changed anything"
 )
+REPLY_CLAIMS_UNRECORDED_CHANGE = (
+    "the reply says you changed the workout (updated, swapped, replaced, added or removed "
+    "something), but the proposal the user is shown was not changed in this turn, and Formiq "
+    "records no such change in it: describe it as it is, what it holds and why, without "
+    "saying you changed anything. To change it, propose the changed workout with "
+    "propose_workout_plan"
+)
+REPLY_MISSTATES_DURATION = (
+    "the reply says how long the workout takes, and that is not what the proposal the user is "
+    "shown says: give its own figures (its estimated_minutes, or a section's minutes), or leave "
+    "the length out; the time the user has is not how long the workout takes"
+)
 REPLY_CLAIMS_UNDONE = (
     "the reply says the user did or completed an exercise that their workout session shows "
     "no completed set of: say only what the session shows"
@@ -96,6 +109,8 @@ REPLY_PROBLEMS = {
     REPLY_CLAIMS_PROPOSAL: "proposal_claim",
     REPLY_CLAIMS_NEW_PROPOSAL: "new_proposal_claim",
     REPLY_CLAIMS_CREATION: "creation_claim",
+    REPLY_CLAIMS_UNRECORDED_CHANGE: "unrecorded_change_claim",
+    REPLY_MISSTATES_DURATION: "duration_mismatch",
     REPLY_CLAIMS_UNDONE: "undone_exercise_claim",
 }
 
@@ -112,15 +127,19 @@ _INTERNAL_IDENTIFIER = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 # made up.
 _GENERATED_ID = re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)
 # The coach can only read: a reply saying it saved, changed or logged Formiq data
-# is false whatever led to it.
+# is false whatever led to it. Up to two words, hyphenated or not, may stand
+# between "your" and the noun: "your lower-body workout", "the full body plan"
+# (one plain word was all it read, which let "I've updated your lower-body
+# workout" through).
 _CHANGE_CLAIM = re.compile(
     r"\b(I|I've|I\s+have|we|we've)\s+(just\s+|now\s+|already\s+)?"
     r"(updated|saved|changed|deleted|removed|logged|recorded|marked|edited|added|created|"
     r"scheduled|set|reset|cancelled|completed)\b[^.?!\n]{0,40}?"
-    r"\b(your|the|this|that)\s+(\w+\s+)?"
+    r"\b(your|the|this|that)\s+(?:[\w'’-]+\s+){0,2}"
     r"(profile|plan|plans|workout|workouts|session|sessions|goal|data|record|records|log|"
     r"history|account|set|sets)\b"
-    r"|\b(your|the)\s+(\w+\s+)?(profile|plan|workout|session|goal|data|record|log|account)"
+    r"|\b(your|the)\s+(?:[\w'’-]+\s+){0,2}"
+    r"(profile|plan|workout|session|goal|data|record|log|account)"
     r"\s+(has|have)\s+been\s+(updated|saved|changed|deleted|removed|logged|recorded|marked|"
     r"edited|created|completed|reset|cancelled)\b",
     re.IGNORECASE,
@@ -150,12 +169,15 @@ _PROPOSAL_CLAIM = re.compile(
 # What the coach would claim to have done to a workout: make one, or change one.
 # Each verb's past forms come from verb_forms(), so a claim is caught by what it
 # says, not by a short list of the words a reply happened to use: "rewrote",
-# "regenerated", "reworked", "put together", "swapped out" and the rest.
+# "regenerated", "reworked", "put together", "swapped out" and the rest. "Propose"
+# is the coach's own verb for making one (propose_workout_plan): "I have proposed
+# an updated workout" is a claim that a proposal was made, and was the one wording
+# of it the list lacked (live QA, 2026-10-17).
 MAKING_VERBS = (
     "create", "make", "build", "write", "draft", "design", "prepare", "generate",
     "put together", "come up with", "draw up", "assemble", "compose", "craft", "develop",
     "produce", "whip up", "throw together", "set up", "plan out", "map out", "lay out",
-    "sketch out",
+    "sketch out", "propose",
 )  # fmt: skip
 CHANGING_VERBS = (
     "update", "change", "revise", "adjust", "modify", "swap", "switch", "replace", "rework",
@@ -215,9 +237,18 @@ _NOVEL = _alternation(
     [
         "new", "different", "alternative", "fresh", "another", "latest", "improved",
         "shorter", "longer", "easier", "harder", "lighter", "simpler", "second",
+        "replacement",
         *(form for verb in CHANGING_VERBS for form in verb_forms(verb) if " " not in form),
     ]
 )  # fmt: skip
+# The passive of the claim that a new workout was made: "A new workout has been
+# proposed", "Your revised plan has just been proposed". The coach as the subject
+# ("I have proposed ...") is a verb of MAKING_VERBS; this one names no one. A
+# workout merely called proposed ("the proposed workout") is no claim.
+_PROPOSED_PASSIVE = (
+    rf"\b(?:a|an|your|the|this|that)\s+(?:{_NOVEL})\s+(?:[\w'’-]+\s+){{0,2}}?{_WORKOUT_NOUN}"
+    r"\s+(?:has|have|was|were)\s+(?:(?:now|just|already|also)\s+){0,2}been\s+proposed\b"
+)
 _FIRST_PERSON = r"\b(?:I|we)"
 # "I've", "I have", "we've just", "I have now gone ahead and"
 _PERFECT = (
@@ -262,7 +293,8 @@ _CREATION_CLAIM = re.compile(
     rf"|\bapprov(?:e|ing)\s+(?:the|this|your|my|that|it\s+as\s+the)\s+(?:{_NOVEL})\s+"
     rf"(?:[\w'’-]+\s+)?(?:{_WORKOUT_NOUN}|one)\b"
     rf"|\bhere(?:\s+is|\s+are|['’]s)\s+(?:your|the|a|an)\s+(?:{_NOVEL})\s+"
-    rf"(?:[\w'’-]+\s+){{0,2}}?{_WORKOUT_NOUN}\b",
+    rf"(?:[\w'’-]+\s+){{0,2}}?{_WORKOUT_NOUN}\b"
+    rf"|{_PROPOSED_PASSIVE}",
     re.IGNORECASE,
 )
 
@@ -294,13 +326,167 @@ _NEW_WORKOUT_CLAIM = re.compile(
     rf"|\bapprov(?:e|ing)\s+(?:the|this|your|my|that|it\s+as\s+the)\s+(?:{_NOVEL})\s+"
     rf"(?:[\w'’-]+\s+)?(?:{_WORKOUT_NOUN}|one)\b"
     rf"|\bhere(?:\s+is|\s+are|['’]s)\s+(?:your|the|a|an)\s+(?:{_NOVEL})\s+"
-    rf"(?:[\w'’-]+\s+){{0,2}}?{_WORKOUT_NOUN}\b",
+    rf"(?:[\w'’-]+\s+){{0,2}}?{_WORKOUT_NOUN}\b"
+    rf"|{_PROPOSED_PASSIVE}",
+    re.IGNORECASE,
+)
+
+
+# The coach saying that it changed something: "I've updated your workout to avoid
+# the bench", "I swapped the lunges", "we replaced it". Past forms only, with the
+# coach as the subject: "I can swap it", "I haven't changed it" and "I'll adjust it"
+# claim nothing done.
+_CHANGE_DONE = re.compile(
+    rf"{_FIRST_PERSON}(?:['’]ve|\s+have)?\s+"
+    r"(?:(?:just|now|already|also|then|quickly|gone\s+ahead\s+and|went\s+ahead\s+and)\s+){0,2}"
+    rf"(?:{_CHANGED})\b",
+    re.IGNORECASE,
+)
+# "I added a warm-up and a cool-down" says how the shown workout was put together:
+# every proposal has both (Formiq requires them), so it is no claim of a change.
+_ADDED_SECTION = re.compile(
+    r"\badded\s+(?:(?:a|an|the|some|short|quick|easy|brief|gentle|light|dynamic|\d+[- ]minute)\s+)"
+    r"{0,3}(?:warm[- ]?up|cool[- ]?down)s?\b",
     re.IGNORECASE,
 )
 
 
 def _words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", unicodedata.normalize("NFKC", text).casefold())
+
+
+def _stems(text: str) -> tuple[str, ...]:
+    """The words of a text, a plural read as its singular ("lunges", "lunge")."""
+    return tuple(
+        word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
+        for word in _words(text)
+    )
+
+
+def claims_unrecorded_change(reply: str, recorded: Iterable[str]) -> bool:
+    """Whether the reply says the coach changed something that Formiq's records
+    of the proposal the user is shown do not show changed. The turn made no
+    proposal, so the shown one is the one that waited before it: the only
+    changes it can truthfully speak of are those Formiq recorded in it,
+    against the saved plan (recorded: the exercises it adds, removes or
+    changes). A sentence in which the coach says it changed something is backed
+    only when it names one of them; one about the workout as a whole ("I've
+    updated your workout to avoid the bench") never is."""
+    anchors = [stems for name in recorded if (stems := _stems(name))]
+    for sentence in re.split(r"(?<=[.!?;])\s+|\n+", reply):
+        if not _CHANGE_DONE.search(_ADDED_SECTION.sub("", sentence)):
+            continue
+        words = _stems(sentence)
+        if not any(
+            words[start : start + len(anchor)] == anchor
+            for anchor in anchors
+            for start in range(len(words) - len(anchor) + 1)
+        ):
+            return True
+    return False
+
+
+# --- how long the workout takes ---
+
+# How far a length the reply gives may be from the proposal's own estimate, and
+# from a section's: rounding, not a different workout. Formiq adds up each set
+# and its rest in whole minutes, so a reply that rounds is within a minute or two.
+DURATION_TOLERANCE_MINUTES = 2
+SECTION_TOLERANCE_MINUTES = 1
+
+
+@dataclass(frozen=True)
+class ProposalLength:
+    """How long the proposal the user is shown takes, as Formiq worked it out
+    (the figures of its own result): the reply may state these and no others.
+    Plain minutes: no text."""
+
+    estimated: int
+    # the warm-up, the main workout and the cool-down
+    sections: tuple[int, ...] = ()
+    # whole minutes of a timed exercise, and of a rest: "2 minutes of marching"
+    timed: tuple[int, ...] = ()
+    # The time the user said they have, in minutes: the figures of their words,
+    # and the time the proposal was made for. A reply may name it ("within the
+    # 40 minutes you have"); it is not how long the workout takes.
+    budget: tuple[int, ...] = ()
+
+
+_FIGURE = r"(?P<lo>\d{1,3})(?:\s*(?:-|–|—|to)\s*(?P<hi>\d{1,3}))?"
+# "a 40-minute lower-body workout": the number is the workout's length.
+_LENGTH_ADJECTIVE = re.compile(
+    rf"\b{_FIGURE}[-\s]min(?:ute)?s?\s+(?:[\w'’-]+\s+){{0,3}}?"
+    r"(?:workout|session|plan|routine|circuit|proposal|training|version|day)\b",
+    re.IGNORECASE,
+)
+# "it takes about 40 minutes", "the workout is 40 minutes", "lasts 40 minutes".
+_LENGTH_STATED = re.compile(
+    r"\b(?:tak(?:e|es|ing|en)|last(?:s|ing)?|total(?:s|ling)?|come[s]?\s+to|"
+    r"clock(?:s)?(?:\s+in)?(?:\s+at)?|is|are|will\s+be|should\s+be|run[s]?|running)\s+"
+    r"(?:(?:you|us|me)\s+)?"  # "it takes you about 40 minutes"
+    r"(?P<qualifier>(?:(?:about|around|roughly|approximately|nearly|almost|just|only|"
+    r"up\s+to|an\s+estimated|at\s+most|at\s+least|under|over|a\s+total\s+of|some)\s+)*)"
+    rf"{_FIGURE}\s*(?:minutes?|mins?)\b",
+    re.IGNORECASE,
+)
+# "40 minutes in all", "26 minutes total", "about 40 minutes long".
+_LENGTH_TOTAL = re.compile(
+    rf"\b(?P<qualifier>){_FIGURE}\s*(?:minutes?|mins?)\s+"
+    r"(?:in\s+(?:all|total)|total|overall|altogether|long|all\s+told|"
+    r"start\s+to\s+finish|from\s+start\s+to\s+finish)\b",
+    re.IGNORECASE,
+)
+# What a sentence says of a set, not of the workout: "rest 2 minutes between sets".
+_SET_LEVEL = re.compile(
+    r"\b(?:rest(?:ing|s)?|recover\w*|between\s+(?:sets|exercises|rounds)|per\s+(?:set|side|"
+    r"round|exercise)|each\s+(?:set|side|round)|holds?|held)\b",
+    re.IGNORECASE,
+)
+# What makes a figure the time the user has, not the workout's length: "within
+# the 40 minutes you have", "it fits your 30 minutes".
+_TIME_THE_USER_HAS = re.compile(
+    r"\b(?:you(?:['’]ve|\s+have|\s+had|\s+said|\s+mentioned|\s+asked|\s+told|\s+wanted|\s+gave)|"
+    r"your\s+(?:\d+|time|budget|limit|window|schedule)|available|budget|window|limit|fits?|"
+    r"fitting|within|up\s+to|at\s+most|no\s+more\s+than|under|short\s+on)\b",
+    re.IGNORECASE,
+)
+
+
+def misstates_duration(reply: str, length: ProposalLength) -> bool:
+    """Whether the reply gives a length for the workout that the proposal the
+    user is shown does not have: within DURATION_TOLERANCE_MINUTES of its
+    estimate, or a section's or a timed exercise's own minutes. Only what says
+    how long the workout takes is read ("a 40-minute workout", "it takes about
+    40 minutes", "40 minutes in all"): the time the user has, a rest between
+    sets and a figure of anything else are not claims about its length. A
+    figure the proposal does not have is the model's own, whatever the user's
+    words were: the user's 40 minutes is not the workout's."""
+    allowed = set(range(length.estimated - DURATION_TOLERANCE_MINUTES,
+                        length.estimated + DURATION_TOLERANCE_MINUTES + 1))
+    for section in length.sections:
+        allowed |= set(range(section - SECTION_TOLERANCE_MINUTES, section + SECTION_TOLERANCE_MINUTES + 1))
+    allowed |= set(length.timed)
+    for sentence in re.split(r"(?<=[.!?;])\s+|\n+", reply):
+        for pattern in (_LENGTH_ADJECTIVE, _LENGTH_STATED, _LENGTH_TOTAL):
+            for match in pattern.finditer(sentence):
+                low = int(match["lo"])
+                high = int(match["hi"] or low)
+                if pattern is not _LENGTH_ADJECTIVE:
+                    if _SET_LEVEL.search(sentence):
+                        continue
+                    if low in length.budget and _TIME_THE_USER_HAS.search(sentence):
+                        continue
+                qualifier = " ".join((match.groupdict().get("qualifier") or "").lower().split())
+                if re.search(r"\b(?:under|up to|at most)\b", qualifier):
+                    # "under 30 minutes": no longer than that, give or take rounding
+                    fits = length.estimated <= high + DURATION_TOLERANCE_MINUTES
+                elif re.search(r"\b(?:over|at least)\b", qualifier):
+                    fits = length.estimated >= low - DURATION_TOLERANCE_MINUTES
+                else:
+                    fits = bool(set(range(low, high + 1)) & allowed)
+                if not fits:
+                    return True
+    return False
 
 
 @lru_cache(maxsize=32)
@@ -318,7 +504,9 @@ def reply_problem(
     proposed: bool = False,
     awaiting_approval: bool = False,
     explaining: bool = False,
+    recorded_changes: Iterable[str] | None = None,
     not_done: Iterable[str] = (),
+    length: ProposalLength | None = None,
 ) -> str | None:
     """Why a reply cannot reach the user, or None when it can: it repeats the
     instructions it was written under, shows Formiq's internal names or ids,
@@ -335,7 +523,15 @@ def reply_problem(
     change anything: the reply then describes the proposal the user is shown,
     so what only points to it ("below", "here is the proposal") or says how the
     coach designed it is no claim of a new or changed one; only what says a new
-    or changed workout was made now still is (_NEW_WORKOUT_CLAIM)."""
+    or changed workout was made now still is (_NEW_WORKOUT_CLAIM), and so is
+    the coach saying it changed something the proposal does not record as
+    changed (recorded_changes: the exercises it adds, removes or changes
+    against the saved plan, from get_pending_proposal; the coach graph always
+    gives it, a caller that does not skips this check).
+
+    length is how long the proposal the user is shown takes, given when the
+    reply will be shown with one: a reply that says how long the workout takes
+    must say what the proposal says (misstates_duration)."""
     shingles = _shingles(instructions)
     words = _words(reply)
     size = INSTRUCTION_ECHO_WORDS
@@ -355,6 +551,8 @@ def reply_problem(
         # describing the proposal the user is shown: only a new or changed one is a claim
         if _NEW_WORKOUT_CLAIM.search(reply):
             return REPLY_CLAIMS_NEW_PROPOSAL
+        if recorded_changes is not None and claims_unrecorded_change(reply, recorded_changes):
+            return REPLY_CLAIMS_UNRECORDED_CHANGE
     elif not proposed:
         if _PROPOSAL_CLAIM.search(reply):
             if not awaiting_approval:
@@ -365,6 +563,8 @@ def reply_problem(
             return REPLY_CLAIMS_CREATION
     if any(_claims_done(reply, name) for name in not_done):
         return REPLY_CLAIMS_UNDONE
+    if length is not None and misstates_duration(reply, length):
+        return REPLY_MISSTATES_DURATION
     return None
 
 

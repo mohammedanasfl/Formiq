@@ -382,7 +382,7 @@ def test_each_simultaneous_request_reaches_its_own_limits(test_engine, people, b
         if counts["status"] == "model_output_invalid":
             # the 21-call turn is refused before any call runs
             assert counts["model_requests"] == 1
-            assert "tool_calls_executed" not in counts
+            assert counts["tool_calls_requested"] == counts["tool_calls_executed"] == 0
             continue
         # 5 rounds of 20 requested calls, then the forced decision, whatever the
         # other requests did at the same time: the first round runs 8, and the
@@ -396,9 +396,13 @@ def test_each_simultaneous_request_reaches_its_own_limits(test_engine, people, b
         refused = [c for c in calls if c.metadata.get("error_code") == "TOOL_LIMIT_REACHED"]
         repeated = [c for c in calls if c.metadata.get("error_code") == "DUPLICATE_CALL"]
         assert (len(calls), len(refused), len(repeated)) == (100, 12, 80)
-        # the first round's 20 reached the tools, which ran 8 (the counter counts
-        # what reached them: a known tracing gap)
-        assert counts["tool_calls_executed"] == 20
+        # the first round's 20 reached the tools, which ran 8: the 12 they refused for
+        # their limit and the 80 repeats are blocked, never counted as executed
+        assert counts["tool_calls_executed"] == 8
+        assert counts["tool_calls_blocked"] == 92
+        assert counts["tool_calls_requested"] == counts["tool_calls_executed"] + counts["tool_calls_blocked"]
+        assert counts["tool_calls_failed"] == 0
+        assert counts["budget_exhausted"] is True and counts["budget_reason"] == "tool_limit"
         assert counts["tool_tool_limit_reached"] == 12
         assert counts["tool_duplicate_call"] == 80
     assert len(backend.roots()) == 21

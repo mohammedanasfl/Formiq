@@ -80,12 +80,15 @@ def test_only_general_and_exercise_questions_may_be_answered_without_data():
 def test_questions_about_the_users_data_name_the_tools_that_hold_it():
     assert POLICY[Intent.PROFILE].data_tools == {"get_user_profile"}
     # by id, or the current plan / last workout without one; the list of plans,
-    # and the proposal awaiting approval
+    # the proposal awaiting approval, and the one the turn made (live QA
+    # 2026-10-16, B2: a first workout for a user with no plan has no other
+    # evidence, since a proposal is kept only once the turn ends)
     assert POLICY[Intent.WORKOUT_PLAN].data_tools == {
         "get_workout_plan",
         "get_current_workout_plan",
         "list_workout_plans",
         "get_pending_proposal",
+        "propose_workout_plan",
     }
     assert POLICY[Intent.WORKOUT_HISTORY].data_tools == {
         "get_workout_session",
@@ -107,6 +110,79 @@ def test_questions_about_the_users_data_name_the_tools_that_hold_it():
         if Decision.RETRIEVE_THEN_ANSWER in policy.decisions:
             assert policy.data_tools
         assert policy.checked_tools <= policy.data_tools
+
+
+def test_only_the_plan_intent_counts_a_proposal_as_evidence():
+    """The proposal the turn made is evidence for talking about the user's
+    workout plans and for nothing else: a session history or a catalog question
+    is not answered from it."""
+    counting = {
+        intent
+        for intent, policy in POLICY.items()
+        if "propose_workout_plan" in policy.data_tools
+    }
+    assert counting == {Intent.WORKOUT_PLAN}
+    assert POLICY[Intent.WORKOUT_HISTORY].data_tools == {
+        "get_workout_session",
+        "get_latest_workout_session",
+    }
+    assert POLICY[Intent.EXERCISE].data_tools == {"get_exercise", "search_exercises"}
+
+
+# a proposal Formiq accepted has an output; one it refused has an error
+ACCEPTED = {"output": {"status": "awaiting_user_approval", "estimated_minutes": 26}}
+REFUSED = {"error": {"code": "INVALID_INPUT", "message": "the main workout trains no core"}}
+NO_PLAN = error("RESOURCE_NOT_FOUND")
+
+
+def test_a_first_workout_for_a_user_with_no_plan_is_evidence_for_the_plan_intent():
+    results = [
+        result("get_user_profile"),
+        result("get_current_workout_plan", NO_PLAN),
+        result("get_latest_workout_session", NO_PLAN),
+        result("propose_workout_plan", ACCEPTED),
+    ]
+
+    assert check_decision(Intent.WORKOUT_PLAN, Decision.RETRIEVE_THEN_ANSWER, results) is None
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        REFUSED,
+        error("PROPOSAL_REFUSED"),
+        error("PROPOSAL_LIMIT"),
+        error("CONTEXT_MISSING"),
+        error("ID_NOT_GROUNDED"),
+        {"output": "the proposal is ready"},  # not data: an output is an object
+    ],
+)
+def test_a_refused_proposal_is_no_evidence(refused):
+    results = [
+        result("get_user_profile"),
+        result("get_current_workout_plan", NO_PLAN),
+        result("propose_workout_plan", refused),
+    ]
+
+    rejection = check_decision(Intent.WORKOUT_PLAN, Decision.RETRIEVE_THEN_ANSWER, results)
+
+    assert rejection is not None and "none was returned" in rejection
+
+
+def test_an_accepted_proposal_does_not_loosen_the_other_intents_that_need_data():
+    results = [result("propose_workout_plan", ACCEPTED)]
+
+    for intent in (Intent.WORKOUT_HISTORY, Intent.EXERCISE, Intent.PROFILE):
+        rejection = check_decision(intent, Decision.RETRIEVE_THEN_ANSWER, results)
+        assert rejection is not None and "none was returned" in rejection
+
+
+def test_the_plan_intent_still_needs_evidence_when_nothing_was_proposed_or_read():
+    results = [result("get_current_workout_plan", NO_PLAN), result("get_pending_proposal", NO_PLAN)]
+
+    rejection = check_decision(Intent.WORKOUT_PLAN, Decision.RETRIEVE_THEN_ANSWER, results)
+
+    assert rejection is not None and "propose_workout_plan" in rejection
 
 
 def test_safety_sensitive_and_ambiguous_requests_have_one_way_out():

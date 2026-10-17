@@ -361,7 +361,10 @@ SEARCH_EXERCISES = ToolDeclaration(
         "activities. Narrow it with muscle and available_equipment, so the few results "
         "returned fit the user; one search per section usually gives enough to choose from. "
         "Once main exercises were found, each warm-up and cool-down activity says which of "
-        "them it suits (suits_main: their ids, or any)."
+        "them it suits (suits_main: their ids, or any). A search by use that finds nothing "
+        "says only that nothing matched it: when the catalog has exercises that match the "
+        "other filters and that Formiq uses for another section, matches_for_other_uses "
+        "names a few. They are not results for that use, and not a choice for it."
     ),
     parameters={
         "type": "object",

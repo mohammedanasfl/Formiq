@@ -2,6 +2,7 @@
 send, and backends that fail. No test sends anything over the network."""
 
 import json
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -56,3 +57,18 @@ def application_tracing_off() -> Iterator[None]:
             yield
         finally:
             get_tracer.cache_clear()
+
+
+def comparable(metadata: dict) -> dict:
+    """A request's root metadata without what differs between identical requests:
+    its id, and every measured duration (latency fields and the milliseconds in
+    the trajectory's event codes). What is left must be the same for requests of
+    one kind, which is how a test sees that no counter carries over."""
+    kept = {
+        key: value
+        for key, value in metadata.items()
+        if key != "request_id" and not key.startswith("latency_") and key != "model_request_ms"
+    }
+    if "trajectory" in kept:
+        kept["trajectory"] = [re.sub(r":\d+ms$", "", code) for code in kept["trajectory"]]
+    return kept

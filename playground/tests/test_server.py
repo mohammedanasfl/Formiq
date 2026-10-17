@@ -192,6 +192,32 @@ def test_the_execution_headers_hold_metadata_never_content(client, db, model):
     assert "user_id" not in execution(response)
 
 
+def test_the_execution_header_carries_the_turns_trajectory(client, db, model):
+    answer = respond("SENTINEL-REPLY")
+    model.generate_turn.side_effect = [
+        ModelTurn(
+            content=answer.content,
+            tool_calls=answer.tool_calls,
+            usage={"input_tokens": 900, "output_tokens": 30, "total_tokens": 930},
+            model="gemini-reported-001",
+        )
+    ]
+
+    response = client.post(
+        "/coach/message", headers=bearer(7), json={"message": "SENTINEL-MESSAGE"}
+    )
+
+    shown = execution(response)
+    assert shown["model"] == "fake" and shown["models_reported"] == ["gemini-reported-001"]
+    assert (shown["tokens_input"], shown["tokens_output"], shown["tokens_total"]) == (900, 30, 930)
+    assert shown["tokens_source"] == "provider_reported" and shown["proposal_outcome"] == "not_attempted"
+    assert (shown["tool_calls_requested"], shown["tool_calls_blocked"]) == (0, 0)
+    assert shown["request_completed"] is True and shown["retry_rounds_entered"] == 0
+    assert shown["trajectory"][0].endswith("start") and shown["trajectory"][-1].split(":")[1] == "done"
+    assert len(shown["model_request_ms"]) == 1 and shown["latency_turn_ms"] >= 0
+    assert "SENTINEL" not in json.dumps(dict(response.headers))
+
+
 def test_a_flagged_request_shows_its_safety_category(client, db, model):
     model.generate_turn.side_effect = [
         respond(
