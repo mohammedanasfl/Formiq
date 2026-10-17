@@ -319,9 +319,12 @@ def test_a_model_that_keeps_misstating_the_length_ends_within_the_bounds():
     state = run(provider, proposal_tools(PROPOSED_26), MESSAGE)
 
     assert provider.generate_turn.call_count <= MAX_TOOL_ITERATIONS + PROPOSAL_RETRY_ROUNDS + 1
-    # the wrong length never reached the user: the turn ends with Formiq's own reply
-    assert state["final_response"] == CANNOT_ANSWER_REPLY
+    # the wrong length never reached the user: the turn ends with Formiq's own reply, which
+    # says the proposal's own figures (the proposal Formiq accepted is shown: see
+    # test_coach_accepted_proposal_fallback)
+    assert state["final_response"] != CANNOT_ANSWER_REPLY
     assert "40-minute" not in state["final_response"]
+    assert "about 26 minutes in all" in state["final_response"]
 
 
 def test_the_time_the_user_has_is_not_taken_for_the_workouts_length():

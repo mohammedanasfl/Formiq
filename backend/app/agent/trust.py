@@ -114,6 +114,17 @@ REPLY_PROBLEMS = {
     REPLY_CLAIMS_UNDONE: "undone_exercise_claim",
 }
 
+
+def is_reply_problem(rejection: str | None) -> bool:
+    """Whether a rejection is one of the reply's (REPLY_PROBLEMS) and not the
+    decision's: the graph checks the decision first, so a reply is rejected only
+    after the decision passed. The duration problem carries the proposal's own
+    figures after it when the model is told (graph.check_respond)."""
+    return rejection is not None and any(
+        rejection.startswith(problem) for problem in REPLY_PROBLEMS
+    )
+
+
 # A reply sharing this many words in a row with the instructions repeats them.
 # Ten words are far more than ordinary phrases two texts share by chance, and
 # far less than any rule worth extracting.

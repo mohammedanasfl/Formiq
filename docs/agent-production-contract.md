@@ -168,6 +168,10 @@ Code checks it against what the turn actually retrieved.
   2026-10-17: the coach tried twice, both were refused, and it said it had proposed an updated
   workout beside the unchanged card). Offers and negations ("I can propose a new version", "I
   haven't proposed anything new", "I tried to propose it, but Formiq refused") claim nothing.
+  A refused reply never reaches the user, whatever the round: the model corrects it within the
+  limits of section 6, and if it never does, the turn ends with Formiq's own reply, which with a
+  proposal Formiq accepted in the turn is worked out from its card (section 6), and otherwise is
+  the "nothing was proposed" or "could not answer" reply.
 - **A reply that explains the proposal the user is shown is not a claim of a new one.** A turn
   that makes no proposal shows the user the proposal awaiting approval again, unchanged, with the
   reply, so the reply may then describe it ("below", "here is the proposal", how the coach
@@ -222,6 +226,32 @@ accepted; in it the model may only propose again or decide. A turn that tried to
 propose and ends with no acceptable decision says that nothing was proposed (never the model's
 text). The live QA of 2026-10-15 found proposal turns ending with nothing after a refusal in the
 last rounds: this is the bounded room to correct one, not a larger general budget.
+
+**A proposal Formiq accepted is not lost to the model's wording.** A turn that ends at its limit
+with a proposal Formiq accepted in the turn, where the last decision the model gave passed the
+decision policy and is an answer and only its reply was refused (a claim of a change, an approval
+or a proposal, a wrong length, an internal name: any of the reply checks of section 5), shows that
+proposal, as any answer does (section 8), and the reply is Formiq's own, worked out from the
+proposal's card and never the model's text: how long the workout takes (its minutes, as Formiq
+worked them out, and each section's), how many main exercises it has, that it replaces a saved
+workout only if the user approves this one (without naming it, a revision), that Formiq's catalog
+could not cover its focus (an incomplete one), and that it is not saved and waits for the user's
+approval. The decision stands as the model gave it, since it was checked. This changes nothing
+else: no request is added (the limit was already reached), the proposal is kept for approval
+exactly as any shown one, pending until the user approves it, and the trajectory still records
+the turn as ended at its limit (`retry_limit_reached`) with its proposal created, so the QA can
+count it. It applies only when all of these hold; otherwise the turn ends as before, with the
+generic reply and no card, or with "nothing was proposed" when every proposal was refused:
+
+- a proposal call was accepted by Formiq in the turn: a proposal it refused (however many), and a
+  read of the proposal awaiting approval, show nothing;
+- the last respond call was valid, its decision passed the decision policy and answers the user
+  (`ANSWER` or `RETRIEVE_THEN_ANSWER`): a refused decision, a call that is no decision, a
+  clarification and a "cannot answer" are not Formiq's to turn into an answer;
+- the card carries the figures to say (its minutes and its main exercises): none is guessed.
+
+The live QA of 2026-10-17 found 3 of 30 accepted proposals dropped this way, each after a refused
+change claim, and the user got the generic reply for work Formiq had accepted.
 
 Failures fail closed and say nothing internal:
 
@@ -424,6 +454,11 @@ What is **not** guaranteed today:
     the check cannot tell it from the same words said of a change made now, except by the user's
     own message and the markers in `app.agent.trust`. The user is shown the proposal as it is
     kept, with the reply.
+14. **An accepted proposal is still lost when the model's decision, not its reply, is refused at the
+    limit** (an intent or decision the policy rejects, a call that is no decision, a clarification
+    or a "cannot answer"), or when its card lacks the figures to say (section 6): the turn ends with
+    the generic reply and no card. Only a refused reply is replaced, because only the reply is
+    Formiq's to replace; the decision is the model's, checked, and is never taken for it.
 
 Changing a guarantee here is an architectural decision: it needs an explicit decision, an update to
 this document, and tests. It is never a test to relax.

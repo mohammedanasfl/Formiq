@@ -100,7 +100,13 @@ from app.agent.policy import (
 from app.agent.safety import SafetyAssessment, assess_safety
 from app.agent.state import CoachState
 from app.agent.trace_metadata import call_metadata, result_metadata
-from app.agent.trust import REPLY_MISSTATES_DURATION, REPLY_PROBLEMS, ProposalLength, reply_problem
+from app.agent.trust import (
+    REPLY_MISSTATES_DURATION,
+    REPLY_PROBLEMS,
+    ProposalLength,
+    is_reply_problem,
+    reply_problem,
+)
 from app.ai import (
     AIModelOutputError,
     AIProviderError,
@@ -150,6 +156,29 @@ PROPOSAL_NOT_MADE_REPLY = (
     "I couldn't put together a workout that passes Formiq's checks this time, so nothing was "
     "proposed. Please try again, or tell me more about what you need, such as how much time "
     "you have, your equipment or the part of the body to train."
+)
+
+# The reply when a turn made a proposal and only the model's own reply to it was
+# refused, until the limit: the proposal is shown, with what its card says and
+# nothing the model wrote (proposal_card_reply). It is not saved: only the user's
+# approval saves it.
+CARD_REPLY_LEAD = (
+    "Here is the workout Formiq built for you: about {total} minutes in all ({warm_up} minutes "
+    "of warm-up, {main} of main work and {cool_down} of cool-down), with {exercises} main "
+    "{noun}."
+)
+CARD_REPLY_REVISION = (
+    " It is a replacement for one of your saved workouts: that workout stays as it is unless "
+    "you approve this one."
+)
+CARD_REPLY_INCOMPLETE = (
+    " Formiq could not cover every part of its focus with the exercises it has for you: the "
+    "card says what is missing."
+)
+CARD_REPLY_CLOSE = (
+    " It is not saved yet and waits for your approval: review the card below and approve it in "
+    "Formiq to save it. I couldn't write a reliable explanation of it this time, so this "
+    "summary comes from the workout itself."
 )
 
 # error codes of the results that the graph itself gives the model
@@ -739,6 +768,7 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
     seen = seen_results(state, context)
 
     respond = None
+    rejection = None
     if len(calls) == 1 and calls[0].name == RESPOND.name:
         respond, rejection = check_respond(
             calls[0], seen, assessment, COACH_INSTRUCTIONS, tool_names(context), trace,
@@ -783,6 +813,22 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
         # past the limit only a decision could end the turn, and none was accepted
         logger.warning("The coach reached no acceptable decision: %s", results[0])
         trace.terminate("retry_limit_reached")
+        if respond is not None and (card := proposal_card_reply(respond, rejection, earlier)):
+            # The proposal Formiq accepted is shown, and only the model's reply to it was
+            # refused: the decision it gave passed, so it stands, with Formiq's own words.
+            logger.warning(
+                "The coach's reply to its accepted proposal was refused until the limit; "
+                "the proposal is shown with Formiq's own reply"
+            )
+            update.update(
+                finish(
+                    card,
+                    CoachDecision(
+                        respond.intent, respond.decision, tools_used(earlier), assessment.category
+                    ),
+                )
+            )
+            return update
         # a turn that tried to propose says that nothing was, whatever the model wrote
         attempted = proposal_attempted(earlier)
         update["final_response"] = (
@@ -1378,6 +1424,67 @@ def proposal_attempted(results: Sequence[ToolResult]) -> bool:
     """Whether the turn tried to make a proposal, whether or not Formiq
     accepted it."""
     return any(access_of(result.call.name) is Access.PROPOSE for result in results)
+
+
+def proposal_card_reply(
+    respond: Respond, rejection: str | None, results: Sequence[ToolResult]
+) -> str | None:
+    """Formiq's own reply for a turn whose last decision was refused only for its
+    reply: the proposal Formiq accepted in the turn is then shown, and what is
+    said of it is worked out from its card (the last one the tools returned;
+    a turn accepts one), never taken from the model. None when it does not apply:
+    the decision itself was refused (the model's intent or decision, which Formiq
+    does not take for it), the decision was no answer (the user is shown a
+    proposal only with an answer), the turn accepted no proposal (a read of the
+    pending one, or a refused one, is none), or the card lacks a figure to say.
+    Showing it approves nothing: the proposal waits for the user's approval."""
+    if respond.decision not in ANSWERS or not is_reply_problem(rejection):
+        return None
+    cards = [
+        result.result["output"]
+        for result in results
+        if access_of(result.call.name) is Access.PROPOSE
+        and isinstance(result.result.get("output"), dict)
+    ]
+    return card_reply(cards[-1]) if cards else None
+
+
+def card_reply(card: dict[str, Any]) -> str | None:
+    """What a proposal's card says, in Formiq's words: its minutes (as Formiq
+    worked them out), its main exercises, whether it replaces a saved workout
+    and whether it covers its focus. None when a figure is not there to be read."""
+    figures = {
+        name: card.get(name)
+        for name in ("estimated_minutes", "warm_up_minutes", "main_minutes", "cool_down_minutes")
+    }
+    items = card.get("exercises")
+    if not isinstance(items, list) or not all(
+        isinstance(value, int) and not isinstance(value, bool) for value in figures.values()
+    ):
+        return None
+    main = sum(
+        1 for item in items if isinstance(item, dict) and item.get("section") == "MAIN_WORKOUT"
+    )
+    if main == 0:
+        return None
+    coverage = card.get("coverage")
+    return (
+        CARD_REPLY_LEAD.format(
+            total=figures["estimated_minutes"],
+            warm_up=figures["warm_up_minutes"],
+            main=figures["main_minutes"],
+            cool_down=figures["cool_down_minutes"],
+            exercises=main,
+            noun="exercise" if main == 1 else "exercises",
+        )
+        + (CARD_REPLY_REVISION if isinstance(card.get("revision"), dict) else "")
+        + (
+            CARD_REPLY_INCOMPLETE
+            if isinstance(coverage, dict) and coverage.get("complete") is False
+            else ""
+        )
+        + CARD_REPLY_CLOSE
+    )
 
 
 def explaining_proposal(
