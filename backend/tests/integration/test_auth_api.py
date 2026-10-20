@@ -293,6 +293,7 @@ PROTECTED = [
     ("get", "/users/{one}/profile", None),
     ("get", "/users/{one}/workout-plans", None),
     ("get", "/users/{one}/workout-sessions", None),
+    ("post", "/users/{one}/workout-sessions/1/recovery-summary", {"warning_signs": ["DARK_URINE"]}),
     ("post", "/coach/message", {"message": "What is my name?"}),
 ]
 
@@ -376,6 +377,7 @@ OTHER_USERS = [
     ("get", "/users/{user}/workout-sessions/{session}", None),
     ("patch", "/users/{user}/workout-sessions/{session}", {"notes": "Mine now"}),
     ("delete", "/users/{user}/workout-sessions/{session}", None),
+    ("post", "/users/{user}/workout-sessions/{session}/recovery-summary", {}),
 ]
 
 

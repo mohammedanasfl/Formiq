@@ -11,6 +11,7 @@ import json
 import pytest
 
 from app.catalog import classification, free_exercise_db
+from app.catalog import patterns as catalog_patterns
 from app.catalog.free_exercise_db import (
     SOURCE_FILE,
     SOURCE_SHA256,
@@ -130,11 +131,16 @@ def test_a_record_keeps_every_field_and_is_mapped_to_formiqs_catalog():
     assert exercise.source_id == "Alternate_Incline_Dumbbell_Curl"
     assert exercise.name == "Alternate Incline Dumbbell Curl"
     assert exercise.difficulty is Difficulty.BEGINNER
-    assert exercise.movement_pattern is None
+    # a curl is one joint: the rules of app.catalog.patterns say so
+    assert exercise.movement_pattern is MovementPattern.ISOLATION
     assert exercise.muscles == {"Biceps": MuscleRole.PRIMARY, "Forearms": MuscleRole.SECONDARY}
     assert exercise.equipment == ["Dumbbell"]
     assert exercise.uses == [WorkoutSection.MAIN_WORKOUT]
     assert exercise.image_paths == RECORD["images"]
+    assert exercise.description == (
+        "A beginner single-joint exercise for the biceps, with the forearms helping. "
+        "Equipment: dumbbell."
+    )
     assert exercise.warnings == []
 
 
@@ -275,11 +281,37 @@ def test_every_upstream_value_has_a_mapping():
     assert set(schema) == free_exercise_db.FIELDS
 
 
-def test_only_cardio_gets_a_movement_pattern(parsed, by_id):
+def test_the_listed_activities_keep_their_patterns_and_the_rest_are_classified_by_rules(
+    parsed, by_id
+):
     patterns = {item.source_id: item.movement_pattern for item in parsed.exercises}
+    classified = (
+        classification.WARM_UP_DRILLS | classification.COOL_DOWN_STRETCHES
+    ) - set(classification.ACTIVITY_DUPLICATES)
 
-    assert {by_id[source_id]["category"] for source_id, p in patterns.items() if p} == {"cardio"}
-    assert set(patterns.values()) == {None, MovementPattern.CARDIO}
+    # the lists decide the warm-up and cool-down activities: a drill or foam rolling is MOBILITY,
+    # a held stretch STRETCH, and every cardio record is CARDIO
+    for source_id in classified:
+        assert patterns[source_id] in (MovementPattern.MOBILITY, MovementPattern.STRETCH)
+    for source_id, item in by_id.items():
+        if item["category"] == "cardio":
+            assert patterns[source_id] is MovementPattern.CARDIO
+    # a hidden duplicate of a drill or a stretch stays unclassified
+    for source_id in classification.HIDDEN_DUPLICATE_IDS:
+        assert patterns[source_id] in (None, MovementPattern.CARDIO), source_id
+    # MOBILITY and STRETCH go beyond the lists only by hand (app.catalog.patterns.OTHER_PATTERNS)
+    beyond = {
+        source_id
+        for source_id, p in patterns.items()
+        if p in (MovementPattern.MOBILITY, MovementPattern.STRETCH)
+    } - classified
+    assert beyond == {
+        source_id
+        for source_id, p in catalog_patterns.OTHER_PATTERNS.items()
+        if p in (MovementPattern.MOBILITY, MovementPattern.STRETCH)
+    }
+    # and every pattern is given to someone (tests/unit/test_movement_patterns.py has the counts)
+    assert set(patterns.values()) == {None, *MovementPattern}
 
 
 # --- Formiq's classification ---
@@ -292,7 +324,9 @@ def test_every_classified_id_is_in_the_dataset(by_id):
         | classification.NO_EQUIPMENT_NEEDED
         | classification.EXTRA_MAIN_WORKOUT
         | set(classification.EQUIPMENT_NEEDED)
+        | set(classification.EQUIPMENT_NAMED)
         | set(classification.FORMIQ_DUPLICATES)
+        | set(classification.ACTIVITY_DUPLICATES)
     )
 
     assert listed - set(by_id) == set()
@@ -331,13 +365,16 @@ def test_not_every_stretch_is_a_warm_up_or_cool_down(parsed, by_id):
         ("Mountain_Climbers", ["MAIN_WORKOUT"]),
         ("Inverted_Row", []),
         # easy cardio warms up and cools down; jogging only warms up
-        ("Walking_Treadmill", ["WARM_UP", "COOL_DOWN"]),
+        ("Recumbent_Bike", ["WARM_UP", "COOL_DOWN"]),
         ("Jogging_Treadmill", ["WARM_UP"]),
         ("Rope_Jumping", []),
         # a dynamic drill warms up, a held stretch cools down, foam rolling does both
         ("Arm_Circles", ["WARM_UP"]),
-        ("Triceps_Stretch", ["COOL_DOWN"]),
+        ("Tricep_Side_Stretch", ["COOL_DOWN"]),
         ("Hamstring-SMR", ["WARM_UP", "COOL_DOWN"]),
+        # a copy of an activity the catalog keeps under another name suits nothing
+        ("Walking_Treadmill", []),
+        ("Triceps_Stretch", []),
         # a core exercise filed under stretching is a main exercise
         ("Superman", ["MAIN_WORKOUT"]),
         # a pull-up trains, with the bar Formiq links it to
@@ -361,12 +398,14 @@ def test_the_classification_counts(parsed):
         for section in WorkoutSection
     }
 
+    # 24 warm-ups and 53 cool-downs before the 13 duplicates (ACTIVITY_DUPLICATES)
+    # were hidden: 4 of them were warm-ups and 11 were cool-downs (2 were both)
     assert counts == {
-        WorkoutSection.WARM_UP: 24,
+        WorkoutSection.WARM_UP: 20,
         WorkoutSection.MAIN_WORKOUT: 729,
-        WorkoutSection.COOL_DOWN: 53,
+        WorkoutSection.COOL_DOWN: 42,
     }
-    assert sum(not item.uses for item in parsed.exercises) == 76
+    assert sum(not item.uses for item in parsed.exercises) == 76 + 13
 
 
 @pytest.mark.parametrize("source_id", sorted(classification.EQUIPMENT_NEEDED))
@@ -379,9 +418,31 @@ def test_formiq_names_the_equipment_a_body_only_record_needs(parsed, by_id, sour
     assert item.record == by_id[source_id]
 
 
+@pytest.mark.parametrize("source_id", sorted(classification.EQUIPMENT_NAMED))
+def test_formiq_names_the_equipment_a_machine_record_means(parsed, by_id, source_id):
+    """A treadmill record says "machine", and so does a recumbent bike's: the catalog
+    names what they are, so a user who has one is found by that name."""
+    item = next(item for item in parsed.exercises if item.source_id == source_id)
+
+    assert by_id[source_id]["equipment"] == "machine"
+    assert item.equipment == list(classification.EQUIPMENT_NAMED[source_id])
+    assert item.equipment != ["Machine"]
+    # the record is kept as it was
+    assert item.record == by_id[source_id]
+
+
+def test_the_hidden_duplicates_are_the_two_duplicate_lists(by_id):
+    assert classification.HIDDEN_DUPLICATE_IDS == (
+        set(classification.FORMIQ_DUPLICATES) | set(classification.ACTIVITY_DUPLICATES)
+    )
+    assert len(classification.HIDDEN_DUPLICATE_IDS) == 5 + 13
+    assert classification.HIDDEN_DUPLICATE_IDS <= set(by_id)
+
+
 def test_every_other_record_keeps_its_own_equipment(parsed, by_id):
     for item in parsed.exercises:
-        if item.source_id in classification.EQUIPMENT_NEEDED:
+        corrected = set(classification.EQUIPMENT_NEEDED) | set(classification.EQUIPMENT_NAMED)
+        if item.source_id in corrected:
             continue
         named = by_id[item.source_id]["equipment"]
         mapped = free_exercise_db.EQUIPMENT.get(named) if named else None

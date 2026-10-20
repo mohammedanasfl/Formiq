@@ -38,6 +38,7 @@ from app.services import UserProfileService, UserService, WorkoutPlanService
 from app.tools.limits import MAX_EXERCISES, MAX_TEXT_LENGTH
 from tests.auth import bearer
 from tests.integration.agent_fixtures import create_fixtures
+from tests.observability import comparable
 from tests.reliability import (
     EchoModel,
     TrackedSessions,
@@ -125,7 +126,7 @@ def test_request_after_request_nothing_builds_up(api, fixtures, sessions, test_e
     # each kind of request costs the same every time: no counter carries over
     by_kind: dict[int, list[dict]] = {}
     for number, root in enumerate(backend.roots()):
-        by_kind.setdefault(number % 4, []).append({**root.metadata, "request_id": None})
+        by_kind.setdefault(number % 4, []).append(comparable(root.metadata))
     for traces in by_kind.values():
         assert all(trace == traces[0] for trace in traces)
     # the reply check's cache is bounded

@@ -5,6 +5,7 @@ from typing import Annotated, TypedDict
 from app.agent.context import (
     ConversationContext,
     ConversationTurn,
+    EquipmentSaid,
     compact_conversation,
 )
 from app.agent.policy import CoachDecision
@@ -48,13 +49,16 @@ class CoachState(TypedDict):
 
 
 def initial_state(
-    user_message: str, conversation: Sequence[ConversationTurn] = ()
+    user_message: str,
+    conversation: Sequence[ConversationTurn] = (),
+    equipment: EquipmentSaid | None = None,
 ) -> CoachState:
     """The state a turn starts from: the user's message and the bounded earlier
-    conversation, and nothing else yet."""
+    conversation (with the equipment the user said they have or lack in all of
+    it, when the caller read that), and nothing else yet."""
     return {
         "user_message": user_message,
-        "conversation": compact_conversation(conversation),
+        "conversation": compact_conversation(conversation, equipment),
         "messages": [],
         "iteration_count": 0,
         "context_compactions": 0,

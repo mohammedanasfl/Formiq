@@ -355,13 +355,21 @@ SEARCH_EXERCISES = ToolDeclaration(
         "Find active exercises in the Formiq exercise catalog that match every filter "
         "given. At least one filter is required. Returns at most "
         f"{MAX_SEARCH_RESULTS} exercises, the most relevant first (easy CARDIO first for a "
-        "warm-up or cool-down, Formiq's classified exercises first, a mix of muscles), and "
-        "how many match. Use it to suggest exercises or alternatives from the catalog: use "
+        "warm-up or cool-down, then the activities for the muscles the user named or the "
+        "main exercises already found, Formiq's classified exercises first, a mix of "
+        "muscles), and how many match. When the user names an exercise, look for it by "
+        "name before saying the catalog does not have it. Use it to suggest exercises or "
+        "alternatives from the catalog: use "
         "finds main exercises (MAIN_WORKOUT) and warm-up (WARM_UP) and cool-down (COOL_DOWN) "
         "activities. Narrow it with muscle and available_equipment, so the few results "
         "returned fit the user; one search per section usually gives enough to choose from. "
         "Once main exercises were found, each warm-up and cool-down activity says which of "
-        "them it suits (suits_main: their ids, or any)."
+        "them it suits (suits_main: their ids, or any). A search by use that finds nothing "
+        "says only that nothing matched it: when the catalog has exercises that match the "
+        "other filters and that Formiq uses for another section, matches_for_other_uses "
+        "names a few. They are not results for that use, and not a choice for it. When more "
+        "exercises match than are returned, a note says so: those returned are only some of "
+        "the matches."
     ),
     parameters={
         "type": "object",
@@ -408,6 +416,19 @@ SEARCH_EXERCISES = ToolDeclaration(
                 "type": "string",
                 "enum": [difficulty.value for difficulty in Difficulty],
                 "description": "The exercise's difficulty.",
+            },
+            "name": {
+                "type": "string",
+                "description": (
+                    "Words of the exercise's name, such as 'hip circle', 'cat cow' or 'push "
+                    "up': every word must be in the name (plural or singular, hyphens and "
+                    "case do not matter). For when the user names an exercise: a name the "
+                    "catalog keeps as another (a duplicate) finds that one. Search by name "
+                    "without use, so the exercise is found whichever section it is for (its "
+                    "uses say where Formiq uses it). Use few words, the main ones; if nothing "
+                    "matches, try fewer or search by muscle before saying the catalog does not "
+                    "have it. Never an id."
+                ),
             },
         },
     },

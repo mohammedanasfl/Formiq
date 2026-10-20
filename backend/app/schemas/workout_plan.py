@@ -79,8 +79,9 @@ class PlannedExerciseDetailsResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     name: str
-    # Formiq's own short description; null for an imported exercise, whose
-    # upstream record has none
+    # Formiq's own description (the steps, a suggested dose and a safety note);
+    # null for an imported exercise, whose upstream record has none, apart from
+    # the few easy cardio activities Formiq describes beside the record
     description: str | None
     # the upstream record's steps, in order and unchanged; empty for Formiq's
     # own exercises and for an imported one whose record has none

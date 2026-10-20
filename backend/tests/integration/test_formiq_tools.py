@@ -501,14 +501,69 @@ def test_search_by_difficulty(tools, user):
 
 
 @pytest.mark.parametrize(
-    ("pattern", "count"), [("MOBILITY", 8), ("STRETCH", 10), ("CARDIO", 5)]
+    ("pattern", "total"), [("MOBILITY", 21), ("STRETCH", 16), ("CARDIO", 7)]
 )
-def test_search_finds_every_warm_up_and_cool_down_activity_of_a_kind(tools, user, pattern, count):
-    # each kind fits in one search, so the coach sees all of them
+def test_a_kind_of_warm_up_or_cool_down_activity_says_how_many_there_are(
+    tools, user, pattern, total
+):
+    # the drills and the stretches are more than one search returns (they were 8 and 10,
+    # which fit): the first come back, with how many match, and the coach narrows by muscle
     result = run(tools, "search_exercises", user_id=user.id, movement_pattern=pattern)
 
-    assert result["output"]["count"] == count <= MAX_SEARCH_RESULTS
+    assert result["output"]["total_matches"] == total
+    assert result["output"]["count"] == min(total, MAX_SEARCH_RESULTS)
     assert {item["difficulty"] for item in result["output"]["exercises"]} == {"BEGINNER"}
+
+
+ACTIVITY_MUSCLES = (
+    "Chest",
+    "Upper Back",
+    "Lats",
+    "Shoulders",
+    "Biceps",
+    "Triceps",
+    "Core",
+    "Glutes",
+    "Quadriceps",
+    "Hamstrings",
+    "Calves",
+)
+
+
+@pytest.mark.parametrize("pattern", ["MOBILITY", "STRETCH"])
+@pytest.mark.parametrize("muscle", ACTIVITY_MUSCLES)
+def test_a_kind_of_activity_narrowed_by_a_muscle_fits_one_search(tools, user, pattern, muscle):
+    # so the coach sees every drill or stretch for a muscle the main exercises train
+    result = run(
+        tools, "search_exercises", user_id=user.id, movement_pattern=pattern, muscle=muscle
+    )
+
+    assert result["output"]["total_matches"] == result["output"]["count"] <= MAX_SEARCH_RESULTS
+
+
+@pytest.mark.parametrize(
+    ("pattern", "muscle", "name"),
+    [
+        ("MOBILITY", "Triceps", "Wall Push-Up"),
+        ("MOBILITY", "Triceps", "Light Band Triceps Pushdown"),
+        ("MOBILITY", "Biceps", "Light Band Biceps Curl"),
+        ("MOBILITY", "Chest", "Wall Push-Up"),
+        ("MOBILITY", "Core", "Lying Pelvic Tilt"),
+        ("MOBILITY", "Core", "Standing Cross-Crawl"),
+        ("STRETCH", "Biceps", "Wall Biceps Stretch"),
+        ("STRETCH", "Forearms", "Wrist Extensor Stretch"),
+        ("STRETCH", "Adductors", "Butterfly Stretch"),
+        ("STRETCH", "Obliques", "Seated Spinal Twist"),
+    ],
+)
+def test_a_search_by_kind_and_muscle_finds_the_activities_added_for_that_muscle(
+    tools, user, pattern, muscle, name
+):
+    result = run(
+        tools, "search_exercises", user_id=user.id, movement_pattern=pattern, muscle=muscle
+    )
+
+    assert name in [item["name"] for item in result["output"]["exercises"]]
 
 
 def test_search_with_combined_filters(tools, user):
@@ -535,17 +590,18 @@ def test_search_combines_equipment_with_the_other_filters(tools, db_session, use
     assert names(result) == ["Test Band Hinge"]
 
 
-def test_search_returns_at_most_ten_exercises(tools, db_session, user):
+def test_search_returns_at_most_fifteen_exercises(tools, db_session, user):
     rack = add_equipment(db_session, "Test Rack")
     for number in range(MAX_SEARCH_RESULTS + 2):
         add_exercise(db_session, f"Test Rack Exercise {number:02}", equipment=[rack])
 
     result = run(tools, "search_exercises", user_id=user.id, equipment=rack.name)
 
-    assert result["output"]["count"] == MAX_SEARCH_RESULTS == 10
-    # and says how many match in all
+    assert result["output"]["count"] == MAX_SEARCH_RESULTS == 15
+    # and says how many match in all, and that this is not all of them
     assert result["output"]["total_matches"] == MAX_SEARCH_RESULTS + 2
-    assert names(result) == [f"Test Rack Exercise {number:02}" for number in range(10)]
+    assert result["output"]["note"].startswith("Showing 15 of 17 matches")
+    assert names(result) == [f"Test Rack Exercise {number:02}" for number in range(15)]
 
 
 def test_search_without_matches(tools, db_session, user):
@@ -572,7 +628,7 @@ def test_search_without_filters_is_rejected(tools, user):
     assert result["error"]["code"] == "INVALID_INPUT"
     assert (
         "at least one of use, muscle, available_equipment, equipment, movement_pattern, "
-        "difficulty is required" in result["error"]["message"]
+        "difficulty, name is required" in result["error"]["message"]
     )
 
 
@@ -610,15 +666,16 @@ def test_search_by_muscle_name_and_the_equipment_the_user_has(tools, db_session,
         result = run(tools, "search_exercises", user_id=user.id, muscle="test glutes", **filters)
         return names(result)
 
-    assert found() == ["Test Band Walk", "Test Bar Thrust", "Test Bridge"]
+    # what a section uses first (a search says which exercises can go into a workout), then by name
+    assert found() == ["Test Bridge", "Test Band Walk", "Test Bar Thrust"]
     # an empty list: only what needs no equipment at all
     assert found(available_equipment=[]) == ["Test Bridge"]
     # only what needs nothing beyond what the user has, matched without case
-    assert found(available_equipment=["test loop band"]) == ["Test Band Walk", "Test Bridge"]
+    assert found(available_equipment=["test loop band"]) == ["Test Bridge", "Test Band Walk"]
     assert found(available_equipment=["Test Loop Band", "Test Bar"]) == [
+        "Test Bridge",
         "Test Band Walk",
         "Test Bar Thrust",
-        "Test Bridge",
     ]
     assert found(available_equipment=[], use="MAIN_WORKOUT") == ["Test Bridge"]
 
@@ -759,19 +816,20 @@ def test_the_few_results_returned_cover_several_muscles(tools, db_session, user)
     rack = add_equipment(db_session, "Test Rack")
     legs = add_muscle_group(db_session, "Test Legs")
     arms = add_muscle_group(db_session, "Test Arms")
-    for number in range(8):
+    for number in range(10):
         add_exercise(db_session, f"Test L {number}", primary=[legs], equipment=[rack])
-    for number in range(4):
+    for number in range(6):
         add_exercise(db_session, f"Test M {number}", primary=[arms], equipment=[rack])
 
     result = run(tools, "search_exercises", user_id=user.id, equipment=rack.name)
 
     # bounded, and saying how many match in all
-    assert (result["output"]["count"], result["output"]["total_matches"]) == (10, 12)
-    # every arms exercise, where the first ten names would hold two of them
+    assert (result["output"]["count"], result["output"]["total_matches"]) == (15, 16)
+    # every arms exercise, where the first fifteen names would hold only three of them
     assert names(result) == [
         "Test L 0", "Test M 0", "Test L 1", "Test M 1", "Test L 2", "Test M 2",
-        "Test L 3", "Test M 3", "Test L 4", "Test L 5",
+        "Test L 3", "Test M 3", "Test L 4", "Test M 4", "Test L 5", "Test M 5",
+        "Test L 6", "Test L 7", "Test L 8",
     ]  # fmt: skip
 
 

@@ -14,7 +14,7 @@ import copy
 import pytest
 from sqlalchemy import func, select
 
-from app.catalog import classification, free_exercise_db
+from app.catalog import classification, descriptions, free_exercise_db
 from app.catalog.free_exercise_db import SOURCE_VERSION
 from app.models import Exercise, ExerciseMuscle, User, WorkoutPlan, WorkoutPlanExercise
 from app.repositories.exercise_repository import LOAD_MUSCLES_AND_EQUIPMENT
@@ -69,7 +69,8 @@ def test_the_import_reports_what_it_did(imported_catalog):
     # three of the listed images are in the images directory
     assert (summary.images_registered, summary.images_missing) == (3, 1717)
     assert summary.not_in_source == []
-    assert summary.uses == {"WARM_UP": 22, "MAIN_WORKOUT": 720, "COOL_DOWN": 52}
+    # 22 and 52 before the 13 duplicates of an activity were hidden (4 warm-ups, 11 cool-downs)
+    assert summary.uses == {"WARM_UP": 18, "MAIN_WORKOUT": 720, "COOL_DOWN": 41}
 
 
 def test_an_exercise_formiq_already_has_is_skipped_never_duplicated(
@@ -104,15 +105,28 @@ def test_every_source_field_is_kept_and_the_ids_are_kept_apart(imported_catalog,
         assert exercise.source_record == record
         assert exercise.source_version == SOURCE_VERSION
         # the steps and images in their upstream order
-        assert exercise.instructions == record["instructions"]
+        # (the cardio records whose steps are a machine's menu have Formiq's description
+        # instead: that menu is not read as steps)
+        assert exercise.instructions == (
+            [] if record["id"] in descriptions.REPLACES_STEPS else record["instructions"]
+        )
         assert exercise.category == record["category"]
         assert exercise.name == record["name"]
         # Formiq's id is its own; the upstream id is kept apart
         assert isinstance(exercise.id, int)
         assert exercise.source_id == record["id"] != str(exercise.id)
-        assert exercise.description is None
+        # the dataset has no description: Formiq's own words for every one it shows, written for
+        # a few and generated from the record's facts for the rest, and none for a hidden duplicate
+        # (but the two cardio ones whose calorie estimate would be shown)
+        if record["id"] in classification.HIDDEN_DUPLICATE_IDS:
+            assert exercise.description == descriptions.DESCRIPTIONS.get(record["id"])
+        else:
+            assert exercise.description
+        written = descriptions.description_of(record["id"])
+        if written is not None:
+            assert exercise.description == written
         # the muscles and equipment the record names, in Formiq's catalog, but
-        # for the equipment Formiq corrects
+        # for the equipment Formiq corrects or names more exactly
         assert {link.muscle_group.name for link in exercise.muscles} == {
             free_exercise_db.MUSCLES[name]
             for name in record["primaryMuscles"] + record["secondaryMuscles"]
@@ -120,7 +134,8 @@ def test_every_source_field_is_kept_and_the_ids_are_kept_apart(imported_catalog,
         mapped = (
             free_exercise_db.EQUIPMENT.get(record["equipment"]) if record["equipment"] else None
         )
-        expected = classification.EQUIPMENT_NEEDED.get(record["id"], [mapped] if mapped else [])
+        corrected = {**classification.EQUIPMENT_NAMED, **classification.EQUIPMENT_NEEDED}
+        expected = corrected.get(record["id"], [mapped] if mapped else [])
         assert {item.name for item in exercise.equipment} == set(expected)
         # a valid catalog entry
         ExerciseResponse.model_validate(exercise)

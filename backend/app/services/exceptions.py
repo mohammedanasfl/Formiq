@@ -114,6 +114,10 @@ class WorkoutSessionNotEditableError(WorkoutSessionConflictError):
     """The session is COMPLETED or CANCELLED: its history cannot be changed."""
 
 
+class WorkoutSessionNotCompletedError(WorkoutSessionConflictError):
+    """The session is IN_PROGRESS or CANCELLED: only a COMPLETED one has a recovery summary."""
+
+
 class WorkoutSessionNotDeletableError(WorkoutSessionConflictError):
     """Only IN_PROGRESS sessions can be deleted; finished sessions are history."""
 

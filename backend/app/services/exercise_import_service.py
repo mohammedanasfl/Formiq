@@ -151,7 +151,7 @@ class ExerciseImportService:
             summary.images_missing += len(item.image_paths) - len(image_paths)
             values = {
                 "name": item.name,
-                "description": None,
+                "description": item.description,
                 "difficulty": item.difficulty,
                 "movement_pattern": item.movement_pattern,
                 "uses": [str(use) for use in item.uses],

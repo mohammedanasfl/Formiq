@@ -285,6 +285,12 @@ def test_only_the_first_calls_of_a_turn_run(tools, services):
     assert {error_code(result) for result in results[MAX_EXECUTED_TOOL_CALLS_PER_TURN:]} == {
         "TOOL_LIMIT_REACHED"
     }
+    # a call that was not run says to ask again before proposing, so a search the limit
+    # dropped is not silently replaced by choosing from the others' results (live QA,
+    # 2026-10-19: the cool-down search was the one dropped in 4 of 25 turns)
+    refused = results[MAX_EXECUTED_TOOL_CALLS_PER_TURN]["error"]["message"]
+    assert "this one was not: if you still need what it asks for" in refused
+    assert "call it again in your next round, before you propose" in refused
     assert services.catalog.get_exercise_by_id.call_count == MAX_EXECUTED_TOOL_CALLS_PER_TURN
 
 
@@ -315,7 +321,8 @@ def test_search_results_come_in_one_order_whatever_order_they_were_found_in():
     def match(exercise_id, name, pattern, muscle):
         primary = SimpleNamespace(muscle_group=SimpleNamespace(name=muscle), role="PRIMARY")
         return SimpleNamespace(
-            id=exercise_id, name=name, movement_pattern=pattern, muscles=[primary]
+            id=exercise_id, name=name, movement_pattern=pattern, muscles=[primary],
+            uses=["WARM_UP"], source="FORMIQ", category=None,
         )
 
     matches = [

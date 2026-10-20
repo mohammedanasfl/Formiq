@@ -39,6 +39,7 @@ from app.services import (
     WorkoutSessionService,
 )
 from app.tools import FormiqTools, formiq_tools
+from app.tools.limits import MAX_SEARCH_RESULTS
 from tests.auth import bearer
 from tests.coach import (
     call,
@@ -602,8 +603,9 @@ def test_suits_main_says_which_activities_a_proposal_accepts(tools, user, ids):
         assert found[0]["suits_main"] == "any"
         for item in found:
             arguments = workout(ids, *legs(ids), focus="LOWER_BODY")
-            # long enough for a warm-up of at least 3 minutes
-            arguments[section] = [activity(item["exercise_id"], duration_seconds=180)]
+            # long enough for a warm-up of at least 3 minutes (a stretch is held 60 seconds
+            # at most a set)
+            arguments[section] = [activity(item["exercise_id"], sets=3, duration_seconds=60)]
             suits = item["suits_main"] == "any" or bool(chosen & set(item["suits_main"]))
 
             accepted = "output" in propose(tools, user, **arguments)
@@ -742,6 +744,36 @@ def main_of(ids, *names, sets=3):
 
 def every_piece_of_equipment(session):
     return list(session.scalars(select(Equipment.name)))
+
+
+def test_a_stretch_is_held_for_a_minute_at_most_a_set(tools, user, ids):
+    """Live QA (2026-10-19) saw a chest stretch held for one 180-second set, against the
+    20 to 30 seconds the catalog says: more time is more sets, never a longer hold."""
+    arguments = workout(ids, *legs(ids), focus="LOWER_BODY")
+
+    arguments["cool_down"] = [activity(ids["Standing Quad Stretch"], duration_seconds=180)]
+    refused = propose(tools, user, **arguments)
+
+    message = problem(refused)
+    stretch = f"exercise {ids['Standing Quad Stretch']} (Standing Quad Stretch)"
+    assert f"{stretch} is a held stretch" in message
+    assert "at most 60 seconds a set" in message and "up to 3 sets" in message
+    assert tools.proposals == []
+    # one second over is refused, the minute itself is not, and three of them make the time
+    arguments["cool_down"] = [activity(ids["Standing Quad Stretch"], duration_seconds=61)]
+    assert "error" in propose(tools, user, **arguments)
+    arguments["cool_down"] = [activity(ids["Standing Quad Stretch"], sets=3, duration_seconds=60)]
+    output = propose(tools, user, **arguments)["output"]
+    assert output["cool_down_minutes"] == 3
+
+
+def test_only_a_held_stretch_is_held_for_a_minute_at_most(tools, user, ids):
+    """Easy cardio and mobility drills are timed by the minute, as they were."""
+    arguments = workout(ids, *legs(ids), focus="LOWER_BODY")
+    arguments["warm_up"] = [activity(ids["Brisk Walk"], duration_seconds=300)]
+    arguments["cool_down"] = [activity(ids["Cat-Cow"], duration_seconds=180)]
+
+    assert "output" in propose(tools, user, **arguments)
 
 
 def problem(result):
@@ -1179,7 +1211,8 @@ def ask(client, use_provider, user_id, *turns, message="What should I do today?"
 
 def proposing(ids, push_up_sets=3):
     """A model that reads what today needs and the catalog (the main exercises,
-    then the warm-up drills and the stretches), then proposes a full-body
+    then the warm-up drills and the stretches for the muscles it trains: there
+    are more of each than one search returns), then proposes a full-body
     workout that fits 30 minutes without dumbbells (push_up_sets sets of
     push-ups: another number is another workout)."""
     workout = bodyweight(ids)
@@ -1192,8 +1225,10 @@ def proposing(ids, push_up_sets=3):
         tool_turn(
             call("search_exercises", movement_pattern="HORIZONTAL_PULL"),
             call("search_exercises", movement_pattern="ROTATION"),
-            call("search_exercises", movement_pattern="MOBILITY"),
-            call("search_exercises", movement_pattern="STRETCH"),
+            call("search_exercises", movement_pattern="MOBILITY", muscle="Shoulders"),
+            call("search_exercises", movement_pattern="MOBILITY", muscle="Hamstrings"),
+            call("search_exercises", movement_pattern="STRETCH", muscle="Chest"),
+            call("search_exercises", movement_pattern="STRETCH", muscle="Quadriceps"),
         ),
         tool_turn(proposal(**workout, max_minutes=30, unavailable_equipment=["Dumbbell"])),
         recommend("Here is a short bodyweight workout. Review it, and approve it to save it."),
@@ -1385,7 +1420,11 @@ def test_the_baseline_journey_proposes_in_four_requests_and_saves_only_on_approv
     assert provider.generate_turn.call_count == 4
     # every search ran, and found only what needs no equipment, easy cardio first
     found = [response.response for response in tool_responses(sent_contents(provider, 2)[-1])]
-    assert [len(result["output"]["exercises"]) for result in found] == [10, 6, 10]
+    assert [len(result["output"]["exercises"]) for result in found] == [
+        MAX_SEARCH_RESULTS,
+        6,
+        MAX_SEARCH_RESULTS,
+    ]
     for result in found:
         assert all(item["equipment"] == [] for item in result["output"]["exercises"])
     main = {item["exercise_id"] for item in plan["exercises"]}

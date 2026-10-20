@@ -29,9 +29,13 @@ class Failure(StrEnum):
     # a proposal made before the reads it rests on (Formiq loads them)
     MISSING_PREREQUISITE = "missing_prerequisite"
     # a proposal Formiq refused for something proposing again can correct, or for
-    # something it cannot (no profile, a failed read, a second proposal)
+    # something it cannot (no profile, a failed read)
     PROPOSAL_REJECTED_CORRECTABLE = "proposal_rejected_correctable"
     PROPOSAL_REJECTED_IRRECOVERABLE = "proposal_rejected_irrecoverable"
+    # A second proposal in a turn: not run, since a turn makes one (the first was
+    # accepted, or is running in the same round). Nothing was wrong with the
+    # workout, so it is no rejection of it.
+    PROPOSAL_LIMIT = "proposal_limit"
     # the turn used all its rounds, or its context budget, without an answer
     BUDGET_EXHAUSTED = "budget_exhausted"
     # the model asked for an operation that would change data
@@ -61,6 +65,7 @@ TOOL_ERROR_CODES = {
     "DECISION_REJECTED": Failure.DECISION_REJECTED,
     "CONTEXT_MISSING": Failure.MISSING_PREREQUISITE,
     "PROPOSAL_REFUSED": Failure.PROPOSAL_REJECTED_IRRECOVERABLE,
+    "PROPOSAL_LIMIT": Failure.PROPOSAL_LIMIT,
 }
 
 

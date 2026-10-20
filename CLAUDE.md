@@ -44,6 +44,8 @@ python -m app.cli import-exercises [--dry-run] # import/refresh the free-exercis
 Tests use the `formiq_test` database, whose schema comes from Alembic migrations only. The
 playground always runs on port 2001. `tests/conftest.py` turns the application's Langfuse tracer
 off for every test, whatever `backend/.env` enables; tracing tests build their own tracer.
+Run the playground tests in their own pytest run: in the same session as backend tests that
+start the app, they error with "Cannot add middleware after an application has started".
 
 ## History
 
@@ -76,6 +78,13 @@ off for every test, whatever `backend/.env` enables; tracing tests build their o
 - **Saved workout lifecycle** (`48c9fe7`): saved plans carry each exercise's catalog name,
   description and instructions (`exercise`); end-to-end lifecycle tests; the playground shows
   coverage and reopens saved plans.
+- **Phase 7: nutrition and recovery** (2026-10-17, branch `phase-7-nutrition-recovery`, not yet
+  merged to `dev`): `POST
+  /users/{user_id}/workout-sessions/{session_id}/recovery-summary` summarises one COMPLETED
+  workout: protein, carbohydrate, hydration, recovery for the muscles trained, food examples. Rules
+  in `app/guidance/` (pure), read-only `app/services/recovery_summary_service.py`, route
+  `app/api/routes/recovery_summaries.py`. No migration, no coach tool, no LangGraph change, no
+  language model. Rules, sources, safety order and what is unverified: `docs/nutrition-recovery.md`.
 
 ## Current state (2026-10-14)
 
@@ -103,6 +112,16 @@ off for every test, whatever `backend/.env` enables; tracing tests build their o
   suitable one: no fixed share of changed exercises.
 - The safety thresholds (2 kg/week loss, 800 kcal/day, 72 h fast) and the workout completeness
   minimums are product guardrails, not medical rules.
+- Recovery summary (user's decisions, 2026-10-17): the language-model explanation is deferred (a
+  later coach read tool would explain the validated result, which changes the pinned tool set);
+  calories burned only as a MET range, never one number or an intake target; one session-keyed
+  endpoint, no date or timezone summary. Estimates are ranges with sources and assumptions, apart
+  from calculated facts and general guidance. A warning sign withholds every estimate, hydration,
+  food and recovery-timing item; pain or injury gives no return-to-training time; the only free
+  text read is the user's notes, by the coach's keyword backstop, and it is never echoed. Energy
+  ranges cover ages 19 to 59 (the 2024 Adult Compendium's range). VEGETARIAN excludes eggs. The
+  thresholds are product guardrails, not medical rules; the values not yet checked against a
+  primary text are listed in `docs/nutrition-recovery.md`.
 - Langfuse: the model request span is `model_request` (it was `gemini` before `288f878`; older
   traces keep the old name). The project has no custom dashboards, widgets or evaluators to
   update (checked 2026-10-14). `LANGFUSE_CAPTURE_CONTENT` is refused outside `APP_ENV`

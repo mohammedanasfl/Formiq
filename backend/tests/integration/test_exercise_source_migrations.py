@@ -103,7 +103,8 @@ def test_main_plan_exercises_become_main_workout_and_back(
 def test_formiqs_own_exercises_are_classified_and_marked_as_formiqs(alembic_config, db_session):
     exercises = db_session.scalars(select(Exercise)).all()
 
-    assert len(exercises) == 50
+    # the 50 of the first two seeds, and the 21 activities a7d3f1c82e4b adds
+    assert len(exercises) == 50 + 21
     assert {(e.source, e.source_id, e.source_version, e.source_record) for e in exercises} == {
         ("FORMIQ", None, None, None)
     }

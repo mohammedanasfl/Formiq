@@ -157,6 +157,8 @@ def test_each_tool_call_is_a_tool_observation_under_its_batch():
         "user_scoped": True,
         "user_id_argument": False,
         "executed": True,
+        "origin": "model",
+        "repeat": "none",
         "data_status": "AVAILABLE",
         "output_chars": plan.metadata["output_chars"],
         "truncated": False,
@@ -207,8 +209,14 @@ def test_a_tool_failure_is_traced_by_category(code, category):
 
     (plan,) = backend.named("get_workout_plan")
     assert (plan.level, plan.status_message) == ("ERROR", category)
-    assert plan.metadata["executed"] is True
+    # a call the tools refused for their per-turn limit did not run: it is blocked,
+    # never counted among the executed (the other failures ran, and failed)
+    refused_for_the_limit = code == "TOOL_LIMIT_REACHED"
+    assert plan.metadata["executed"] is not refused_for_the_limit
     assert trace.counts[f"tool_{category}"] == 1
+    assert trace.counts["tool_calls_executed"] == int(not refused_for_the_limit)
+    assert trace.counts["tool_calls_blocked"] == int(refused_for_the_limit)
+    assert trace.counts["tool_calls_failed"] == int(not refused_for_the_limit)
 
 
 # safety

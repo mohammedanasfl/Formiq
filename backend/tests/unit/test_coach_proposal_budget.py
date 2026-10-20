@@ -297,7 +297,7 @@ def test_a_turn_accepts_one_proposal():
     state = run(provider, tools)
 
     (second,) = tool_responses(sent_contents(provider, 3)[-1])
-    assert second.response["error"]["code"] == "PROPOSAL_REFUSED"
+    assert second.response["error"]["code"] == "PROPOSAL_LIMIT"
     assert "already accepted a proposal in this turn" in second.response["error"]["message"]
     assert sum(names.count("propose_workout_plan") for names in tools.runs) == 1
     assert state["final_response"] == REPLY
@@ -316,7 +316,7 @@ def test_two_proposals_in_one_round_run_one():
     first, second = tool_responses(sent_contents(provider, 2)[-1])
     assert first.response == ACCEPTED
     assert second.response["error"] == {
-        "code": "PROPOSAL_REFUSED",
+        "code": "PROPOSAL_LIMIT",
         "message": "propose one workout at a time",
     }
 

@@ -66,13 +66,14 @@ CONTEXT_MAX_CONVERSATION_CHARS = 8_000
 MAX_TOOL_RESULT_CHARS = 50_000
 # The most the model is sent in one request, in characters: instructions, the
 # conversational context, the message, the model's turns and the tool results.
-# It holds one round of the largest results (the tools run 8 calls of a turn,
-# app.tools.limits), which is never compacted: 8 x MAX_TOOL_RESULT_CHARS, with
+# It holds one round of the largest results (the tools run 10 calls of a turn,
+# app.tools.limits), which is never compacted: 10 x MAX_TOOL_RESULT_CHARS, with
 # 100,000 more for everything else. Older rounds are compacted to stay within
-# it. About 125,000 tokens: well within the model's window, but each request
+# it. About 150,000 tokens: well within the model's window, but each request
 # stays bounded however long the turn runs. A test checks it against the tools'
-# limits, which the agent does not import.
-CONTEXT_MAX_CHARS = 500_000
+# limits, which the agent does not import. (It was 500,000 for 8 calls, until the
+# calls were raised to 10, 2026-10-20.)
+CONTEXT_MAX_CHARS = 600_000
 # The latest rounds of tool results, which are never compacted: the data the
 # model asked for last, which its next step most likely needs.
 CONTEXT_KEEP_RECENT_ROUNDS = 1
@@ -115,6 +116,23 @@ class ConversationTurn:
 
 
 @dataclass(frozen=True)
+class EquipmentSaid:
+    """What the user said anywhere in the conversation about the equipment they
+    have and lack, by the catalog's names: Formiq's own reading of their words,
+    which the coach service makes from every user turn the client sent
+    (app.tools.equipment) and gives the tools too. Plain data: no word of the
+    user's is in it, only the catalog's names."""
+
+    has: tuple[str, ...] = ()
+    lacks: tuple[str, ...] = ()
+    # they said they have nothing but what they have, or no equipment at all
+    only_these: bool = False
+
+    def __bool__(self) -> bool:
+        return bool(self.has or self.lacks or self.only_these)
+
+
+@dataclass(frozen=True)
 class ConversationContext:
     """The bounded conversational context of a turn: plain data."""
 
@@ -125,6 +143,9 @@ class ConversationContext:
     # the safety risks the user raised anywhere in the conversation, in the
     # taxonomy's order; context for the model, never a flag on this request
     safety_mentions: tuple[SafetyCategory, ...] = ()
+    # the equipment the user said they have or lack anywhere in the
+    # conversation, so that what they said before the kept turns is not lost
+    equipment: EquipmentSaid = EquipmentSaid()
 
     @property
     def size(self) -> int:
@@ -157,14 +178,18 @@ _TAIL = "The user's current message follows."
 _SHORTENED = " [...]"
 
 
-def compact_conversation(turns: Sequence[ConversationTurn]) -> ConversationContext:
+def compact_conversation(
+    turns: Sequence[ConversationTurn], equipment: EquipmentSaid | None = None
+) -> ConversationContext:
     """The bounded conversational context of these earlier turns.
 
     Up to CONTEXT_KEEP_RECENT_TURNS turns are kept as they are (shortened when
     longer than CONTEXT_MAX_TURN_CHARS); at more, the older ones are left out,
     leaving their number. Either way, every user turn is checked for safety
     risks, so a risk raised and then left out, or cut from a long turn, is still
-    noted.
+    noted. So is the equipment the user said they have or lack in any user turn
+    (equipment, which the coach service reads from all of them): a limit the
+    user stated is not forgotten when the turn that stated it is left out.
     """
     kept = turns[-CONTEXT_KEEP_RECENT_TURNS:] if turns else ()
     mentions = {
@@ -174,6 +199,7 @@ def compact_conversation(turns: Sequence[ConversationTurn]) -> ConversationConte
         turns=tuple(ConversationTurn(turn.role, _shorten(turn.text)) for turn in kept),
         omitted=len(turns) - len(kept),
         safety_mentions=tuple(category for category in SafetyCategory if category in mentions),
+        equipment=equipment or EquipmentSaid(),
     )
 
 
@@ -185,16 +211,65 @@ def _shorten(text: str) -> str:
 
 
 def conversation_note(context: ConversationContext) -> str | None:
-    """What replaces the left-out turns and records the safety mentions, within
-    CONTEXT_MAX_NOTE_CHARS; None when there is nothing to say."""
+    """What replaces the left-out turns and records the safety mentions and,
+    when turns were left out, the equipment the user said they have or lack,
+    within CONTEXT_MAX_NOTE_CHARS; None when there is nothing to say. The
+    equipment takes only the room the rest leaves, so it never cuts a safety
+    mention."""
     sentences = []
     if context.omitted:
         sentences.append(f"{context.omitted} earlier messages are left out.")
     if context.safety_mentions:
         mentions = "; ".join(_MENTIONS[category] for category in context.safety_mentions)
         sentences.append(f"In this conversation the user mentioned: {mentions}.")
-    note = " ".join(sentences)
-    return note[:CONTEXT_MAX_NOTE_CHARS] or None
+    note = " ".join(sentences)[:CONTEXT_MAX_NOTE_CHARS]
+    if context.omitted and context.equipment:
+        # the kept turns are in front of the model as written; only the rest needs the note
+        room = CONTEXT_MAX_NOTE_CHARS - len(note) - (1 if note else 0)
+        if sentence := equipment_sentence(context.equipment, room):
+            note = f"{note} {sentence}" if note else sentence
+    return note or None
+
+
+# what is said of a name list that does not fit
+_MORE = " and {} more"
+
+
+def equipment_sentence(equipment: EquipmentSaid, room: int) -> str | None:
+    """What the user said about their equipment, in Formiq's words, in at most
+    `room` characters (None when not even a shortened form fits). A list that
+    is too long is cut from its end, the longer of the two first, and says how
+    many names it leaves out; the tools hold the whole of it whatever the note
+    says."""
+    names = {
+        "has": list(equipment.has),
+        # whoever has only some pieces lacks the rest: no need to list them
+        "lacks": [] if equipment.only_these else list(equipment.lacks),
+    }
+    cut = {"has": 0, "lacks": 0}
+
+    def sentence() -> str:
+        parts = []
+        if equipment.only_these and not names["has"]:
+            parts.append("they have no equipment")
+        elif names["has"]:
+            only = " only" if equipment.only_these else ""
+            more = _MORE.format(cut["has"]) if cut["has"] else ""
+            parts.append(f"they have{only}: {', '.join(names['has'])}{more}")
+        if names["lacks"]:
+            more = _MORE.format(cut["lacks"]) if cut["lacks"] else ""
+            parts.append(f"they lack: {', '.join(names['lacks'])}{more}")
+        return f"The user said {'; '.join(parts)}." if parts else ""
+
+    text = sentence()
+    while text and len(text) > room:
+        longer = "has" if len(names["has"]) >= len(names["lacks"]) else "lacks"
+        if len(names[longer]) <= 1:
+            return None
+        names[longer].pop()
+        cut[longer] += 1
+        text = sentence()
+    return text or None
 
 
 def render_conversation(context: ConversationContext) -> str | None:
