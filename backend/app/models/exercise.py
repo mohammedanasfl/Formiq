@@ -5,6 +5,7 @@ from sqlalchemy import DateTime, String, Text, UniqueConstraint, func, text, tru
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.catalog.descriptions import REPLACES_STEPS
 from app.db.base import Base
 
 if TYPE_CHECKING:
@@ -74,7 +75,13 @@ class Exercise(Base):
     @property
     def instructions(self) -> list[str]:
         """The upstream record's steps, in order and unchanged; none for
-        Formiq's own exercises, which have a description instead."""
+        Formiq's own exercises, which have a description instead, and none for an
+        imported one whose steps Formiq replaced with its own description
+        (app.catalog.descriptions.REPLACES_STEPS): they are a machine's menu and
+        its calorie estimate (the record keeps them, in source_record). Any other
+        imported description is a summary, and the steps are still the record's."""
+        if self.source_id in REPLACES_STEPS and self.description and self.source_record:
+            return []
         steps = (self.source_record or {}).get("instructions")
         return list(steps) if isinstance(steps, list) else []
 

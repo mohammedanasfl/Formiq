@@ -130,10 +130,15 @@ def test_a_proposal_before_its_reads_is_recovered_and_still_kept_once(
         call("search_exercises", movement_pattern="LUNGE"),
         call("search_exercises", movement_pattern="HORIZONTAL_PULL"),
         call("search_exercises", movement_pattern="ROTATION"),
-        call("search_exercises", movement_pattern="MOBILITY"),
-        call("search_exercises", movement_pattern="STRETCH"),
+        call("search_exercises", movement_pattern="MOBILITY", muscle="Shoulders"),
+        call("search_exercises", movement_pattern="MOBILITY", muscle="Hamstrings"),
     )
-    propose_now = tool_turn(proposal(**workout, max_minutes=30, unavailable_equipment=["Dumbbell"]))
+    # a round runs at most 8 calls: the stretches are searched for in the next, before the proposal
+    propose_now = tool_turn(
+        call("search_exercises", movement_pattern="STRETCH", muscle="Chest"),
+        call("search_exercises", movement_pattern="STRETCH", muscle="Quadriceps"),
+        proposal(**workout, max_minutes=30, unavailable_equipment=["Dumbbell"]),
+    )
 
     body, provider = ask(
         client, use_provider, me, searches, propose_now,

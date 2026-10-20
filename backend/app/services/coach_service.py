@@ -101,6 +101,9 @@ class CoachService:
             conversation_turns=len(history),
         ) as trace:
             trace.content(input=lambda: chat_history(message, history))
+            if trace.debug is not None:
+                # what the client sent, as roles and sizes: never the text
+                trace.debug.user_input(message, [(turn.role, turn.text) for turn in history])
             try:
                 reply, decision, tools = self._reply(user_id, message, history, trace)
                 answered = (
@@ -165,6 +168,8 @@ class CoachService:
             journal.proposal(PROPOSAL_NOT_CREATED)
         journal.finish(status, **fields)
         journal.log_summary()
+        if trace.debug is not None:
+            trace.debug.summary(journal.summary)
 
     def _reply(
         self,

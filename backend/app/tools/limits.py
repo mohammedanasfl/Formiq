@@ -1,7 +1,9 @@
 """Bounds on what the tools read and return, so no result can grow without limit."""
 
-# exercises returned by search_exercises
-MAX_SEARCH_RESULTS = 10
+# exercises returned by search_exercises. 15, not 10: of the 36 warm-up and cool-down
+# searches for one muscle the catalog allows, 11 had more than 10 matches and 5 have
+# more than 15 (a search always says when it was cut: SearchExercisesOutput.note)
+MAX_SEARCH_RESULTS = 15
 # exercises a search that found none for its section names, which match its other
 # filters but are used for another section (a rowing machine exercise a search
 # for the main workout does not return, but the warm-up uses)
@@ -27,8 +29,11 @@ MAX_TEXT_LENGTH = 500
 # a new workout needs in one round: the profile, the current plan, the last
 # workout, the proposal awaiting approval and the plans list, and the
 # warm-up, main and cool-down searches. With 5, a model that batched what the
-# instructions ask lost the sixth call to this limit, and a round to it.
-MAX_EXECUTED_TOOL_CALLS_PER_TURN = 8
+# instructions ask lost the sixth call to this limit, and a round to it. With 8, a leg day
+# searched by movement pattern (three main searches, with the three reads and the warm-up
+# and cool-down searches) used every call, so a lookup by name or one more search lost the
+# cool-down search (live QA, 2026-10-19); 10 leaves two spare.
+MAX_EXECUTED_TOOL_CALLS_PER_TURN = 10
 
 # A workout plan the coach proposes (propose_workout_plan): Formiq's coaching
 # bounds, tighter than the plan columns' own limits.
@@ -49,6 +54,9 @@ MAX_ACTIVITY_SETS = 3
 MAX_ACTIVITY_REPS = 20
 MIN_ACTIVITY_SECONDS = 10
 MAX_ACTIVITY_SECONDS = 600
+# A held stretch is held this long at most in a set (the catalog's own doses are 20
+# to 30 seconds); more time is more sets. A product guardrail, not a medical rule.
+MAX_STRETCH_HOLD_SECONDS = 60
 MAX_SECTION_MINUTES = 15
 # A proposal's duration estimate: each set takes this long (or its own duration,
 # when timed), plus its rest. A set of reps takes SECONDS_PER_REP a rep when

@@ -151,8 +151,14 @@ def _safe(value: Any) -> Any:
 class TurnRecorder:
     """The ordered, safe record of one coach turn (see the module docstring)."""
 
-    def __init__(self, turn_id: str) -> None:
+    def __init__(
+        self, turn_id: str, on_event: Callable[[Mapping[str, Any]], None] | None = None
+    ) -> None:
         self.turn_id = turn_id
+        # Told of each event as it is recorded, for the local debug output
+        # (app.observability.debug): the same events, in the same order. Never read
+        # from, and a failure in it is the recorder's own guarded failure.
+        self._on_event = on_event
         self._clock = time.perf_counter
         self._began = self._clock()
         self.began_at = datetime.now(UTC)
@@ -199,6 +205,8 @@ class TurnRecorder:
         }
         event.update({name: _safe(value) for name, value in fields.items() if value is not None})
         self.events.append(event)
+        if self._on_event is not None:
+            self._on_event(event)
 
     def fail(self, category: str) -> None:
         """A normalized reason the turn went less well (kept once, in order)."""

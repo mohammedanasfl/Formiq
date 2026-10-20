@@ -66,13 +66,14 @@ CONTEXT_MAX_CONVERSATION_CHARS = 8_000
 MAX_TOOL_RESULT_CHARS = 50_000
 # The most the model is sent in one request, in characters: instructions, the
 # conversational context, the message, the model's turns and the tool results.
-# It holds one round of the largest results (the tools run 8 calls of a turn,
-# app.tools.limits), which is never compacted: 8 x MAX_TOOL_RESULT_CHARS, with
+# It holds one round of the largest results (the tools run 10 calls of a turn,
+# app.tools.limits), which is never compacted: 10 x MAX_TOOL_RESULT_CHARS, with
 # 100,000 more for everything else. Older rounds are compacted to stay within
-# it. About 125,000 tokens: well within the model's window, but each request
+# it. About 150,000 tokens: well within the model's window, but each request
 # stays bounded however long the turn runs. A test checks it against the tools'
-# limits, which the agent does not import.
-CONTEXT_MAX_CHARS = 500_000
+# limits, which the agent does not import. (It was 500,000 for 8 calls, until the
+# calls were raised to 10, 2026-10-20.)
+CONTEXT_MAX_CHARS = 600_000
 # The latest rounds of tool results, which are never compacted: the data the
 # model asked for last, which its next step most likely needs.
 CONTEXT_KEEP_RECENT_ROUNDS = 1

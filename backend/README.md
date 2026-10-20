@@ -217,6 +217,12 @@ uvicorn app.main:app --reload
 The health endpoint is then available at http://127.0.0.1:8000/health, and interactive API
 documentation at http://127.0.0.1:8000/docs.
 
+To watch the coach's turns in the terminal while developing, set `AGENT_DEBUG=events` (the ordered
+timeline, no content) or `AGENT_DEBUG=content` (also the prompt text and the tool data that is safe
+to show; the user's words and profile are always redacted). It needs `APP_ENV=development` (or
+`test`) set explicitly, prints to stderr only and changes nothing a turn does:
+`docs/agent-debug.md`.
+
 ## API
 
 | Method | Path | Request body | Success |

@@ -66,18 +66,7 @@ class GeminiProvider:
         a tool call is a provider error. With required_tool_names, the model must
         call one or more of those tools, and a text reply is a provider error.
         """
-        config = types.GenerateContentConfig(
-            system_instruction=instructions,
-            tools=(
-                [types.Tool(function_declarations=[_function_declaration(t) for t in tools])]
-                if tools
-                else None
-            ),
-            tool_config=_tool_config(tools, allow_tool_calls, required_tool_names),
-            # The coach graph runs the tools and limits the rounds; the SDK must
-            # not run a loop of its own.
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        )
+        config = turn_config(instructions, tools, allow_tool_calls, required_tool_names)
         response = self._generate_content(list(contents), config)
 
         function_calls = response.function_calls or []
@@ -122,6 +111,30 @@ class GeminiProvider:
             # to the server log only.
             logger.exception("Gemini request to %s failed", self.model)
             raise AIProviderError(f"the {self.model} request failed") from error
+
+
+def turn_config(
+    instructions: str,
+    tools: Sequence[ToolDeclaration],
+    allow_tool_calls: bool = True,
+    required_tool_names: Sequence[str] | None = None,
+) -> types.GenerateContentConfig:
+    """The configuration of one model turn, exactly as generate_turn sends it. It
+    sets no generation setting (temperature, thinking, output limits): the model's
+    own defaults apply. A function so the local debug view (app.agent.debug_view)
+    describes the configuration that is sent, never a copy of it."""
+    return types.GenerateContentConfig(
+        system_instruction=instructions,
+        tools=(
+            [types.Tool(function_declarations=[_function_declaration(t) for t in tools])]
+            if tools
+            else None
+        ),
+        tool_config=_tool_config(tools, allow_tool_calls, required_tool_names),
+        # The coach graph runs the tools and limits the rounds; the SDK must
+        # not run a loop of its own.
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
 
 
 def token_usage(response: types.GenerateContentResponse) -> dict[str, int] | None:

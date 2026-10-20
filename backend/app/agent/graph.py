@@ -67,6 +67,13 @@ from app.agent.context import (
     fit_request,
     render_conversation,
 )
+from app.agent.debug_view import (
+    debug_request,
+    debug_response,
+    debug_source,
+    debug_tool,
+    prompt_variant,
+)
 from app.agent.policy import (
     ANSWERS,
     OUT_OF_SCOPE_REPLY,
@@ -120,6 +127,7 @@ from app.ai import (
 )
 from app.approvals.access import Access, access_of, is_write_action
 from app.observability import Failure, Observation, RunTrace, classify, no_trace, tool_failure
+from app.observability.debug import Authored
 from app.observability.trajectory import RETRY_DECIDED, RETRY_RECOVERED, RETRY_REJECTED_AGAIN
 
 logger = logging.getLogger(__name__)
@@ -271,6 +279,17 @@ COACH_INSTRUCTIONS = (
     "at all; say what you searched, and when matches_for_other_uses names exercises, that "
     "the catalog has them for another section (a warm-up or cool-down, say) but Formiq "
     "does not use them for the one searched, so you cannot put them there.\n"
+    "- A search returns at most a few of its matches (total_matches says how many there are): "
+    "when its note says only some are shown, never present them as all of the matches; say "
+    "how many more there are, or search again with a narrower filter.\n"
+    "- When the user names an exercise, look for it by name (search_exercises with name: a few "
+    "of its words, and no use, so it is found whichever section it is for) before telling them "
+    "the catalog does not have it. If its note says the catalog keeps that exercise under "
+    "another name, say so and use that one, if its uses include the section you need; if "
+    "nothing matches, try fewer words or search by muscle before you say it is not there.\n"
+    "- Never give a number of calories burned by a workout, an exercise or a warm-up: Formiq "
+    "has no sourced figure for it, and one from memory looks exact when it is not. If asked, "
+    "say so plainly; you may still say that longer or harder work burns more.\n"
     "- Formiq knows who the user is: never ask for or send a user id.\n"
     "- The profile gives the user's name. Formiq does not give you their email or "
     "phone number: if asked, say they are not available to you here.\n"
@@ -349,6 +368,11 @@ COACH_INSTRUCTIONS = (
     "- Leave out any activity that conflicts with what the user said they cannot do or "
     "use (such as kneeling, jumping or equipment they lack) and choose another, such as "
     "an easy walk. Present stretches as optional, never as required.\n"
+    "- Say plainly when you could not do something the user asked for: an exercise or a "
+    "piece of equipment the catalog does not have or Formiq does not use for that section "
+    "(a neck stretch, a treadmill walk, a guided breathing drill), or one you replaced with "
+    "another, such as the exercise the catalog keeps in place of a duplicate (name what you "
+    "used instead). Never say a workout includes something that is not in it.\n"
     "- Changing a saved plan: when the user asks to change, rewrite or replace one of "
     'their plans ("rewrite this plan", "a different version"), read it first '
     "(get_current_workout_plan, or get_workout_plan by its id), then propose with "
@@ -558,6 +582,15 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
             allowed_decisions=sorted(safety.decisions) if safety else [],
         ):
             pass
+        if trace.debug is not None:
+            trace.debug.note(
+                "safety_check",
+                flagged=safety is not None,
+                category=assessment.category,
+                rule=assessment.signal,
+                tool_calls_allowed=safety is None,
+                allowed_decisions=sorted(safety.decisions) if safety else [],
+            )
     if safety is not None:
         logger.info(
             "Safety check: category=%s signal=%s", assessment.category, assessment.signal
@@ -598,6 +631,18 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
                 context_budget=context.max_context_chars,
                 context_fit_success=fit.fits and compactions <= MAX_CONTEXT_COMPACTIONS,
             )
+        if trace.debug is not None:
+            trace.debug.note(
+                "context_fit",
+                chars_before=fit.size_before,
+                chars_after=fit.size,
+                budget=context.max_context_chars,
+                compacted_results=fit.compacted_results,
+                superseded_results=len(fit.superseded),
+                compaction_count=compactions,
+                compaction_limit=MAX_CONTEXT_COMPACTIONS,
+                fits=fit.fits and compactions <= MAX_CONTEXT_COMPACTIONS,
+            )
         if not fit.fits or compactions > MAX_CONTEXT_COMPACTIONS:
             # never send more than the budget: no turn, so the tools node ends the turn
             failure = (
@@ -635,6 +680,26 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
         )
         if kind is Round.PROPOSAL_RETRY and safety is None:
             journal.retry_round_started(round=iteration, request=number)
+        # the local debug view of what is about to be sent (AGENT_DEBUG): before the
+        # clock below starts, so what it costs is not counted as the model's time
+        debug_request(
+            trace,
+            number=number,
+            iteration=iteration,
+            kind=kind.value,
+            model=getattr(context.provider, "model", None),
+            variant=prompt_variant(
+                str(assessment.category) if safety is not None else None,
+                context.pending_proposal is not None,
+            ),
+            instructions=instructions,
+            declarations=declarations,
+            messages=state["messages"],
+            fit=fit,
+            conversation=state["conversation"],
+            budget=context.max_context_chars,
+            compactions=compactions,
+        )
         asked = time.perf_counter()
         try:
             with step.child(
@@ -682,6 +747,7 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
             requested_calls=len(turn.tool_calls),
             responded=any(call.name == RESPOND.name for call in turn.tool_calls),
         )
+        debug_response(trace, number, turn)
     return {"messages": [turn], "context_compactions": compactions}
 
 
@@ -759,6 +825,7 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
     earlier = tool_results(state["messages"])
     if turn is None:
         # the coach sent no request: its context was over the budget
+        debug_source(trace, "generic_fallback", "context_budget", CANNOT_ANSWER_REPLY, authored=True)
         return finish(
             CANNOT_ANSWER_REPLY,
             CoachDecision(Intent.AMBIGUOUS, Decision.CANNOT_ANSWER, tools_used(earlier)),
@@ -782,8 +849,18 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
         if rejection is None:
             trace.terminate("decision_accepted")
             end_retry_round(trace, kind, iteration, RETRY_DECIDED)
-            return accept(respond, earlier, assessment)
+            return accepted(trace, respond, accept(respond, earlier, assessment))
         results = [error_result(DECISION_REJECTED, rejection)]
+        if trace.debug is not None:
+            # the rejection goes back to the model as the respond call's result: it
+            # decides again, unless this round is the last
+            trace.debug.note(
+                "rejection_returned_to_model",
+                iteration=iteration,
+                iteration_limit=context.max_tool_iterations,
+                round_kind=kind,
+                model_asked_again=kind is not Round.DECISION,
+            )
     else:
         with trace.child("tool_calls", iteration=iteration, requested=len(calls)) as batch:
             results = run_calls(
@@ -820,6 +897,7 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
                 "The coach's reply to its accepted proposal was refused until the limit; "
                 "the proposal is shown with Formiq's own reply"
             )
+            debug_source(trace, "card_fallback", "accepted_proposal", card, authored=True)
             update.update(
                 finish(
                     card,
@@ -840,6 +918,13 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
             respond.intent if respond else Intent.AMBIGUOUS,
             Decision.CANNOT_ANSWER,
             tools_used(earlier),
+        )
+        debug_source(
+            trace,
+            "generic_fallback",
+            "nothing_proposed" if attempted and not proposed(earlier) else "retry_limit",
+            update["final_response"],
+            authored=True,
         )
     return update
 
@@ -902,7 +987,7 @@ def end_safely(
         )
         if rejection is None:
             trace.terminate("decision_accepted", safety_path="model")
-            return accept(respond, (), assessment)
+            return accepted(trace, respond, accept(respond, (), assessment))
         reason = "decision_rejected"
     trace.terminate(
         "safety_fallback",
@@ -912,10 +997,23 @@ def end_safely(
     logger.warning(
         "The coach's decision broke the safety policy for %s: %s", assessment.category, rejection
     )
+    if trace.debug is not None:
+        trace.debug.note("safety_fallback", category=assessment.category, reason=reason)
+    debug_source(trace, "safety_fallback", reason, safety.fallback_reply, authored=True)
     return finish(
         safety.fallback_reply,
         CoachDecision(safety.fallback_intent, safety.fallback_decision, (), assessment.category),
     )
+
+
+def accepted(trace: RunTrace, respond: Respond, update: dict[str, Any]) -> dict[str, Any]:
+    """accept()'s update, once its reply's author is noted for the local debug
+    output: the model's, or Formiq's own redirect for an out-of-scope request."""
+    if respond.intent is Intent.OUT_OF_SCOPE:
+        debug_source(trace, "generic_fallback", "out_of_scope_redirect", update["final_response"], authored=True)
+    else:
+        debug_source(trace, "model", "decision_accepted", update["final_response"], authored=False)
+    return update
 
 
 def accept(
@@ -1297,6 +1395,12 @@ def record_tool_results(
                         access_of(call.name) is Access.PROPOSE and "output" in result
                     ),
                 )
+            took_ms = (durations or {}).get(index)
+            debug_tool(
+                trace, call, index, result, origin=origin, executed=executed, code=code,
+                category=category, empty=empty, repeat=repeats[index] if repeats else "none",
+                duration_ms=None if took_ms is None else round(took_ms),
+            )  # fmt: skip
         observation.end()
 
 
@@ -1344,6 +1448,12 @@ def check_respond(
                 "decision", round=iteration, accepted=False, reason="invalid_call",
                 duration_ms=elapsed_ms(checked),
             )  # fmt: skip
+            if trace.debug is not None:
+                # the fields it names, not its text: that can quote what the model sent
+                trace.debug.guard(
+                    "decision_validation", accepted=False, by="invalid_call", iteration=iteration,
+                    fields=[".".join(str(part) for part in item["loc"]) or "arguments" for item in error.errors()],
+                )  # fmt: skip
             return None, f"invalid respond call: {problems}"
         check.update(intent=respond.intent, decision=respond.decision)
         # a fitness request is never out of scope, then the decision policy
@@ -1362,8 +1472,21 @@ def check_respond(
                 "decision", round=iteration, accepted=False, reason=rejected_by,
                 duration_ms=elapsed_ms(checked),
             )  # fmt: skip
+            if trace.debug is not None:
+                # Formiq's own words for it (the policies' text names intents,
+                # decisions, tools and fitness words, never the user's text); the
+                # model's reply is Private
+                trace.debug.guard(
+                    "decision_validation", accepted=False, by=rejected_by, iteration=iteration,
+                    rejection=Authored(rejection), respond_args=call.arguments,
+                )  # fmt: skip
             return respond, rejection
         check.update(accepted=True)
+        if trace.debug is not None:
+            trace.debug.guard(
+                "decision_validation", accepted=True, iteration=iteration,
+                intent=respond.intent, decision=respond.decision,
+            )  # fmt: skip
     checked = time.perf_counter()
     with trace.child("reply_validation", "guardrail", iteration=iteration) as reply_check:
         rejection = reply_problem(
@@ -1386,9 +1509,10 @@ def check_respond(
         if rejection is not None:
             trace.count("reply_rejections")
             reply_check.warn(Failure.REPLY_REJECTED, reason=REPLY_PROBLEMS.get(rejection))
+    reply_reason = REPLY_PROBLEMS.get(rejection) if rejection else None
     trace.trajectory.validation(
         "reply", round=iteration, accepted=rejection is None,
-        reason=REPLY_PROBLEMS.get(rejection) if rejection else None,
+        reason=reply_reason,
         duration_ms=elapsed_ms(checked),
     )  # fmt: skip
     if rejection == REPLY_MISSTATES_DURATION and length is not None:
@@ -1399,6 +1523,14 @@ def check_respond(
             + (f"; warm-up, main workout and cool-down {sections}" if sections else "")
             + ")"
         )
+    if trace.debug is not None:
+        # the reason and, as the model is told it, Formiq's own text (a constant, and
+        # the proposal's figures); the reply itself is Private
+        trace.debug.guard(
+            "reply_validation", accepted=rejection is None, reason=reply_reason,
+            rejection=Authored(rejection) if rejection else None,
+            iteration=iteration, reply_chars=len(respond.reply),
+        )  # fmt: skip
     return respond, rejection
 
 

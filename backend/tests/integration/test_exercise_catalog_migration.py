@@ -25,6 +25,10 @@ SEED_REVISION = "b84c61ea69bf"
 LATER_SEED_REVISION = "14d543e636a8"
 # exercise sources, uses and images, and the reference data imports map to
 SOURCE_REVISION = "620eafb9c204"
+# more warm-up and cool-down activities, and how to do them
+ACTIVITIES_REVISION = "a7d3f1c82e4b"
+# the treadmill, which a user who has one names
+TREADMILL_REVISION = "c9e24b7a5d13"
 
 TIMESTAMPTZ = "TIMESTAMP WITH TIME ZONE"
 REFERENCE_COLUMNS = {
@@ -140,6 +144,19 @@ def import_reference(alembic_config):
     return ScriptDirectory.from_config(alembic_config).get_revision(SOURCE_REVISION).module
 
 
+@pytest.fixture
+def treadmill(alembic_config):
+    """The migration that adds the treadmill: its NAME and DESCRIPTION."""
+    return ScriptDirectory.from_config(alembic_config).get_revision(TREADMILL_REVISION).module
+
+
+@pytest.fixture
+def activities(alembic_config):
+    """The migration that adds warm-up and cool-down activities and says how to do the
+    existing ones: its NEW_ACTIVITIES, OLD_DESCRIPTIONS and ADDITIONS."""
+    return ScriptDirectory.from_config(alembic_config).get_revision(ACTIVITIES_REVISION).module
+
+
 def table_names(engine):
     return set(inspect(engine).get_table_names())
 
@@ -224,8 +241,22 @@ def test_link_tables_index_the_second_key_column(alembic_config, test_engine, ta
     assert [(index["column_names"], index["unique"]) for index in indexes] == [([column], False)]
 
 
+def seeded_exercises(seed, later_seed, activities):
+    """The exercises the seeds leave, by name: the first two seeds', with the
+    description the activities' migration gives the warm-up and cool-down ones,
+    and the activities it adds."""
+    seeded = {exercise["name"]: exercise for exercise in seed.EXERCISES + later_seed.EXERCISES}
+    for name, old in activities.OLD_DESCRIPTIONS.items():
+        seeded[name] = {**seeded[name], "description": f"{old} {activities.ADDITIONS[name]}"}
+    added = {
+        activity["name"]: {key: value for key, value in activity.items() if key != "uses"}
+        for activity in activities.NEW_ACTIVITIES
+    }
+    return seeded | added
+
+
 def test_seed_adds_the_reference_data(
-    alembic_config, seed, later_seed, import_reference, db_session
+    alembic_config, seed, later_seed, import_reference, activities, treadmill, db_session
 ):
     muscle_groups = db_session.scalars(select(MuscleGroup)).all()
     equipment = db_session.scalars(select(Equipment)).all()
@@ -240,6 +271,7 @@ def test_seed_adds_the_reference_data(
         **seed.EQUIPMENT,
         **later_seed.EQUIPMENT,
         **import_reference.EQUIPMENT,
+        treadmill.NAME: treadmill.DESCRIPTION,
     }
     assert {
         row.name: {
@@ -252,8 +284,8 @@ def test_seed_adds_the_reference_data(
         }
         for row in exercises
     } == {
-        exercise["name"]: {**exercise, "equipment": sorted(exercise["equipment"])}
-        for exercise in seed.EXERCISES + later_seed.EXERCISES
+        name: {**exercise, "equipment": sorted(exercise["equipment"])}
+        for name, exercise in seeded_exercises(seed, later_seed, activities).items()
     }
     assert all(row.is_active for row in [*muscle_groups, *equipment, *exercises])
 

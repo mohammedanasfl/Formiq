@@ -24,7 +24,7 @@ CATALOG = [
         "Barbell", "Dumbbell", "Kettlebell", "Bench", "Squat Rack", "Cable Machine",
         "Smith Machine", "Leg Press Machine", "Pull-up Bar", "Resistance Band",
         "Stationary Bike", "Rowing Machine", "Machine", "Medicine Ball", "Exercise Ball",
-        "Foam Roller", "EZ Curl Bar", "Other Equipment",
+        "Foam Roller", "EZ Curl Bar", "Other Equipment", "Treadmill",
     )
 ]  # fmt: skip
 
@@ -70,12 +70,32 @@ def stated(*texts):
         ("Swiss ball", "exercise ball"),
         ("EZ bar", "ez curl bar"),
         ("exercise bike", "stationary bike"),
+        # a recumbent bike is a stationary bike, and a treadmill has its own name (live QA,
+        # 2026-10-19: both were refused, five searches in one turn)
+        ("recumbent bike", "stationary bike"),
+        ("a recumbent bike", "stationary bike"),
+        ("Recumbent Bikes", "stationary bike"),
+        ("treadmill", "treadmill"),
+        ("treadmills", "treadmill"),
+        ("a treadmill", "treadmill"),
+        ("running machine", "treadmill"),
         ("rower", "rowing machine"),
         ("leg press", "leg press machine"),
     ],
 )
 def test_a_name_reads_as_the_catalog_piece_it_means(name, key):
     assert read(name) == EquipmentName(key)
+
+
+def test_a_treadmill_is_not_read_as_the_general_machine():
+    """"Machine" is the strength machines too: a user with a treadmill has not said
+    they have those."""
+    assert read("treadmill") != read("gym machine")
+    assert read("treadmill").key == "treadmill"
+    assert stated("I have a treadmill and dumbbells.").has == {"treadmill", "dumbbell"}
+    assert "machine" not in stated("I have a treadmill and a recumbent bike.").has
+    both = stated("I have a treadmill and a recumbent bike.")
+    assert both.has == {"treadmill", "stationary bike"}
 
 
 @pytest.mark.parametrize(

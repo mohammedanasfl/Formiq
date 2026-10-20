@@ -110,8 +110,10 @@ class ExerciseResponse(BaseModel):
 
     id: int
     name: str
-    # Formiq's own short description; null for an imported exercise, whose
-    # upstream record has none
+    # Formiq's own description: the steps, a suggested dose and a safety note.
+    # Null for an imported exercise, whose upstream record has none, apart from
+    # the few easy cardio activities Formiq describes beside the record
+    # (app.catalog.descriptions)
     description: str | None
     # the upstream record's steps, in order and unchanged; empty for Formiq's own
     instructions: list[str]

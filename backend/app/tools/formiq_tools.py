@@ -31,6 +31,7 @@ from app.approvals import (
     propose,
     restore,
 )
+from app.catalog.classification import DUPLICATE_OF, HIDDEN_DUPLICATE_IDS
 from app.schemas.coach import (
     CoverageLimitation,
     ProposalCoverage,
@@ -41,6 +42,7 @@ from app.schemas.coach import (
 from app.schemas.exercise import (
     Difficulty,
     ExerciseFilters,
+    ExerciseSource,
     MovementPattern,
     MuscleRole,
     WorkoutSection,
@@ -57,8 +59,10 @@ from app.tools.equipment import (
     stated_equipment,
 )
 from app.tools.errors import ToolError, ToolErrorCode
+from app.tools.exercise_names import name_matches, name_words
 from app.tools.limits import (
     DEFAULT_REST_SECONDS,
+    MAX_ACTIVITY_SETS,
     MAX_EXECUTED_TOOL_CALLS_PER_TURN,
     MAX_EXERCISES,
     MAX_INSTRUCTION_STEPS,
@@ -70,11 +74,13 @@ from app.tools.limits import (
     MAX_SEARCH_RESULTS,
     MAX_SECTION_MINUTES,
     MAX_SETS,
+    MAX_STRETCH_HOLD_SECONDS,
     MAX_TEXT_LENGTH,
     MIN_COUNTED_SETS,
     SECONDS_PER_REP,
     SET_SECONDS,
 )
+from app.tools.muscles import muscles_named
 from app.tools.schemas import (
     CurrentWorkoutPlanOutput,
     ExerciseChangeOutput,
@@ -160,6 +166,9 @@ COOL_DOWN = PlanSection.COOL_DOWN
 # and work a muscle the main exercises train, unless they are easy CARDIO,
 # which suits any workout.
 GENERAL_ACTIVITIES = frozenset({MovementPattern.CARDIO})
+# The upstream categories of the specialised main exercises: a search lists the standard
+# lifts first (most_relevant).
+SPECIALISED_CATEGORIES = frozenset({"plyometrics", "olympic weightlifting", "strongman"})
 SECTION_NAMES = {WARM_UP: "warm-up", MAIN: "main workout", COOL_DOWN: "cool-down"}
 
 # What an unknown name in available_equipment is answered with, after the
@@ -238,6 +247,9 @@ class FormiqTools:
         # muscles they train: what a warm-up or cool-down search says each
         # activity suits (suited_main)
         self.main_candidates: dict[int, frozenset[str]] = {}
+        # the muscles the user's latest message names (app.tools.muscles), read when first
+        # needed: what a warm-up or cool-down search ranks the activities by
+        self._said_muscles: frozenset[str] | None = None
         # the plans proposed in this request, in order, with what the model was told
         self.proposals: list[tuple[WriteProposal, ProposedWorkoutPlanOutput]] = []
         # the proposal awaiting the user's approval, as get_pending_proposal
@@ -287,7 +299,9 @@ class FormiqTools:
                 else error_result(
                     ToolErrorCode.TOOL_LIMIT_REACHED,
                     f"only {MAX_EXECUTED_TOOL_CALLS_PER_TURN} tool calls are run per turn; "
-                    "this one was not",
+                    "this one was not: if you still need what it asks for (a warm-up or "
+                    "cool-down search, say), call it again in your next round, before you "
+                    "propose",
                 )
                 for index in range(len(calls))
             ]
@@ -1118,6 +1132,17 @@ class FormiqTools:
                 f"exercise {item.exercise_id} ({exercise.name}) is not a light "
                 f"{SECTION_NAMES[section]} activity: choose a BEGINNER one",
             )
+        if (
+            section is not MAIN
+            and exercise.movement_pattern == MovementPattern.STRETCH
+            and (getattr(item, "duration_seconds", None) or 0) > MAX_STRETCH_HOLD_SECONDS
+        ):
+            raise ToolError(
+                ToolErrorCode.INVALID_INPUT,
+                f"exercise {item.exercise_id} ({exercise.name}) is a held stretch: hold it at "
+                f"most {MAX_STRETCH_HOLD_SECONDS} seconds a set (about 30 is usual), and use up "
+                f"to {MAX_ACTIVITY_SETS} sets, or another activity, for more time",
+            )
         if beginner and exercise.difficulty == Difficulty.ADVANCED:
             raise ToolError(
                 ToolErrorCode.INVALID_INPUT,
@@ -1312,21 +1337,43 @@ class FormiqTools:
             "movement_pattern": request.movement_pattern,
             "difficulty": request.difficulty,
         }
-        matches = self.catalog.list_exercises(
-            ExerciseFilters(use=request.use, **filters), available_equipment_ids=available
+        matches = visible(
+            self.catalog.list_exercises(
+                ExerciseFilters(use=request.use, **filters), available_equipment_ids=available
+            )
         )
-        exercises = most_relevant(matches, use=request.use, muscle=request.muscle)[
-            :MAX_SEARCH_RESULTS
-        ]
+        named: set[int] | None = None
+        asked_for: set[int] = set()
+        kept_as: dict[str, str] = {}
+        if request.name is not None:
+            named, asked_for, kept_as = self._named(request.name)
+            matches = [exercise for exercise in matches if exercise.id in named]
+        # what each activity may go with, once there are main exercises to go with
+        activity = request.use in (WARM_UP, COOL_DOWN)
+        main = self.main_candidates if activity else {}
+        exercises = most_relevant(
+            matches,
+            use=request.use,
+            muscle=request.muscle,
+            main=main,
+            said=self._said_muscles_named() if activity else frozenset(),
+        )
+        # the exercise the user named comes first, whatever else has the words
+        exercises = sorted(exercises, key=lambda exercise: exercise.id not in asked_for)
+        exercises = exercises[:MAX_SEARCH_RESULTS]
         other_uses = None
         if request.use is not None and not matches:
             # Nothing is used for this section, which says nothing of the catalog as a
             # whole: name what matches every other filter, and is used for another
             # section (a rowing machine exercise for the warm-up, none for the main
             # workout). Apart from the results, and not one to choose for this use.
-            beyond = self.catalog.list_exercises(
-                ExerciseFilters(**filters), available_equipment_ids=available
+            beyond = visible(
+                self.catalog.list_exercises(
+                    ExerciseFilters(**filters), available_equipment_ids=available
+                )
             )
+            if named is not None:
+                beyond = [exercise for exercise in beyond if exercise.id in named]
             if beyond:
                 other_uses = OtherUseMatchesOutput(
                     total=len(beyond),
@@ -1336,17 +1383,17 @@ class FormiqTools:
                             uses=exercise.uses,
                             equipment=[item.name for item in exercise.equipment],
                         )
-                        for exercise in most_relevant(beyond, use=None, muscle=request.muscle)[
-                            :MAX_OTHER_USE_MATCHES
-                        ]
+                        for exercise in sorted(
+                            most_relevant(beyond, use=None, muscle=request.muscle),
+                            key=lambda exercise: exercise.id not in asked_for,
+                        )[:MAX_OTHER_USE_MATCHES]
                     ],
                 )
         if request.use == MAIN:
             self.main_candidates.update(
                 (exercise.id, muscles_of(exercise)) for exercise in exercises
             )
-        # what each activity may go with, once there are main exercises to go with
-        annotate = request.use in (WARM_UP, COOL_DOWN) and self.main_candidates
+        annotate = bool(main)
         return SearchExercisesOutput(
             exercises=[
                 ExerciseSummaryOutput(
@@ -1365,7 +1412,51 @@ class FormiqTools:
             total_matches=len(matches),
             excluded_equipment=sorted(item.name for item in excluded) or None,
             matches_for_other_uses=other_uses,
+            note=search_note(
+                request.name,
+                exercises,
+                len(matches),
+                kept_as,
+                elsewhere=[item.name for item in other_uses.exercises] if other_uses else None,
+            ),
         )
+
+    def _named(self, name: str) -> tuple[set[int], set[int], dict[str, str]]:
+        """The ids of the exercises whose names have every word of name; those among them
+        the name asks for (exactly its words, or the exercise the catalog keeps in place of
+        a hidden duplicate that has them); and each such hidden duplicate's name with the name
+        of the exercise kept: "Standing Hip Circles" is not "not in the catalog" when it is
+        kept as "Hip Circles". The whole catalog is read, so a hidden duplicate is found
+        whatever the other filters are."""
+        everyone = self.catalog.list_exercises(ExerciseFilters())
+        by_name = {exercise.name.casefold(): exercise for exercise in everyone}
+        wanted = name_words(name)
+        ids: set[int] = set()
+        asked_for: set[int] = set()
+        kept_as: dict[str, str] = {}
+        for exercise in everyone:
+            if not name_matches(exercise.name, name):
+                continue
+            kept = DUPLICATE_OF.get(exercise.source_id)
+            if kept is None:
+                ids.add(exercise.id)
+                if name_words(exercise.name) == wanted:
+                    asked_for.add(exercise.id)
+            elif (twin := by_name.get(kept.casefold())) is not None:
+                ids.add(twin.id)
+                asked_for.add(twin.id)
+                kept_as[exercise.name] = twin.name
+        return ids, asked_for, kept_as
+
+    def _said_muscles_named(self) -> frozenset[str]:
+        """The muscles the user's latest message names (app.tools.muscles.muscles_named),
+        none when it is not known."""
+        if self._said_muscles is None:
+            self._said_muscles = frozenset()
+            if self.conversation and self.conversation[-1][0] == "user":
+                known = {group.name for group in self.catalog.list_muscle_groups(is_active=True)}
+                self._said_muscles = muscles_named(self.conversation[-1][1], known)
+        return self._said_muscles
 
     def _stated_equipment(self) -> StatedEquipment:
         """What the user said about their equipment (app.tools.equipment);
@@ -1545,7 +1636,12 @@ def _equipment_needed(catalog: Sequence[Any], name: str) -> Any:
 
 
 def most_relevant(
-    exercises: Sequence[Any], *, use: WorkoutSection | None, muscle: str | None
+    exercises: Sequence[Any],
+    *,
+    use: WorkoutSection | None,
+    muscle: str | None,
+    main: dict[int, frozenset[str]] | None = None,
+    said: frozenset[str] = frozenset(),
 ) -> list[Any]:
     """A search's matches, the most relevant first, so the few it returns are
     worth choosing from. Always the same order for the same matches:
@@ -1554,16 +1650,50 @@ def most_relevant(
        workout, so a proposal may always use it;
     2. for a muscle, the exercises it is a primary muscle of, then those it is
        a secondary muscle of;
-    3. the exercises Formiq classified (with a movement pattern), its own
-       among them, then the imported ones it has not;
-    4. then one exercise per primary muscle in turn, so that the few returned
+    3. in a warm-up or cool-down search once there are main exercises (main: the
+       ids of those the request's searches returned, with the muscles they
+       train), the activities that fit them: first those whose primary muscle a
+       main exercise trains, then those that work one of its muscles in some
+       other role, and last those no main exercise suits, which a proposal could
+       not use (suited_main). Live QA (2026-10-19) found a chest and triceps
+       workout offered the same ten generic activities as any other, so the
+       activities made for its muscles were never seen. The muscles the user
+       said they train (said, from app.tools.muscles) take the place of the main
+       exercises' when there are any: a main workout searched without a muscle
+       returns exercises for every muscle, which tells the activities apart no
+       better than none;
+    4. those some section uses before those none does (a stretch Formiq keeps but
+       does not use for any section cannot go into a workout);
+    5. outside a warm-up or cool-down search, Formiq's own exercises before the
+       imported ones, which are all classified now (app.catalog.patterns): its
+       own are the ones it wrote and described;
+    6. outside a warm-up or cool-down search, the standard lifts (strength and
+       powerlifting) before the specialised ones (plyometrics, Olympic lifts and
+       strongman): the jumps, skips and bounds of a pattern search would otherwise
+       crowd the lunges and squats out of the few returned;
+    7. the exercises Formiq classified (with a movement pattern), then the ones
+       it has not;
+    8. then one exercise per primary muscle in turn, so that the few returned
        cover several muscles rather than the first names in the alphabet;
-    5. by name, then id.
+    9. by name, then id.
     """
     activity = use in (WARM_UP, COOL_DOWN)
     wanted = muscle.casefold() if muscle else None
+    trained = set(said) if activity and said else set()
+    if activity and main and not trained:
+        trained = set().union(*main.values())
 
-    def tier(exercise: Any) -> tuple[bool, bool, bool]:
+    def fit(exercise: Any) -> int:
+        if not trained or exercise.movement_pattern in GENERAL_ACTIVITIES:
+            return 0
+        if any(
+            item.role == MuscleRole.PRIMARY and item.muscle_group.name in trained
+            for item in exercise.muscles
+        ):
+            return 0
+        return 1 if muscles_of(exercise) & trained else 2
+
+    def tier(exercise: Any) -> tuple[bool, bool, int, bool, bool, bool, bool]:
         return (
             activity and exercise.movement_pattern not in GENERAL_ACTIVITIES,
             wanted is not None
@@ -1571,6 +1701,10 @@ def most_relevant(
                 item.role == MuscleRole.PRIMARY and item.muscle_group.name.casefold() == wanted
                 for item in exercise.muscles
             ),
+            fit(exercise),
+            not exercise.uses,
+            not activity and exercise.source != ExerciseSource.FORMIQ,
+            not activity and exercise.category in SPECIALISED_CATEGORIES,
             exercise.movement_pattern is None,
         )
 
@@ -1582,6 +1716,61 @@ def most_relevant(
         ranked.append(((tier(exercise), turns[group], exercise.name, exercise.id), exercise))
         turns[group] += 1
     return [exercise for _, exercise in sorted(ranked, key=lambda pair: pair[0])]
+
+
+def cut_note(shown: int, total: int) -> str | None:
+    """What a search says when it returned only some of its matches, or None when it
+    returned them all: so a list is never given to the user as every match."""
+    if total <= shown:
+        return None
+    more = total - shown
+    return (
+        f"Showing {shown} of {total} matches, the most relevant first: this is not all of "
+        f"them. Say that {more} more {'exists' if more == 1 else 'exist'}, or narrow the "
+        "search (muscle, equipment, movement_pattern, difficulty) to see others."
+    )
+
+
+def search_note(
+    name: str | None,
+    shown: Sequence[Any],
+    total: int,
+    kept_as: dict[str, str],
+    *,
+    elsewhere: Sequence[str] | None = None,
+) -> str | None:
+    """What a search tells the model beyond its results, or None: that they are only some
+    of the matches (cut_note); for a search by name, that the exercise a name belongs to
+    is kept under another one, or that nothing has those words (unless exercises that do
+    are named for another section: elsewhere, their names), which is not saying the
+    catalog does not have the exercise."""
+    notes = [cut_note(len(shown), total)]
+    if name is not None:
+        returned = {exercise.name for exercise in shown} | set(elsewhere or ())
+        notes += [
+            f"The catalog keeps '{hidden}' as '{kept}'."
+            for hidden, kept in sorted(kept_as.items())
+            if kept in returned
+        ]
+        if total == 0 and elsewhere is None:
+            notes.append(
+                f"No exercise matches every word of {name!r} with the "
+                "other filters. That is not the catalog having no such exercise: try fewer "
+                "or other words (the main word of its name), or search by muscle or "
+                "movement_pattern, before saying it is not there."
+            )
+    return " ".join(note for note in notes if note) or None
+
+
+def visible(exercises: Iterable[Any]) -> list[Any]:
+    """A search's matches without Formiq's hidden duplicates (app.catalog.
+    classification): an imported record of an exercise the catalog keeps under
+    another name. They suit no section, so a search by use never returns them;
+    this keeps them out of one that gives no use too (a search by movement
+    pattern or muscle), where they would sit beside the exercise kept in their
+    place. They stay in the catalog, readable by id, and in the plans that hold
+    them."""
+    return [exercise for exercise in exercises if exercise.source_id not in HIDDEN_DUPLICATE_IDS]
 
 
 def repeated(exercises: Sequence[Any]) -> list[str]:

@@ -40,15 +40,29 @@ exercises are prescribed in reps.
 
 Equipment: a record's equipment is mapped as it is, except for the few in
 EQUIPMENT_NEEDED, whose record says "body only" though their instructions
-hang from a bar, dip on a bench or between bars, or lean on a racked bar.
+hang from a bar, dip on a bench or between bars, or lean on a racked bar, and
+the few in EQUIPMENT_NAMED, whose record says "machine" for what the catalog
+names exactly (a treadmill, a recumbent bike, which is a stationary bike).
 Formiq links them to that equipment; the record itself is kept as it was.
 
 Duplicates: the few records in FORMIQ_DUPLICATES are one of Formiq's own
 exercises under another name, with the same equipment. They suit no section,
-so a workout never holds both; they stay in the catalog, readable by id.
+so a workout never holds both; they stay in the catalog, readable by id. The
+records in ACTIVITY_DUPLICATES are the same for a warm-up or cool-down
+activity: the same movement as another exercise the catalog keeps, though
+perhaps with other equipment (a treadmill for a walk) or an extra step. Each
+names the exercise kept in its place. They are hidden the same way, so a saved
+plan that holds one still reads it; nothing is deleted.
+
+Movement patterns: a cardio record is CARDIO (only the easy ones suit a
+section), a dynamic drill is MOBILITY and a held stretch is STRETCH (foam
+rolling, listed as both, is MOBILITY: it is done before training too). The
+other records stay unclassified, and so does every drill or stretch in
+ACTIVITY_DUPLICATES: a search by movement pattern has no section to leave it
+out by, and would offer the coach an exercise it cannot propose.
 """
 
-from app.schemas.exercise import WorkoutSection
+from app.schemas.exercise import MovementPattern, WorkoutSection
 
 WARM_UP = WorkoutSection.WARM_UP
 MAIN_WORKOUT = WorkoutSection.MAIN_WORKOUT
@@ -167,8 +181,28 @@ COOL_DOWN_STRETCHES = frozenset(
     }
 )
 
-WARM_UP_IDS = WARM_UP_CARDIO | WARM_UP_DRILLS
-COOL_DOWN_IDS = COOL_DOWN_CARDIO | COOL_DOWN_STRETCHES
+# Records that repeat an activity the catalog keeps under another name, by
+# record id, each with the name of the exercise kept in its place. Formiq's own
+# is kept where it has one, since saved plans already use it; Upward_Stretch
+# repeats Overhead_Stretch, which is also an imported record.
+ACTIVITY_DUPLICATES = {
+    "Ankle_On_The_Knee": "Figure-Four Glute Stretch",
+    "Bicycling_Stationary": "Easy Stationary Cycling",
+    "Calf_Stretch_Elbows_Against_Wall": "Standing Calf Stretch",
+    "Calf_Stretch_Hands_Against_Wall": "Standing Calf Stretch",
+    "Cat_Stretch": "Cat-Cow",
+    "Front_Leg_Raises": "Leg Swings",
+    "Kneeling_Hip_Flexor": "Kneeling Hip Flexor Stretch",
+    "Knee_Across_The_Body": "Supine Spinal Twist",
+    "Shoulder_Stretch": "Cross-Body Shoulder Stretch",
+    "Standing_Hip_Circles": "Hip Circles",
+    "Triceps_Stretch": "Overhead Triceps Stretch",
+    "Upward_Stretch": "Overhead Stretch",
+    "Walking_Treadmill": "Brisk Walk",
+}
+
+WARM_UP_IDS = (WARM_UP_CARDIO | WARM_UP_DRILLS) - set(ACTIVITY_DUPLICATES)
+COOL_DOWN_IDS = (COOL_DOWN_CARDIO | COOL_DOWN_STRETCHES) - set(ACTIVITY_DUPLICATES)
 
 # Formiq's equipment for records that say "body only" but need some, by its
 # instructions: a pull-up bar to hang from, a bench or parallel bars to dip on
@@ -188,6 +222,17 @@ EQUIPMENT_NEEDED = {
     "Body_Tricep_Press": ("Barbell", "Squat Rack"),
 }
 
+# Formiq's equipment for records that name it less exactly than the catalog does:
+# "machine" for a treadmill, which a user who has one names by that, and for a
+# recumbent bike, which is a stationary bike. The treadmill record that is a
+# hidden duplicate is linked the same way, so the equipment is the same wherever
+# it is read.
+EQUIPMENT_NAMED = {
+    "Jogging_Treadmill": ("Treadmill",),
+    "Recumbent_Bike": ("Stationary Bike",),
+    "Walking_Treadmill": ("Treadmill",),
+}
+
 # Records that are one of Formiq's own exercises (by its name) under another
 # name, done with the same equipment
 FORMIQ_DUPLICATES = {
@@ -199,10 +244,34 @@ FORMIQ_DUPLICATES = {
 }
 
 
+# The exercise the catalog keeps in place of each record it hides as a duplicate,
+# by record id: a search that gives no section leaves the records out too
+# (app.tools.formiq_tools.visible), and a search by name finds the kept one when
+# the name is a hidden record's (app.tools.formiq_tools.FormiqTools._named)
+DUPLICATE_OF = {**FORMIQ_DUPLICATES, **ACTIVITY_DUPLICATES}
+HIDDEN_DUPLICATE_IDS = frozenset(DUPLICATE_OF)
+
+
+def movement_pattern_of(source_id: str, category: str) -> MovementPattern | None:
+    """Formiq's movement pattern for the upstream exercise: CARDIO for cardio,
+    MOBILITY for a listed drill, STRETCH for a listed stretch, otherwise none.
+    category is the record's own value. A hidden duplicate of a drill or a
+    stretch has none (a cardio one is CARDIO, as every cardio record is)."""
+    if category == "cardio":
+        return MovementPattern.CARDIO
+    if source_id in ACTIVITY_DUPLICATES:
+        return None
+    if source_id in WARM_UP_DRILLS:
+        return MovementPattern.MOBILITY
+    if source_id in COOL_DOWN_STRETCHES:
+        return MovementPattern.STRETCH
+    return None
+
+
 def uses_of(source_id: str, category: str, equipment: str | None) -> list[WorkoutSection]:
     """The sections the upstream exercise suits, in workout order. category
     and equipment are the record's own values."""
-    if source_id in FORMIQ_DUPLICATES:
+    if source_id in FORMIQ_DUPLICATES or source_id in ACTIVITY_DUPLICATES:
         return []
     uses = set()
     if source_id in WARM_UP_IDS:

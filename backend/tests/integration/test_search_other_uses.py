@@ -89,7 +89,9 @@ def test_a_search_that_finds_something_is_as_it_was(tools_for, user, filters):
 
     assert found["count"] > 0
     assert "matches_for_other_uses" not in found
-    assert set(found) <= {"exercises", "count", "total_matches", "excluded_equipment"}
+    # the note is there only when more exercises match than are returned
+    assert set(found) <= {"exercises", "count", "total_matches", "excluded_equipment", "note"}
+    assert ("note" in found) == (found["total_matches"] > found["count"])
 
 
 def test_a_search_that_matches_nothing_even_without_its_use_says_so_by_saying_nothing_more(

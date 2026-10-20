@@ -24,10 +24,12 @@ from tests.unit.test_coach_equipment_memory import T1E_HISTORY, T1E_MESSAGE, exc
 
 
 # searches that are not for a workout, so that the exercises a proposal names
-# were given by a tool (they are not narrowed by what the user lacks)
+# were given by a tool (they are not narrowed by what the user lacks): the
+# main exercises, and the brisk walk the workout warms up and cools down with
 GROUNDING = (
     call("search_exercises", muscle="Quadriceps", available_equipment=["Dumbbell"]),
     call("search_exercises", movement_pattern="HORIZONTAL_PUSH"),
+    call("search_exercises", movement_pattern="CARDIO"),
 )
 
 

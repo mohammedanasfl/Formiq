@@ -94,7 +94,9 @@ EQUIPMENT_ALIASES: Mapping[str, tuple[str, ...]] = {
     ),
     "stationary bike": (
         "exercise bike", "spin bike", "indoor bike", "bike", "cycle", "spinning bike",
+        "recumbent bike", "recumbent", "upright bike",
     ),
+    "treadmill": ("tread mill", "running machine", "walking machine", "walking pad"),
     "rowing machine": ("rower", "erg", "rowing erg", "indoor rower"),
     "machine": ("weight machine", "gym machine", "resistance machine"),
     "medicine ball": ("med ball",),
