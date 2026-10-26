@@ -14,6 +14,7 @@ from app.api.routes import (
     exercises,
     health,
     muscle_groups,
+    recovery_summaries,
     users,
     workout_plans,
     workout_sessions,
@@ -47,4 +48,5 @@ app.include_router(muscle_groups.router)
 app.include_router(equipment.router)
 app.include_router(workout_plans.router)
 app.include_router(workout_sessions.router)
+app.include_router(recovery_summaries.router)
 app.include_router(coach.router)

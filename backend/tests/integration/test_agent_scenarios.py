@@ -669,7 +669,7 @@ def run_scenario(scenario: Scenario, session, fixtures, provider=None) -> Run:
         if scenario.canned is not None:
             canned = CannedTools(fill(scenario.canned, names), tool_users)
             stack.enter_context(
-                patch.object(CoachService, "_tools", lambda self, conversation: canned)
+                patch.object(CoachService, "_tools", lambda self, conversation, stated=None: canned)
             )
         limits = {}
         if scenario.context_chars is not None:

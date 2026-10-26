@@ -314,6 +314,8 @@ def test_the_coach_holds_what_the_user_said_whatever_the_model_proposes(
         tool_turn(
             call("search_exercises", muscle="Quadriceps", available_equipment=["Dumbbell"]),
             call("search_exercises", use="MAIN_WORKOUT"),
+            # the walk the workout warms up and cools down with
+            call("search_exercises", movement_pattern="CARDIO"),
         ),
         # and the model forgets what the user said about their equipment
         tool_turn(proposal(**workout(ids, *main_of(ids, "Goblet Squat", "Push-Up")))),

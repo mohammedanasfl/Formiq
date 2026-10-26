@@ -34,7 +34,7 @@ from app.agent import (
     initial_state,
 )
 from app.agent import safety as safety_rules
-from app.agent.context import ConversationContext
+from app.agent.context import ConversationContext, EquipmentSaid
 from app.agent.policy import CoachDecision
 from app.ai import AIModelOutputError, ModelTurn, ToolCall, ToolResult
 from app.approvals import (
@@ -242,6 +242,7 @@ PLAIN = (str, int, float, bool, type(None), Enum)
 STATE_TYPES = (
     ConversationContext,
     ConversationTurn,
+    EquipmentSaid,  # the catalog's names for what the user said they have and lack
     ModelTurn,
     ToolCall,
     ToolResult,

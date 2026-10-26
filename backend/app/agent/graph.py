@@ -49,10 +49,11 @@ context's user only. Nothing is kept after the turn.
 
 import json
 import logging
+import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -66,6 +67,13 @@ from app.agent.context import (
     fit_request,
     render_conversation,
 )
+from app.agent.debug_view import (
+    debug_request,
+    debug_response,
+    debug_source,
+    debug_tool,
+    prompt_variant,
+)
 from app.agent.policy import (
     ANSWERS,
     OUT_OF_SCOPE_REPLY,
@@ -73,6 +81,7 @@ from app.agent.policy import (
     PROPOSAL_CONTEXT,
     RESPOND,
     SAFETY_POLICY,
+    MISSING_ERROR_CODES,
     CoachDecision,
     ContextGap,
     ContextState,
@@ -80,6 +89,7 @@ from app.agent.policy import (
     Intent,
     Respond,
     SafetyPolicy,
+    asks_about_proposal,
     asks_for_change,
     check_decision,
     check_safety,
@@ -87,15 +97,23 @@ from app.agent.policy import (
     context_states,
     fitness_terms,
     known_ids,
+    pending_proposal_changes,
     pending_proposal_shown,
     proposal_context_gap,
+    proposal_length,
     tools_used,
     ungrounded_ids,
 )
 from app.agent.safety import SafetyAssessment, assess_safety
 from app.agent.state import CoachState
 from app.agent.trace_metadata import call_metadata, result_metadata
-from app.agent.trust import REPLY_PROBLEMS, reply_problem
+from app.agent.trust import (
+    REPLY_MISSTATES_DURATION,
+    REPLY_PROBLEMS,
+    ProposalLength,
+    is_reply_problem,
+    reply_problem,
+)
 from app.ai import (
     AIModelOutputError,
     AIProviderError,
@@ -108,7 +126,9 @@ from app.ai import (
     chat_messages,
 )
 from app.approvals.access import Access, access_of, is_write_action
-from app.observability import Failure, Observation, RunTrace, no_trace, tool_failure
+from app.observability import Failure, Observation, RunTrace, classify, no_trace, tool_failure
+from app.observability.debug import Authored
+from app.observability.trajectory import RETRY_DECIDED, RETRY_RECOVERED, RETRY_REJECTED_AGAIN
 
 logger = logging.getLogger(__name__)
 
@@ -146,11 +166,37 @@ PROPOSAL_NOT_MADE_REPLY = (
     "you have, your equipment or the part of the body to train."
 )
 
+# The reply when a turn made a proposal and only the model's own reply to it was
+# refused, until the limit: the proposal is shown, with what its card says and
+# nothing the model wrote (proposal_card_reply). It is not saved: only the user's
+# approval saves it.
+CARD_REPLY_LEAD = (
+    "Here is the workout Formiq built for you: about {total} minutes in all ({warm_up} minutes "
+    "of warm-up, {main} of main work and {cool_down} of cool-down), with {exercises} main "
+    "{noun}."
+)
+CARD_REPLY_REVISION = (
+    " It is a replacement for one of your saved workouts: that workout stays as it is unless "
+    "you approve this one."
+)
+CARD_REPLY_INCOMPLETE = (
+    " Formiq could not cover every part of its focus with the exercises it has for you: the "
+    "card says what is missing."
+)
+CARD_REPLY_CLOSE = (
+    " It is not saved yet and waits for your approval: review the card below and approve it in "
+    "Formiq to save it. I couldn't write a reliable explanation of it this time, so this "
+    "summary comes from the workout itself."
+)
+
 # error codes of the results that the graph itself gives the model
 ID_NOT_GROUNDED = "ID_NOT_GROUNDED"
 DECISION_REJECTED = "DECISION_REJECTED"
 WRITE_NOT_AUTHORIZED = "WRITE_NOT_AUTHORIZED"
 PROPOSAL_REFUSED = "PROPOSAL_REFUSED"
+# A second proposal in a turn, which accepts one: not run, and not a refusal of
+# the workout (PROPOSAL_REFUSED is for what proposing again cannot fix).
+PROPOSAL_LIMIT = "PROPOSAL_LIMIT"
 UNKNOWN_TOOL = "UNKNOWN_TOOL"
 DUPLICATE_CALL = "DUPLICATE_CALL"
 # A proposal made before the reads it rests on. Formiq has them now: it loaded
@@ -173,6 +219,7 @@ CORRECTABLE_PROPOSAL_ERRORS = frozenset(
 GRAPH_REFUSALS = frozenset(
     {
         PROPOSAL_REFUSED,
+        PROPOSAL_LIMIT,
         CONTEXT_MISSING,
         ID_NOT_GROUNDED,
         DUPLICATE_CALL,
@@ -227,6 +274,22 @@ COACH_INSTRUCTIONS = (
     "- Use the exercise catalog tools for facts about exercises and to find "
     "alternatives. If you suggest an exercise from your own knowledge, say so: never "
     "present it as a Formiq catalog exercise.\n"
+    "- A search that finds nothing says only that nothing matched that search: its use, "
+    "equipment, muscle and difficulty. Never tell the user the catalog has no such exercise "
+    "at all; say what you searched, and when matches_for_other_uses names exercises, that "
+    "the catalog has them for another section (a warm-up or cool-down, say) but Formiq "
+    "does not use them for the one searched, so you cannot put them there.\n"
+    "- A search returns at most a few of its matches (total_matches says how many there are): "
+    "when its note says only some are shown, never present them as all of the matches; say "
+    "how many more there are, or search again with a narrower filter.\n"
+    "- When the user names an exercise, look for it by name (search_exercises with name: a few "
+    "of its words, and no use, so it is found whichever section it is for) before telling them "
+    "the catalog does not have it. If its note says the catalog keeps that exercise under "
+    "another name, say so and use that one, if its uses include the section you need; if "
+    "nothing matches, try fewer words or search by muscle before you say it is not there.\n"
+    "- Never give a number of calories burned by a workout, an exercise or a warm-up: Formiq "
+    "has no sourced figure for it, and one from memory looks exact when it is not. If asked, "
+    "say so plainly; you may still say that longer or harder work burns more.\n"
     "- Formiq knows who the user is: never ask for or send a user id.\n"
     "- The profile gives the user's name. Formiq does not give you their email or "
     "phone number: if asked, say they are not available to you here.\n"
@@ -273,7 +336,10 @@ COACH_INSTRUCTIONS = (
     "- You have only a few rounds of tool calls, so batch them: in the first round call "
     "get_user_profile, get_current_workout_plan and get_latest_workout_session with every "
     "search the workout needs (MAIN_WORKOUT, WARM_UP and COOL_DOWN), all together, and "
-    "propose in the next round. When Formiq refuses a proposal, it names everything that "
+    "propose in the next round. If you propose before those reads, Formiq reads what you "
+    "skipped and returns it with its refusal (loaded): see whether the plan it shows already "
+    "suits the user, and propose again only if a new workout is still needed. When Formiq "
+    "refuses a proposal, it names everything that "
     "is wrong and suggests catalog exercises that fix it (suggestions): correct it all in "
     "one new proposal, with those ids if they fit, instead of searching again. Formiq "
     "accepts one proposal a turn.\n"
@@ -302,6 +368,11 @@ COACH_INSTRUCTIONS = (
     "- Leave out any activity that conflicts with what the user said they cannot do or "
     "use (such as kneeling, jumping or equipment they lack) and choose another, such as "
     "an easy walk. Present stretches as optional, never as required.\n"
+    "- Say plainly when you could not do something the user asked for: an exercise or a "
+    "piece of equipment the catalog does not have or Formiq does not use for that section "
+    "(a neck stretch, a treadmill walk, a guided breathing drill), or one you replaced with "
+    "another, such as the exercise the catalog keeps in place of a duplicate (name what you "
+    "used instead). Never say a workout includes something that is not in it.\n"
     "- Changing a saved plan: when the user asks to change, rewrite or replace one of "
     'their plans ("rewrite this plan", "a different version"), read it first '
     "(get_current_workout_plan, or get_workout_plan by its id), then propose with "
@@ -511,6 +582,15 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
             allowed_decisions=sorted(safety.decisions) if safety else [],
         ):
             pass
+        if trace.debug is not None:
+            trace.debug.note(
+                "safety_check",
+                flagged=safety is not None,
+                category=assessment.category,
+                rule=assessment.signal,
+                tool_calls_allowed=safety is None,
+                allowed_decisions=sorted(safety.decisions) if safety else [],
+            )
     if safety is not None:
         logger.info(
             "Safety check: category=%s signal=%s", assessment.category, assessment.signal
@@ -551,6 +631,18 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
                 context_budget=context.max_context_chars,
                 context_fit_success=fit.fits and compactions <= MAX_CONTEXT_COMPACTIONS,
             )
+        if trace.debug is not None:
+            trace.debug.note(
+                "context_fit",
+                chars_before=fit.size_before,
+                chars_after=fit.size,
+                budget=context.max_context_chars,
+                compacted_results=fit.compacted_results,
+                superseded_results=len(fit.superseded),
+                compaction_count=compactions,
+                compaction_limit=MAX_CONTEXT_COMPACTIONS,
+                fits=fit.fits and compactions <= MAX_CONTEXT_COMPACTIONS,
+            )
         if not fit.fits or compactions > MAX_CONTEXT_COMPACTIONS:
             # never send more than the budget: no turn, so the tools node ends the turn
             failure = (
@@ -559,7 +651,7 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
                 else Failure.COMPACTION_LIMIT_EXCEEDED
             )
             step.fail(failure)
-            trace.update(termination=failure)
+            trace.terminate(failure)
             logger.warning(
                 "The coach's context is over its budget: size=%d budget=%d compactions=%d; "
                 "the turn ends without the model",
@@ -579,6 +671,36 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
             )
 
         trace.count("model_requests")
+        journal = trace.trajectory
+        number = journal.model_request_started(
+            round=iteration,
+            kind=kind.value,
+            offered=len(declarations),
+            model=getattr(context.provider, "model", None),
+        )
+        if kind is Round.PROPOSAL_RETRY and safety is None:
+            journal.retry_round_started(round=iteration, request=number)
+        # the local debug view of what is about to be sent (AGENT_DEBUG): before the
+        # clock below starts, so what it costs is not counted as the model's time
+        debug_request(
+            trace,
+            number=number,
+            iteration=iteration,
+            kind=kind.value,
+            model=getattr(context.provider, "model", None),
+            variant=prompt_variant(
+                str(assessment.category) if safety is not None else None,
+                context.pending_proposal is not None,
+            ),
+            instructions=instructions,
+            declarations=declarations,
+            messages=state["messages"],
+            fit=fit,
+            conversation=state["conversation"],
+            budget=context.max_context_chars,
+            compactions=compactions,
+        )
+        asked = time.perf_counter()
         try:
             with step.child(
                 "model_request",
@@ -602,8 +724,11 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
                     requested_tool_calls=len(turn.tool_calls),
                     called_respond=any(call.name == RESPOND.name for call in turn.tool_calls),
                 )
-        except AIProviderError as error:
-            if safety is None:
+        except Exception as error:
+            journal.provider_error(
+                number, category=classify(error), duration_ms=elapsed_ms(asked)
+            )
+            if safety is None or not isinstance(error, AIProviderError):
                 raise
             # A flagged request does not need the model to be answered safely: no
             # turn, so the tools node ends it with Formiq's safe reply.
@@ -614,7 +739,20 @@ def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
                 error,
             )
             return {"messages": []}
+        journal.model_request_completed(
+            number,
+            duration_ms=elapsed_ms(asked),
+            usage=turn.usage,
+            model_reported=turn.model,
+            requested_calls=len(turn.tool_calls),
+            responded=any(call.name == RESPOND.name for call in turn.tool_calls),
+        )
+        debug_response(trace, number, turn)
     return {"messages": [turn], "context_compactions": compactions}
+
+
+def elapsed_ms(since: float) -> int:
+    return round((time.perf_counter() - since) * 1000)
 
 
 def turn_message(turn: ModelTurn) -> dict[str, Any]:
@@ -687,6 +825,7 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
     earlier = tool_results(state["messages"])
     if turn is None:
         # the coach sent no request: its context was over the budget
+        debug_source(trace, "generic_fallback", "context_budget", CANNOT_ANSWER_REPLY, authored=True)
         return finish(
             CANNOT_ANSWER_REPLY,
             CoachDecision(Intent.AMBIGUOUS, Decision.CANNOT_ANSWER, tools_used(earlier)),
@@ -696,24 +835,50 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
     seen = seen_results(state, context)
 
     respond = None
+    rejection = None
     if len(calls) == 1 and calls[0].name == RESPOND.name:
         respond, rejection = check_respond(
             calls[0], seen, assessment, COACH_INSTRUCTIONS, tool_names(context), trace,
             iteration=iteration, compacted_excluded=len(earlier) - len(seen),
             proposed=proposed(earlier), awaiting_approval=context.proposal_awaiting_approval,
-            explaining=pending_proposal_shown(seen) and not asks_for_change(state["user_message"]),
+            explaining=explaining_proposal(state["user_message"], seen, earlier),
+            recorded_changes=pending_proposal_changes(seen),
+            length=proposal_length(earlier, seen, user_texts(state)),
             fitness=fitness_terms(state["user_message"], state["conversation"].size > 0),
         )  # fmt: skip
         if rejection is None:
-            trace.update(termination="decision_accepted")
-            return accept(respond, earlier, assessment)
+            trace.terminate("decision_accepted")
+            end_retry_round(trace, kind, iteration, RETRY_DECIDED)
+            return accepted(trace, respond, accept(respond, earlier, assessment))
         results = [error_result(DECISION_REJECTED, rejection)]
+        if trace.debug is not None:
+            # the rejection goes back to the model as the respond call's result: it
+            # decides again, unless this round is the last
+            trace.debug.note(
+                "rejection_returned_to_model",
+                iteration=iteration,
+                iteration_limit=context.max_tool_iterations,
+                round_kind=kind,
+                model_asked_again=kind is not Round.DECISION,
+            )
     else:
         with trace.child("tool_calls", iteration=iteration, requested=len(calls)) as batch:
             results = run_calls(
                 calls, state["user_message"], earlier, seen, context, batch, iteration
             )
 
+    if kind is Round.PROPOSAL_RETRY:
+        made = any(
+            access_of(call.name) is Access.PROPOSE and "output" in result
+            for call, result in zip(calls, results, strict=True)
+        )
+        tried = any(access_of(call.name) is Access.PROPOSE for call in calls)
+        end_retry_round(
+            trace,
+            kind,
+            iteration,
+            RETRY_RECOVERED if made else RETRY_REJECTED_AGAIN if tried else RETRY_DECIDED,
+        )
     update: dict[str, Any] = {
         "messages": [
             ToolResult(call=call, result=result)
@@ -724,9 +889,26 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
     if kind is Round.DECISION:
         # past the limit only a decision could end the turn, and none was accepted
         logger.warning("The coach reached no acceptable decision: %s", results[0])
-        trace.update(termination="retry_limit_reached")
+        trace.terminate("retry_limit_reached")
+        if respond is not None and (card := proposal_card_reply(respond, rejection, earlier)):
+            # The proposal Formiq accepted is shown, and only the model's reply to it was
+            # refused: the decision it gave passed, so it stands, with Formiq's own words.
+            logger.warning(
+                "The coach's reply to its accepted proposal was refused until the limit; "
+                "the proposal is shown with Formiq's own reply"
+            )
+            debug_source(trace, "card_fallback", "accepted_proposal", card, authored=True)
+            update.update(
+                finish(
+                    card,
+                    CoachDecision(
+                        respond.intent, respond.decision, tools_used(earlier), assessment.category
+                    ),
+                )
+            )
+            return update
         # a turn that tried to propose says that nothing was, whatever the model wrote
-        attempted = any(access_of(result.call.name) is Access.PROPOSE for result in earlier)
+        attempted = proposal_attempted(earlier)
         update["final_response"] = (
             PROPOSAL_NOT_MADE_REPLY
             if attempted and not proposed(earlier)
@@ -737,7 +919,21 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
             Decision.CANNOT_ANSWER,
             tools_used(earlier),
         )
+        debug_source(
+            trace,
+            "generic_fallback",
+            "nothing_proposed" if attempted and not proposed(earlier) else "retry_limit",
+            update["final_response"],
+            authored=True,
+        )
     return update
+
+
+def end_retry_round(trace: RunTrace, kind: Round, iteration: int, outcome: str) -> None:
+    """The retry round ends, if this was it: recovered (the corrected proposal was
+    accepted), rejected again, or the model decided instead."""
+    if kind is Round.PROPOSAL_RETRY:
+        trace.trajectory.retry_round_completed(round=iteration, outcome=outcome)
 
 
 def seen_results(state: CoachState, context: CoachContext) -> list[ToolResult]:
@@ -790,21 +986,34 @@ def end_safely(
             calls[0], (), assessment, safety_instructions(safety), names, trace, iteration=0
         )
         if rejection is None:
-            trace.update(termination="decision_accepted", safety_path="model")
-            return accept(respond, (), assessment)
+            trace.terminate("decision_accepted", safety_path="model")
+            return accepted(trace, respond, accept(respond, (), assessment))
         reason = "decision_rejected"
-    trace.update(
-        termination="safety_fallback",
+    trace.terminate(
+        "safety_fallback",
         safety_path="fixed_safe_response",
         safety_fallback_reason=reason,
     )
     logger.warning(
         "The coach's decision broke the safety policy for %s: %s", assessment.category, rejection
     )
+    if trace.debug is not None:
+        trace.debug.note("safety_fallback", category=assessment.category, reason=reason)
+    debug_source(trace, "safety_fallback", reason, safety.fallback_reply, authored=True)
     return finish(
         safety.fallback_reply,
         CoachDecision(safety.fallback_intent, safety.fallback_decision, (), assessment.category),
     )
+
+
+def accepted(trace: RunTrace, respond: Respond, update: dict[str, Any]) -> dict[str, Any]:
+    """accept()'s update, once its reply's author is noted for the local debug
+    output: the model's, or Formiq's own redirect for an out-of-scope request."""
+    if respond.intent is Intent.OUT_OF_SCOPE:
+        debug_source(trace, "generic_fallback", "out_of_scope_redirect", update["final_response"], authored=True)
+    else:
+        debug_source(trace, "model", "decision_accepted", update["final_response"], authored=False)
+    return update
 
 
 def accept(
@@ -858,6 +1067,7 @@ def run_calls(
     proposing = False
     runnable = []
     waiting = []
+    repeats = repeat_kinds(calls, earlier)
     for index, call in enumerate(calls):
         if call.name == RESPOND.name:
             results[index] = error_result(
@@ -873,7 +1083,7 @@ def run_calls(
         elif access is Access.PROPOSE and (accepted or proposing):
             # one proposal a turn: the one the user is shown
             results[index] = error_result(
-                PROPOSAL_REFUSED,
+                PROPOSAL_LIMIT,
                 "Formiq already accepted a proposal in this turn, which is the one the user "
                 "will see: do not propose another; call respond"
                 if accepted
@@ -909,21 +1119,28 @@ def run_calls(
     unread: list[ToolCall] = []
     unread_observed: list[Observation] = []
     unread_results: dict[int, dict[str, Any]] = {}
+    durations: dict[int, float | None] = {}
+    unread_durations: list[float | None] = []
     try:
         if runnable:
             # the trusted user of the request, whatever the calls' arguments say
-            ran = context.tools.run([calls[index] for index in runnable], user_id=context.user_id)
+            ran, took = timed_run(context, [calls[index] for index in runnable], iteration)
             results.update(zip(runnable, ran, strict=True))
+            durations = dict(zip(runnable, took, strict=True))
         if waiting:
             unread = unread_context(earlier, [calls[index] for index in runnable])
             if unread:
                 unread_observed = [
                     batch.start(
-                        call.name, "tool", iteration=iteration, origin="formiq", **call_metadata(call)
+                        call.name,
+                        "tool",
+                        iteration=iteration,
+                        origin="formiq",
+                        **call_metadata(call),
                     )
                     for call in unread
                 ]
-                ran = context.tools.run(unread, user_id=context.user_id)
+                ran, unread_durations = timed_run(context, unread, iteration, origin="formiq")
                 unread_results = dict(enumerate(ran))
             holding = [
                 *(ToolResult(calls[index], results[index]) for index in runnable),
@@ -937,13 +1154,79 @@ def run_calls(
                     known_ids(user_message, [*earlier, *holding]),
                 )
     finally:
-        record_tool_results(context.trace, calls, results, runnable, observed)
+        record_tool_results(
+            context.trace, calls, results, runnable, observed,
+            iteration=iteration, repeats=repeats, durations=durations,
+        )  # fmt: skip
         if unread:
             record_tool_results(
                 context.trace, unread, unread_results, list(range(len(unread))), unread_observed,
-                requested=False,
+                iteration=iteration, origin="formiq",
+                durations=dict(enumerate(unread_durations)),
             )  # fmt: skip
     return [results[index] for index in range(len(calls))]
+
+
+def timed_run(
+    context: CoachContext, calls: Sequence[ToolCall], iteration: int, origin: str = "model"
+) -> tuple[list[dict[str, Any]], list[float | None]]:
+    """The tools' results for these calls, and how long each took: as the tools
+    measured it, else (a tools object that does not say) none. The run's own
+    time goes to the trajectory, measured here, never inferred from the turn."""
+    started = time.perf_counter()
+    results = context.tools.run(calls, user_id=context.user_id)
+    context.trace.trajectory.tool_batch(
+        round=iteration, duration_ms=elapsed_ms(started), calls=len(calls), origin=origin
+    )
+    measured = getattr(context.tools, "last_durations_ms", None)
+    if not isinstance(measured, list) or len(measured) != len(calls):
+        measured = [None] * len(calls)
+    return results, measured
+
+
+def evidence_key(results: Sequence[ToolResult]) -> tuple[frozenset[str], frozenset[int]]:
+    """What a refused call's retry may have changed: which of the reads a
+    proposal rests on were made, and which ids tools have given."""
+    states = context_states(results)
+    made = frozenset(name for name, state in states.items() if state is not ContextState.NOT_LOADED)
+    return made, frozenset(known_ids("", results))
+
+
+def repeat_kinds(calls: Sequence[ToolCall], earlier: Sequence[ToolResult]) -> list[str]:
+    """repeat_kind() for each call. It is for observability only, so a failure
+    here is logged by its type and costs the turn nothing."""
+    try:
+        return [repeat_kind(call, earlier) for call in calls]
+    except Exception as error:  # noqa: BLE001 - observability must not fail the turn
+        logger.warning(
+            "Classifying repeated calls failed (%s); the turn goes on", type(error).__name__
+        )
+        return ["none"] * len(calls)
+
+
+def repeat_kind(call: ToolCall, earlier: Sequence[ToolResult]) -> str:
+    """How this call relates to an identical earlier one in the turn: "none" (the
+    first of its kind, or only a transient failure before it), "unchanged" (an
+    identical call ran and came back, or Formiq refused it before with
+    nothing since changing the evidence), or "evidence_changed" (Formiq
+    refused it before it ran, and a read or an id has come since)."""
+    same = [
+        index
+        for index, result in enumerate(earlier)
+        if result.call.name == call.name and result.call.arguments == call.arguments
+    ]
+
+    def code(index: int) -> object:
+        return (earlier[index].result.get("error") or {}).get("code")
+
+    if any(code(index) not in GRAPH_REFUSALS | PASSING_ERRORS for index in same):
+        return "unchanged"
+    refused = [index for index in same if code(index) in GRAPH_REFUSALS]
+    if not refused:
+        return "none"
+    if evidence_key(earlier[: refused[-1]]) != evidence_key(earlier):
+        return "evidence_changed"
+    return "unchanged"
 
 
 def unread_context(earlier: Sequence[ToolResult], batch: Sequence[ToolCall]) -> list[ToolCall]:
@@ -1008,6 +1291,43 @@ def write_refusal(call: ToolCall) -> dict[str, Any]:
     return error_result(UNKNOWN_TOOL, "there is no tool with this name")
 
 
+# The reads of the user's own record, which take no id: "none yet" is their answer
+# for a new user (no profile, no plan, no workout, no proposal waiting), not a
+# failure of the tool.
+RECORD_READS = frozenset(
+    {
+        "get_user_profile",
+        "get_current_workout_plan",
+        "get_latest_workout_session",
+        "get_pending_proposal",
+    }
+)
+
+
+class CallOutcome(NamedTuple):
+    # ran in a tool, and was not refused for the tools' per-turn limit
+    executed: bool
+    # the result's error code, if it is an error
+    code: str | None
+    # the failure category that stands for the error; none for a record read that found none
+    category: str | None
+    # a read of the user's own record that found none: executed, and not a failure
+    empty: bool
+
+
+def call_outcome(call: ToolCall, result: dict[str, Any], ran: bool) -> CallOutcome:
+    """How a call ended. A call refused by the graph, or by the tools' per-turn
+    limit, did not execute: it is blocked. One that ran and returned an error
+    failed, unless it is a read of the user's own record that found none."""
+    error = result.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    code = code if isinstance(code, str) else None
+    executed = ran and code != "TOOL_LIMIT_REACHED"
+    empty = executed and call.name in RECORD_READS and code in MISSING_ERROR_CODES
+    category = None if code is None or empty else str(tool_failure(code, call.name))
+    return CallOutcome(executed, code, category, empty)
+
+
 def record_tool_results(
     trace: RunTrace,
     calls: Sequence[ToolCall],
@@ -1015,15 +1335,18 @@ def record_tool_results(
     runnable: Sequence[int],
     observed: Sequence[Observation],
     *,
-    requested: bool = True,
+    iteration: int = 0,
+    origin: str = "model",
+    repeats: Sequence[str] | None = None,
+    durations: dict[int, float | None] | None = None,
 ) -> None:
-    """Each call's outcome, in its tool observation, and the trace's counts. The
-    calls Formiq made itself (requested false) were not requested by the model."""
-    if requested:
-        trace.count("tool_calls_requested", sum(call.name != RESPOND.name for call in calls))
-    else:
-        trace.count("tool_calls_loaded", len(calls))
-    trace.count("tool_calls_executed", len(runnable))
+    """Each call's outcome, in its tool observation and in the trajectory, and
+    the trace's counts. The calls Formiq made itself (origin "formiq") were not
+    requested by the model. Counted apart: requested (the model's), executed
+    (ran, and was not refused for the per-turn limit), blocked (refused before
+    it ran), failed (executed with an error)."""
+    trajectory = trace.trajectory
+    request = len(trajectory.requests) or None
     for index, observation in enumerate(observed):
         call = calls[index]
         if call.name != RESPOND.name and access_of(call.name) is Access.WRITE:
@@ -1040,11 +1363,44 @@ def record_tool_results(
                 trace.count("write_calls_refused")
         observation.content(input=call.arguments, output=results.get(index))
         if (result := results.get(index)) is not None:
-            observation.update(executed=index in runnable, **result_metadata(result))
-            if "error" in result:
-                failure = tool_failure(result["error"].get("code"))
+            executed, code, category, empty = call_outcome(call, result, index in runnable)
+            observation.update(
+                executed=executed,
+                origin=origin,
+                repeat=repeats[index] if repeats else "none",
+                **result_metadata(result),
+            )
+            if code is not None:
+                failure = tool_failure(code, call.name)
                 observation.fail(failure)
                 trace.count(f"tool_{failure}")
+            if call.name != RESPOND.name:
+                trace.count("tool_calls_requested" if origin == "model" else "tool_calls_loaded")
+                trace.count("tool_calls_executed", int(executed))
+                trace.count("tool_calls_blocked", int(not executed))
+                trace.count("tool_calls_failed", int(executed and code is not None and not empty))
+                took = (durations or {}).get(index)
+                trajectory.tool_call(
+                    round=iteration,
+                    tool=call.name,
+                    origin=origin,
+                    repeat=repeats[index] if repeats else "none",
+                    executed=executed,
+                    error_code=code,
+                    category=category,
+                    empty=empty,
+                    duration_ms=None if took is None else round(took),
+                    request=request,
+                    accepted_proposal=(
+                        access_of(call.name) is Access.PROPOSE and "output" in result
+                    ),
+                )
+            took_ms = (durations or {}).get(index)
+            debug_tool(
+                trace, call, index, result, origin=origin, executed=executed, code=code,
+                category=category, empty=empty, repeat=repeats[index] if repeats else "none",
+                duration_ms=None if took_ms is None else round(took_ms),
+            )  # fmt: skip
         observation.end()
 
 
@@ -1061,12 +1417,15 @@ def check_respond(
     proposed: bool = False,
     awaiting_approval: bool = False,
     explaining: bool = False,
+    recorded_changes: Sequence[str] = (),
+    length: ProposalLength | None = None,
     fitness: Sequence[str] = (),
 ) -> tuple[Respond | None, str | None]:
     """The respond call's arguments, and why its decision cannot end the turn
     (None when it can): the decision policy, the safety policy, then the reply
     itself (app.agent.trust), whatever text led the model to it. Each check is
     a guardrail observation in the trace."""
+    checked = time.perf_counter()
     with trace.child(
         "decision_validation",
         "guardrail",
@@ -1085,6 +1444,16 @@ def check_respond(
             trace.count("decision_rejections")
             check.warn(Failure.DECISION_REJECTED, accepted=False, rejected_by="invalid_call")
             check.content(output={"accepted": False, "rejection": problems})
+            trace.trajectory.validation(
+                "decision", round=iteration, accepted=False, reason="invalid_call",
+                duration_ms=elapsed_ms(checked),
+            )  # fmt: skip
+            if trace.debug is not None:
+                # the fields it names, not its text: that can quote what the model sent
+                trace.debug.guard(
+                    "decision_validation", accepted=False, by="invalid_call", iteration=iteration,
+                    fields=[".".join(str(part) for part in item["loc"]) or "arguments" for item in error.errors()],
+                )  # fmt: skip
             return None, f"invalid respond call: {problems}"
         check.update(intent=respond.intent, decision=respond.decision)
         # a fitness request is never out of scope, then the decision policy
@@ -1097,13 +1466,28 @@ def check_respond(
         check.content(output={"accepted": rejection is None, "rejection": rejection})
         if rejection is not None:
             trace.count("decision_rejections")
-            check.warn(
-                Failure.DECISION_REJECTED,
-                accepted=False,
-                rejected_by="decision_policy" if policy else "safety_policy",
-            )
+            rejected_by = "decision_policy" if policy else "safety_policy"
+            check.warn(Failure.DECISION_REJECTED, accepted=False, rejected_by=rejected_by)
+            trace.trajectory.validation(
+                "decision", round=iteration, accepted=False, reason=rejected_by,
+                duration_ms=elapsed_ms(checked),
+            )  # fmt: skip
+            if trace.debug is not None:
+                # Formiq's own words for it (the policies' text names intents,
+                # decisions, tools and fitness words, never the user's text); the
+                # model's reply is Private
+                trace.debug.guard(
+                    "decision_validation", accepted=False, by=rejected_by, iteration=iteration,
+                    rejection=Authored(rejection), respond_args=call.arguments,
+                )  # fmt: skip
             return respond, rejection
         check.update(accepted=True)
+        if trace.debug is not None:
+            trace.debug.guard(
+                "decision_validation", accepted=True, iteration=iteration,
+                intent=respond.intent, decision=respond.decision,
+            )  # fmt: skip
+    checked = time.perf_counter()
     with trace.child("reply_validation", "guardrail", iteration=iteration) as reply_check:
         rejection = reply_problem(
             respond.reply,
@@ -1113,7 +1497,10 @@ def check_respond(
             awaiting_approval=awaiting_approval,
             # the user is shown the proposal again only with an answer
             explaining=explaining and respond.decision in ANSWERS,
+            recorded_changes=recorded_changes,
             not_done=undone_exercises(results),
+            # the user is shown the proposal only with an answer
+            length=length if respond.decision in ANSWERS else None,
         )
         reply_check.content(
             input=respond.reply, output={"accepted": rejection is None, "rejection": rejection}
@@ -1122,7 +1509,38 @@ def check_respond(
         if rejection is not None:
             trace.count("reply_rejections")
             reply_check.warn(Failure.REPLY_REJECTED, reason=REPLY_PROBLEMS.get(rejection))
+    reply_reason = REPLY_PROBLEMS.get(rejection) if rejection else None
+    trace.trajectory.validation(
+        "reply", round=iteration, accepted=rejection is None,
+        reason=reply_reason,
+        duration_ms=elapsed_ms(checked),
+    )  # fmt: skip
+    if rejection == REPLY_MISSTATES_DURATION and length is not None:
+        # what the model is told names the proposal's own figures, so one retry can fix it
+        sections = ", ".join(f"{minutes}" for minutes in length.sections)
+        rejection = (
+            f"{rejection} (it takes about {length.estimated} minutes"
+            + (f"; warm-up, main workout and cool-down {sections}" if sections else "")
+            + ")"
+        )
+    if trace.debug is not None:
+        # the reason and, as the model is told it, Formiq's own text (a constant, and
+        # the proposal's figures); the reply itself is Private
+        trace.debug.guard(
+            "reply_validation", accepted=rejection is None, reason=reply_reason,
+            rejection=Authored(rejection) if rejection else None,
+            iteration=iteration, reply_chars=len(respond.reply),
+        )  # fmt: skip
     return respond, rejection
+
+
+def user_texts(state: CoachState) -> list[str]:
+    """What the user wrote that the turn can see: the message, and the user
+    turns of the earlier conversation it was sent."""
+    return [
+        state["user_message"],
+        *(turn.text for turn in state["conversation"].turns if turn.role == "user"),
+    ]
 
 
 def proposed(results: Sequence[ToolResult]) -> bool:
@@ -1131,6 +1549,93 @@ def proposed(results: Sequence[ToolResult]) -> bool:
     return any(
         access_of(result.call.name) is Access.PROPOSE and "output" in result.result
         for result in results
+    )
+
+
+def proposal_attempted(results: Sequence[ToolResult]) -> bool:
+    """Whether the turn tried to make a proposal, whether or not Formiq
+    accepted it."""
+    return any(access_of(result.call.name) is Access.PROPOSE for result in results)
+
+
+def proposal_card_reply(
+    respond: Respond, rejection: str | None, results: Sequence[ToolResult]
+) -> str | None:
+    """Formiq's own reply for a turn whose last decision was refused only for its
+    reply: the proposal Formiq accepted in the turn is then shown, and what is
+    said of it is worked out from its card (the last one the tools returned;
+    a turn accepts one), never taken from the model. None when it does not apply:
+    the decision itself was refused (the model's intent or decision, which Formiq
+    does not take for it), the decision was no answer (the user is shown a
+    proposal only with an answer), the turn accepted no proposal (a read of the
+    pending one, or a refused one, is none), or the card lacks a figure to say.
+    Showing it approves nothing: the proposal waits for the user's approval."""
+    if respond.decision not in ANSWERS or not is_reply_problem(rejection):
+        return None
+    cards = [
+        result.result["output"]
+        for result in results
+        if access_of(result.call.name) is Access.PROPOSE
+        and isinstance(result.result.get("output"), dict)
+    ]
+    return card_reply(cards[-1]) if cards else None
+
+
+def card_reply(card: dict[str, Any]) -> str | None:
+    """What a proposal's card says, in Formiq's words: its minutes (as Formiq
+    worked them out), its main exercises, whether it replaces a saved workout
+    and whether it covers its focus. None when a figure is not there to be read."""
+    figures = {
+        name: card.get(name)
+        for name in ("estimated_minutes", "warm_up_minutes", "main_minutes", "cool_down_minutes")
+    }
+    items = card.get("exercises")
+    if not isinstance(items, list) or not all(
+        isinstance(value, int) and not isinstance(value, bool) for value in figures.values()
+    ):
+        return None
+    main = sum(
+        1 for item in items if isinstance(item, dict) and item.get("section") == "MAIN_WORKOUT"
+    )
+    if main == 0:
+        return None
+    coverage = card.get("coverage")
+    return (
+        CARD_REPLY_LEAD.format(
+            total=figures["estimated_minutes"],
+            warm_up=figures["warm_up_minutes"],
+            main=figures["main_minutes"],
+            cool_down=figures["cool_down_minutes"],
+            exercises=main,
+            noun="exercise" if main == 1 else "exercises",
+        )
+        + (CARD_REPLY_REVISION if isinstance(card.get("revision"), dict) else "")
+        + (
+            CARD_REPLY_INCOMPLETE
+            if isinstance(coverage, dict) and coverage.get("complete") is False
+            else ""
+        )
+        + CARD_REPLY_CLOSE
+    )
+
+
+def explaining_proposal(
+    message: str, seen: Sequence[ToolResult], earlier: Sequence[ToolResult]
+) -> bool:
+    """Whether the turn only explains the proposal awaiting the user's approval,
+    which Formiq shows them again, unchanged, with the reply: so the reply may
+    describe it (app.agent.trust). From the turn's facts first: the turn read
+    that proposal (seen), and tried to make no proposal (earlier: one that
+    tried was a change, whatever the user said). Then from the user's own
+    words, which must ask about the proposal and none of which may ask for, or
+    call for, a change: a message that is neither (a statement such as "I don't
+    have a bench") gets the strict reply check, so a mistake of the words costs
+    a model request, never a false claim."""
+    return (
+        pending_proposal_shown(seen)
+        and not proposal_attempted(earlier)
+        and asks_about_proposal(message)
+        and not asks_for_change(message)
     )
 
 

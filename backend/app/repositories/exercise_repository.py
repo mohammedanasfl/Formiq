@@ -1,3 +1,5 @@
+from collections.abc import Collection
+
 from sqlalchemy import exists, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -25,6 +27,20 @@ class ExerciseRepository:
 
     def get_by_id(self, exercise_id: int) -> Exercise | None:
         return self.session.get(Exercise, exercise_id, options=LOAD_MUSCLES_AND_EQUIPMENT)
+
+    def find_by_ids(self, exercise_ids: Collection[int]) -> list[Exercise]:
+        """The exercises with these ids, ordered by id; an id with no exercise is left
+        out. With no ids there is no query."""
+        if not exercise_ids:
+            return []
+        return list(
+            self.session.scalars(
+                select(Exercise)
+                .options(*LOAD_MUSCLES_AND_EQUIPMENT)
+                .where(Exercise.id.in_(list(exercise_ids)))
+                .order_by(Exercise.id)
+            )
+        )
 
     def find_all(self) -> list[Exercise]:
         """Every exercise, active or not, ordered by id."""

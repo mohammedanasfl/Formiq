@@ -24,6 +24,7 @@ from app.agent.safety import (
     SafetyCategory,
     unsafe_reply,
 )
+from app.agent.trust import ProposalLength
 from app.ai import ToolCall, ToolDeclaration, ToolResult
 
 
@@ -116,14 +117,20 @@ POLICY: dict[Intent, IntentPolicy] = {
         frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
     ),
     Intent.WORKOUT_PLAN: IntentPolicy(
-        "The user's workout plans: what one prescribes, which plans they have, or the "
-        "workout you proposed that awaits their approval.",
+        "The user's workout plans: what one prescribes, which plans they have, the "
+        "workout you proposed that awaits their approval, or the workout you propose "
+        "in this turn.",
+        # propose_workout_plan counts only when Formiq accepted the proposal (its
+        # result is data): it is the workout the user is shown, which no read can
+        # return yet, since a proposal is kept only once the turn ends. A user with
+        # no saved plan and nothing awaiting approval has no other evidence for it.
         frozenset(
             {
                 "get_workout_plan",
                 "get_current_workout_plan",
                 "list_workout_plans",
                 "get_pending_proposal",
+                "propose_workout_plan",
             }
         ),
         frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
@@ -503,23 +510,151 @@ _CHANGE_REQUEST = re.compile(
 )
 
 
+# What a user says when something about the workout does not suit them, without
+# asking for a change in so many words: what they lack or cannot do, what to
+# leave out, an injury ("I don't have a bench", "nothing that needs a barbell",
+# "my knee hurts"). The request is implied, and a reply that says it was met,
+# in a turn that proposed nothing, is as false as one to "make it shorter".
+_CONSTRAINT = re.compile(
+    r"\b(?:avoid|skip|exclude|ditch|fix|accommodate|adapt|convert|trim|cut|reduce|increase|"
+    r"extend|substitute|only|never|nothing|lack\w*|missing|injur\w*|hurt\w*|pain\w*|sore)\b"
+    r"|\b(?:don['’]t|do\s+not|doesn['’]t|does\s+not|can['’]t|cannot|can\s+not|won['’]t|"
+    r"haven['’]t|hasn['’]t|have\s+no|has\s+no|there['’]s\s+no|what\s+if|how\s+about)\b",
+    re.IGNORECASE,
+)
+
+# What a user says to ask about the proposal they are shown, not to change it: a
+# question (why, what, which, how, is it ...), or a request to explain, show or
+# describe it. The message must begin so (after "ok", "so", "please"), so a
+# statement ("I don't have a bench by the way") is never taken for one.
+_ABOUT_PROPOSAL = re.compile(
+    r"^\W*(?:(?:ok|okay|so|and|but|hey|hi|please|thanks|thank\s+you)\b\W*)*"
+    r"(?:why|what|which|how|when|where|who|whose|is|are|was|were|does|do|did|will|"
+    r"explain|show|tell|describe|walk|list|remind|summari[sz]e|recap|display|repeat|give\s+me|"
+    r"(?:can|could|would)\s+(?:you|i)\s+(?:please\s+)?"
+    r"(?:explain|show|see|tell|describe|walk|list|remind|summari[sz]e|recap|repeat|give\s+me)|"
+    r"let\s+me\s+(?:see|know)|i(?:['’]d|\s+would)\s+like\s+(?:to\s+)?(?:see|know|understand|hear)|"
+    r"i\s+want\s+to\s+(?:see|know|understand))\b",
+    re.IGNORECASE,
+)
+
+
 def asks_for_change(message: str) -> bool:
     """Whether the user's message asks for a workout to be changed or replaced,
-    in words (the user's own, which the model cannot alter): then no reply may
-    say it was, unless the turn proposed it."""
-    return _CHANGE_REQUEST.search(message) is not None
+    or says something that calls for it (what they lack, cannot do or want left
+    out), in words (the user's own, which the model cannot alter): then no
+    reply may say it was, unless the turn proposed it. Words decide only this
+    side of the question, and the worse mistake is the one that is not made:
+    a message taken for a change request gets the strict reply check."""
+    return _CHANGE_REQUEST.search(message) is not None or _CONSTRAINT.search(message) is not None
+
+
+def asks_about_proposal(message: str) -> bool:
+    """Whether the user's message is a question or a request to explain, show
+    or describe, which is what a reply may answer by describing the proposal
+    they are shown. A statement is not (asks_for_change() is the other side)."""
+    return _ABOUT_PROPOSAL.search(message) is not None
+
+
+def shown_pending_proposals(results: Iterable[ToolResult]) -> list[dict[str, Any]]:
+    """What the turn read of the proposal awaiting the user's approval, in a
+    form Formiq shows them again with the reply: one with its coverage recorded
+    (an older proposal is not shown again, so its reply cannot point to it)."""
+    return [
+        output
+        for result in results
+        if result.call.name == "get_pending_proposal"
+        and isinstance(output := result.result.get("output"), dict)
+        and output.get("coverage") is not None
+    ]
 
 
 def pending_proposal_shown(results: Iterable[ToolResult]) -> bool:
     """Whether the turn read the proposal awaiting the user's approval in a form
-    Formiq shows them again with the reply: one with its coverage recorded
-    (an older proposal is not shown again, so its reply cannot point to it)."""
-    return any(
-        result.call.name == "get_pending_proposal"
-        and isinstance(output := result.result.get("output"), dict)
-        and output.get("coverage") is not None
-        for result in results
+    Formiq shows them again with the reply (shown_pending_proposals())."""
+    return bool(shown_pending_proposals(results))
+
+
+def pending_proposal_changes(results: Iterable[ToolResult]) -> tuple[str, ...]:
+    """The exercises the proposal awaiting approval, as the turn read it, is
+    recorded to add, remove or change against the saved plan (its own
+    `changes`, worked out by Formiq): the only changes a reply can truthfully
+    say the proposal holds when the turn proposed nothing."""
+    names: list[str] = []
+    for output in shown_pending_proposals(results):
+        changes = output.get("changes")
+        if not isinstance(changes, dict):
+            continue
+        for kind in ("added", "removed", "changed"):
+            for item in changes.get(kind) or []:
+                name = item.get("exercise_name") if isinstance(item, dict) else item
+                if isinstance(name, str) and name:
+                    names.append(name)
+    return tuple(dict.fromkeys(names))
+
+
+# the time a user says they have: "40 minutes", "25-30 min", "an hour and a half" is not read
+_MINUTES_SAID = re.compile(r"(\d{1,3})(?:\s*(?:-|–|to)\s*(\d{1,3}))?\s*(?:minutes?|mins?)\b", re.I)
+_HOURS_SAID = re.compile(r"(\d{1,2}(?:\.\d)?)\s*(?:hours?|hrs?)\b", re.I)
+
+
+def time_said(texts: Iterable[str]) -> tuple[int, ...]:
+    """The minutes the user's words give, as figures: "40 minutes", "25-30
+    min", "1.5 hours". What they have, not how long a workout takes."""
+    figures: list[int] = []
+    for text in texts:
+        for match in _MINUTES_SAID.finditer(text):
+            figures += [int(group) for group in match.groups() if group]
+        figures += [round(float(hours) * 60) for hours in _HOURS_SAID.findall(text)]
+    return tuple(dict.fromkeys(figures))
+
+
+def proposal_length(
+    earlier: Sequence[ToolResult], seen: Sequence[ToolResult], user_texts: Iterable[str] = ()
+) -> ProposalLength | None:
+    """How long the proposal the user is shown with the reply takes, from the
+    turn's own tool results, as Formiq worked it out: the one Formiq accepted in
+    the turn (the last), else the one awaiting approval that the turn read
+    (shown_pending_proposals). None when there is none, or its figures are not
+    there to be read: no reply is then checked against them. The time the user
+    said they have (user_texts, and the time a proposal was made for) is kept
+    apart: it is no figure of the workout's."""
+    accepted = [
+        result
+        for result in earlier
+        if result.call.name == "propose_workout_plan"
+        and isinstance(result.result.get("output"), dict)
+    ]
+    made_for: list[int] = []
+    if accepted:
+        output = accepted[-1].result["output"]
+        asked = accepted[-1].call.arguments.get("max_minutes")
+        made_for = [asked] if isinstance(asked, int) and not isinstance(asked, bool) else []
+    elif shown := shown_pending_proposals(seen):
+        output = shown[-1]
+    else:
+        return None
+    estimated = output.get("estimated_minutes")
+    if not isinstance(estimated, int) or isinstance(estimated, bool):
+        return None
+    sections = tuple(
+        value
+        for name in ("warm_up_minutes", "main_minutes", "cool_down_minutes")
+        if isinstance(value := output.get(name), int) and not isinstance(value, bool)
     )
+    timed: set[int] = set()
+    for item in output.get("exercises") or []:
+        if not isinstance(item, dict):
+            continue
+        sets = item.get("sets") if isinstance(item.get("sets"), int) else 1
+        for name in ("duration_seconds", "rest_seconds"):
+            seconds = item.get(name)
+            if isinstance(seconds, int) and seconds >= 60:
+                timed.add(round(seconds / 60))
+                if name == "duration_seconds":
+                    timed.add(round(sets * seconds / 60))
+    budget = (*time_said(user_texts), *made_for)
+    return ProposalLength(estimated, sections, tuple(sorted(timed)), tuple(dict.fromkeys(budget)))
 
 
 def tools_used(results: Iterable[ToolResult]) -> tuple[str, ...]:

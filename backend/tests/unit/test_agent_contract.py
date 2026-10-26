@@ -26,8 +26,9 @@ APP = Path(app.__file__).parent
 
 # Formiq's limits and safety thresholds, as of Phase 4, with the tool budget
 # of the live QA fix pass (2026-10-15): one round beyond the limit only to
-# correct a refused proposal, and 8 calls run per round (the reads and searches
-# a workout needs, together), so a request holds one round of 8 results.
+# correct a refused proposal, and 10 calls run per round (the reads and searches
+# a workout needs, together, with two to spare: 8 until 2026-10-20), so a request
+# holds one round of 10 results.
 PINNED = {
     "app.agent.graph": {
         "MAX_TOOL_ITERATIONS": 5,
@@ -36,17 +37,21 @@ PINNED = {
         "MAX_GRAPH_STEPS": 15,
     },
     "app.tools.limits": {
-        "MAX_EXECUTED_TOOL_CALLS_PER_TURN": 8,
-        "MAX_SEARCH_RESULTS": 10,
+        "MAX_EXECUTED_TOOL_CALLS_PER_TURN": 10,
+        # 15 results since the live QA of 2026-10-19 (it was 10)
+        "MAX_SEARCH_RESULTS": 15,
+        "MAX_OTHER_USE_MATCHES": 3,
         "MAX_EXERCISES": 30,
         "MAX_SETS": 15,
         "MAX_TEXT_LENGTH": 500,
         "MAX_LISTED_PLANS": 20,
         "MAX_SUGGESTIONS": 3,
+        # a held stretch is held this long at most in a set (live QA, 2026-10-19)
+        "MAX_STRETCH_HOLD_SECONDS": 60,
     },
     "app.agent.context": {
         "MAX_CONTEXT_COMPACTIONS": 7,
-        "CONTEXT_MAX_CHARS": 500_000,
+        "CONTEXT_MAX_CHARS": 600_000,
         "CONTEXT_KEEP_RECENT_TURNS": 6,
         "CONTEXT_MAX_TURN_CHARS": 1_000,
         "CONTEXT_MAX_CONVERSATION_CHARS": 8_000,
@@ -108,7 +113,9 @@ def test_the_model_can_reach_only_formiqs_reads_and_its_proposal():
 def test_the_model_controls_only_its_calls_and_its_respond_arguments():
     # what a model returns: calls by name with arguments, and nothing that
     # reaches identity, safety, limits or authorization
-    assert set(ModelTurn.__dataclass_fields__) == {"content", "text", "tool_calls", "usage"}
+    # usage and model are what the provider reported (token counts, the model that
+    # answered), for observability only: neither is the model's output
+    assert set(ModelTurn.__dataclass_fields__) == {"content", "text", "tool_calls", "usage", "model"}
     assert set(ToolCall.__dataclass_fields__) == {"name", "arguments", "id"}
     # its decision is an intent, a decision and a reply, from fixed enums
     for declaration in (RESPOND, *(policy.respond for policy in SAFETY_POLICY.values())):
@@ -136,6 +143,41 @@ def test_observability_cannot_reach_what_it_could_change():
     imported = imported_modules("observability")
     assert imported
     assert sorted(name for name in imported if name.startswith(forbidden)) == []
+
+
+def test_the_local_debug_output_is_off_by_default_and_for_development_and_test_only(monkeypatch):
+    # AGENT_DEBUG (docs/agent-production-contract.md, section 9): changing this is a decision
+    from pydantic import ValidationError
+
+    from app.core.config import AGENT_DEBUG_ENVIRONMENTS, Settings
+
+    for name in ("APP_ENV", "AGENT_DEBUG"):
+        monkeypatch.delenv(name, raising=False)
+    assert Settings.model_fields["agent_debug"].default == "off"
+    assert AGENT_DEBUG_ENVIRONMENTS == frozenset({"development", "test"})
+    base = {"_env_file": None, "database_url": "postgresql://user:pw@localhost/db"}
+    for app_env in ("production", "staging", ""):
+        with pytest.raises(ValidationError):
+            Settings(**base, app_env=app_env, agent_debug="content")
+    # an APP_ENV left to its default is no permission
+    with pytest.raises(ValidationError):
+        Settings(**base, agent_debug="events")
+    assert Settings(**base, app_env="development", agent_debug="content").agent_debug == "content"
+
+
+def test_the_debug_output_is_a_sink_apart_from_the_tracing_backends():
+    # nothing that sends a trace somewhere can reach it, and it reaches no application code
+    for module in ("langfuse_backend.py", "memory.py"):
+        text = (APP / "observability" / module).read_text()
+        assert not any(name in text for name in ("observability.debug", "DebugSink", "TurnDebug")), module
+    debug = ast.parse((APP / "observability" / "debug.py").read_text())
+    imported = {
+        (node.module or "") if isinstance(node, ast.ImportFrom) else alias.name
+        for node in ast.walk(debug)
+        if isinstance(node, ast.ImportFrom | ast.Import)
+        for alias in (node.names if isinstance(node, ast.Import) else [None])
+    }
+    assert not [name for name in imported if name.split(".")[0] == "app"]
 
 
 def test_no_production_code_reads_a_trace_back():

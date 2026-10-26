@@ -27,6 +27,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, Literal, Protocol
 
+from app.observability.debug import DebugSink, TurnDebug
 from app.observability.failures import classify
 from app.observability.trajectory import TurnRecorder
 
@@ -225,19 +226,37 @@ class RunTrace(Observation):
     its final status."""
 
     def __init__(
-        self, backend: Backend, handle: Any, request_id: str, *, capture_content: bool = False
+        self,
+        backend: Backend,
+        handle: Any,
+        request_id: str,
+        *,
+        capture_content: bool = False,
+        debug: TurnDebug | None = None,
     ) -> None:
         super().__init__(backend, handle, capture_content=capture_content)
         self.request_id = request_id
         self.counts: dict[str, int] = {}
         self.status: str | None = None
+        # The local debug output of this turn (app.observability.debug), when
+        # AGENT_DEBUG is on: a sink of its own, apart from the backend, so nothing
+        # it prints can reach Langfuse. Written to, never read.
+        self.debug = debug
         # The ordered, safe record of the turn (app.observability.trajectory): kept
         # whether or not a backend is listening, so the summary and the log line
-        # exist with tracing off.
-        self.trajectory = TurnRecorder(request_id)
+        # exist with tracing off. Its events are the debug output's timeline.
+        self.trajectory = TurnRecorder(request_id, on_event=debug.event if debug else None)
 
     def count(self, name: str, amount: int = 1) -> None:
         self.counts[name] = self.counts.get(name, 0) + amount
+
+    def terminate(self, termination: str, **metadata: Any) -> None:
+        """How the turn ended (an accepted decision, the limit, a safety
+        fallback, a budget failure): on the trace, and in the trajectory."""
+        self.trajectory.termination = str(termination)
+        self._update({**metadata, "termination": str(termination)})
+        if self.debug is not None:
+            self.debug.note("termination", reason=str(termination))
 
     def finish(self, status: str, **metadata: Any) -> None:
         """The request's outcome, with its counters."""
@@ -256,9 +275,18 @@ class Tracer:
     the steps also record their input and output: the conversation and its
     data (for development; off by default)."""
 
-    def __init__(self, backend: Backend | None = None, *, capture_content: bool = False) -> None:
+    def __init__(
+        self,
+        backend: Backend | None = None,
+        *,
+        capture_content: bool = False,
+        debug: DebugSink | None = None,
+    ) -> None:
         self.backend: Backend = backend or NoBackend()
         self.capture_content = capture_content
+        # Local terminal debugging (AGENT_DEBUG): independent of the backend and of
+        # capture_content, which alone decide what Langfuse receives.
+        self.debug = debug
 
     @property
     def enabled(self) -> bool:
@@ -277,7 +305,15 @@ class Tracer:
             user_id=str(user_id),
             metadata=safe_metadata({**metadata, "request_id": request_id}),
         )
-        trace = RunTrace(self.backend, handle, request_id, capture_content=self.capture_content)
+        debug = None
+        if self.debug is not None:
+            try:
+                debug = self.debug.begin(request_id, user_id)
+            except Exception as error:  # noqa: BLE001 - debugging must not fail the request
+                logger.warning("Agent debug could not start (%s); the request goes on", type(error).__name__)
+        trace = RunTrace(
+            self.backend, handle, request_id, capture_content=self.capture_content, debug=debug
+        )
         try:
             yield trace
         finally:

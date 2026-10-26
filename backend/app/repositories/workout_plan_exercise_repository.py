@@ -1,3 +1,5 @@
+from collections.abc import Collection
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,6 +25,19 @@ class WorkoutPlanExerciseRepository:
                 WorkoutPlanExercise.workout_plan_id == workout_plan_id,
             )
         ).one_or_none()
+
+    def find_by_ids(self, plan_exercise_ids: Collection[int]) -> list[WorkoutPlanExercise]:
+        """The plan exercises with these ids, in any plan, ordered by id; an id with no
+        plan exercise is left out. With no ids there is no query."""
+        if not plan_exercise_ids:
+            return []
+        return list(
+            self.session.scalars(
+                select(WorkoutPlanExercise)
+                .where(WorkoutPlanExercise.id.in_(list(plan_exercise_ids)))
+                .order_by(WorkoutPlanExercise.id)
+            )
+        )
 
     def get_by_order(self, workout_plan_id: int, exercise_order: int) -> WorkoutPlanExercise | None:
         return self.session.scalars(

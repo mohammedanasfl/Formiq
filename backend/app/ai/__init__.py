@@ -8,6 +8,7 @@ from app.ai.gemini import (
     chat_messages,
     conversation,
     tool_results_content,
+    turn_config,
     user_content,
 )
 from app.ai.tool_calling import (
@@ -31,5 +32,6 @@ __all__ = [
     "chat_messages",
     "conversation",
     "tool_results_content",
+    "turn_config",
     "user_content",
 ]

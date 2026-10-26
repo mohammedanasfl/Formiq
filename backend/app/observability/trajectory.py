@@ -24,7 +24,9 @@ Counting rules, which the summary states by name:
   tool call). executed: calls that reached a tool and ran, Formiq's own reads
   included (loaded). blocked: calls Formiq refused before they ran (a gate of
   the graph, or the per-turn limit). failed: executed calls whose result is an
-  error. Never a blocked call among the executed.
+  error, except empty: a read of the user's own record that found none (a new
+  user has no plan yet), which is an answer. Never a blocked call among the
+  executed.
 - tokens are what Gemini reported for each request, never estimated; a total
   adds up only the requests that reported it, and says how many did.
 """
@@ -43,6 +45,9 @@ from typing import Any, ParamSpec, TypeVar
 logger = logging.getLogger(__name__)
 
 SCHEMA = "formiq.turn_summary/1"
+# the category of a proposal that was not run for the turn's one-proposal limit
+# (app.observability.failures.Failure.PROPOSAL_LIMIT)
+PROPOSAL_LIMIT_CATEGORY = "proposal_limit"
 # events kept for one turn; a turn makes at most 7 model requests of at most 20
 # calls, so this is never reached by a legal turn
 MAX_EVENTS = 160
@@ -146,8 +151,14 @@ def _safe(value: Any) -> Any:
 class TurnRecorder:
     """The ordered, safe record of one coach turn (see the module docstring)."""
 
-    def __init__(self, turn_id: str) -> None:
+    def __init__(
+        self, turn_id: str, on_event: Callable[[Mapping[str, Any]], None] | None = None
+    ) -> None:
         self.turn_id = turn_id
+        # Told of each event as it is recorded, for the local debug output
+        # (app.observability.debug): the same events, in the same order. Never read
+        # from, and a failure in it is the recorder's own guarded failure.
+        self._on_event = on_event
         self._clock = time.perf_counter
         self._began = self._clock()
         self.began_at = datetime.now(UTC)
@@ -194,6 +205,8 @@ class TurnRecorder:
         }
         event.update({name: _safe(value) for name, value in fields.items() if value is not None})
         self.events.append(event)
+        if self._on_event is not None:
+            self._on_event(event)
 
     def fail(self, category: str) -> None:
         """A normalized reason the turn went less well (kept once, in order)."""
@@ -216,8 +229,9 @@ class TurnRecorder:
         )  # fmt: skip
         number = len(self.requests)
         self.event(
-            EventType.MODEL_REQUEST_STARTED, round=round, request=number, kind=kind, offered_tools=offered
-        )
+            EventType.MODEL_REQUEST_STARTED,
+            round=round, request=number, kind=kind, offered_tools=offered,
+        )  # fmt: skip
         return number
 
     @_guarded
@@ -231,6 +245,8 @@ class TurnRecorder:
         requested_calls: int,
         responded: bool,
     ) -> None:
+        if number is None:
+            return
         record = self.requests[number - 1]
         counts = {k: v for k, v in (usage or {}).items() if isinstance(v, int) and v >= 0}
         record.update(
@@ -277,10 +293,14 @@ class TurnRecorder:
     # --- tools
 
     @_guarded
-    def tool_batch(self, *, round: int, duration_ms: int, calls: int, origin: str = "model") -> None:
+    def tool_batch(
+        self, *, round: int, duration_ms: int, calls: int, origin: str = "model"
+    ) -> None:
         """One run of the tools: how long it took, in all (the tools time each
         call too, when they say so)."""
-        self.batches.append({"round": round, "duration_ms": duration_ms, "calls": calls, "origin": origin})
+        self.batches.append(
+            {"round": round, "duration_ms": duration_ms, "calls": calls, "origin": origin}
+        )
 
     @_guarded
     def tool_call(
@@ -296,15 +316,17 @@ class TurnRecorder:
         duration_ms: int | None,
         request: int | None = None,
         accepted_proposal: bool = False,
+        empty: bool = False,
     ) -> None:
         """One tool call, as it ended. Always a requested event (the model's own
         calls), then exactly one of executed, failed or blocked: never a blocked
-        call among the executed."""
-        failed = executed and error_code is not None
+        call among the executed. A read of the user's own record that found none
+        (empty) is executed, with the outcome "empty": the tool did its job."""
+        failed = executed and error_code is not None and not empty
         blocked = not executed
         self.calls.append(
             {"round": round, "tool": tool, "origin": origin, "repeat": repeat, "executed": executed,
-             "failed": failed, "blocked": blocked, "category": category,
+             "failed": failed, "blocked": blocked, "empty": empty, "category": category,
              "duration_ms": duration_ms, "proposal": tool == "propose_workout_plan"}
         )  # fmt: skip
         if origin == "model":
@@ -312,7 +334,7 @@ class TurnRecorder:
                 EventType.TOOL_CALL_REQUESTED, round=round, request=request, tool=tool,
                 origin=origin, repeat=repeat if repeat != "none" else None,
             )  # fmt: skip
-        outcome = "blocked" if blocked else "error" if failed else "ok"
+        outcome = "blocked" if blocked else "error" if failed else "empty" if empty else "ok"
         kind = (
             EventType.TOOL_CALL_BLOCKED if blocked
             else EventType.TOOL_EXECUTION_FAILED if failed
@@ -328,6 +350,10 @@ class TurnRecorder:
             self.proposal_attempts += origin == "model"
             if accepted_proposal and self.proposal_accepted_request is None:
                 self.proposal_accepted_request = request
+            elif category == PROPOSAL_LIMIT_CATEGORY:
+                # a second proposal, not run because a turn makes one: the workout
+                # was not judged, so it is no rejection of one
+                pass
             elif category:
                 self.proposal_rejections += 1
                 self.missing_prerequisites += category == "missing_prerequisite"
@@ -343,7 +369,9 @@ class TurnRecorder:
         self, kind: str, *, round: int, accepted: bool, reason: str | None, duration_ms: int
     ) -> None:
         """A decision or reply check (kind "decision" or "reply"), and its cost."""
-        self.validations.append({"kind": kind, "round": round, "accepted": accepted, "duration_ms": duration_ms})
+        self.validations.append(
+            {"kind": kind, "round": round, "accepted": accepted, "duration_ms": duration_ms}
+        )
         if not accepted:
             self.event(
                 EventType.DECISION_REJECTED if kind == "decision" else EventType.REPLY_REJECTED,
@@ -405,9 +433,9 @@ class TurnRecorder:
         """The turn's tokens, summed over the requests that reported them (each
         request's own counts stay in the summary, so the total can be audited)."""
         fields = {
-            "input": "input_tokens", "output": "output_tokens", "cached_input": "cached_input_tokens",
-            "reasoning": "reasoning_tokens", "tool_use_input": "tool_use_input_tokens",
-            "total": "total_tokens",
+            "input": "input_tokens", "output": "output_tokens",
+            "cached_input": "cached_input_tokens", "reasoning": "reasoning_tokens",
+            "tool_use_input": "tool_use_input_tokens", "total": "total_tokens",
         }  # fmt: skip
         reported = [r for r in self.requests if r["usage"]]
         totals = {
@@ -423,7 +451,11 @@ class TurnRecorder:
         through = None
         if self.proposal_accepted_request is not None:
             upto = self.requests[: self.proposal_accepted_request]
-            through_totals = [r["usage"]["total_tokens"] for r in upto if r["usage"] and "total_tokens" in r["usage"]]
+            through_totals = [
+                r["usage"]["total_tokens"]
+                for r in upto
+                if r["usage"] and "total_tokens" in r["usage"]
+            ]
             through = sum(through_totals) if len(through_totals) == len(upto) else None
         return {
             **totals, "source": source, "requests_reporting": len(reported),
@@ -436,7 +468,9 @@ class TurnRecorder:
         executed = [c for c in self.calls if c["executed"]]
         by_tool: dict[str, dict[str, int]] = {}
         for call in self.calls:
-            row = by_tool.setdefault(call["tool"], {"requested": 0, "executed": 0, "blocked": 0, "failed": 0})
+            row = by_tool.setdefault(
+                call["tool"], {"requested": 0, "executed": 0, "blocked": 0, "failed": 0}
+            )
             row["requested"] += call["origin"] == "model"
             row["executed"] += call["executed"]
             row["blocked"] += call["blocked"]
@@ -449,6 +483,7 @@ class TurnRecorder:
             "executed": len(executed),
             "blocked": sum(c["blocked"] for c in self.calls),
             "failed": failed,
+            "empty": sum(c["empty"] for c in executed),
             "formiq_loaded": sum(c["origin"] == "formiq" for c in self.calls),
             "by_tool": by_tool,
             "per_round": [per_round.get(r, 0) for r in sorted(self.rounds)],
@@ -457,16 +492,28 @@ class TurnRecorder:
             "retries_after_changed_evidence": sum(
                 c["repeat"] == "evidence_changed" and c["executed"] for c in model
             ),
-            "success_rate": None if not executed else round((len(executed) - failed) / len(executed), 4),
+            "success_rate": (
+                None if not executed else round((len(executed) - failed) / len(executed), 4)
+            ),
             "success_rate_denominator": "executed",
         }
 
     def _latency(self) -> dict[str, Any]:
-        measured = [c["duration_ms"] for c in self.calls if c["executed"] and c["duration_ms"] is not None]
+        measured = [
+            c["duration_ms"] for c in self.calls if c["executed"] and c["duration_ms"] is not None
+        ]
         batch_ms = sum(b["duration_ms"] for b in self.batches)
-        asked = [(r["duration_ms"], n) for n, r in enumerate(self.requests, 1) if r["duration_ms"] is not None]
+        asked = [
+            (r["duration_ms"], n)
+            for n, r in enumerate(self.requests, 1)
+            if r["duration_ms"] is not None
+        ]
         slowest = max(asked, default=None)
-        proposals = [c["duration_ms"] for c in self.calls if c["proposal"] and c["executed"] and c["duration_ms"] is not None]
+        proposals = [
+            c["duration_ms"]
+            for c in self.calls
+            if c["proposal"] and c["executed"] and c["duration_ms"] is not None
+        ]
         return {
             "turn": self.turn_ms if self.turn_ms is not None else self._elapsed_ms(),
             "model_requests": [r["duration_ms"] for r in self.requests],
@@ -508,7 +555,9 @@ class TurnRecorder:
             "turn_id": self.turn_id,
             "started_at": self.began_at.isoformat(timespec="milliseconds"),
             "model": self.model,
-            "models_reported": sorted({r["model_reported"] for r in self.requests if r["model_reported"]}),
+            "models_reported": sorted(
+                {r["model_reported"] for r in self.requests if r["model_reported"]}
+            ),
             "status": self.status,
             "request_completed": self.completed,
             "termination": self.termination,
@@ -526,13 +575,19 @@ class TurnRecorder:
             "model_requests": len(self.requests),
             "tool_calls": self._tool_counts(),
             "validation": {
-                "decision_rejections": sum(v["kind"] == "decision" and not v["accepted"] for v in self.validations),
-                "reply_rejections": sum(v["kind"] == "reply" and not v["accepted"] for v in self.validations),
+                "decision_rejections": sum(
+                    v["kind"] == "decision" and not v["accepted"] for v in self.validations
+                ),
+                "reply_rejections": sum(
+                    v["kind"] == "reply" and not v["accepted"] for v in self.validations
+                ),
             },
             "retry_round": {
                 "entered": self.retry is not None,
                 "outcome": retry.get("outcome") if self.retry else None,
-                "recovered": None if self.retry is None else retry.get("outcome") == RETRY_RECOVERED,
+                "recovered": (
+                    None if self.retry is None else retry.get("outcome") == RETRY_RECOVERED
+                ),
             },
             "budget": self._budget(),
             "failure_reasons": list(self.failures),
@@ -573,6 +628,7 @@ class TurnRecorder:
             "tool_calls_executed": calls["executed"],
             "tool_calls_blocked": calls["blocked"],
             "tool_calls_failed": calls["failed"],
+            "tool_calls_empty": calls["empty"],
             "tool_calls_loaded": calls["formiq_loaded"],
             "tool_success_rate": calls["success_rate"],
             "tool_success_denominator": calls["success_rate_denominator"],
@@ -668,7 +724,12 @@ def _stats(values: Sequence[float]) -> dict[str, Any]:
 
 
 def _rate(hits: int, total: int, denominator: str) -> dict[str, Any]:
-    return {"n": hits, "of": total, "rate": None if not total else round(hits / total, 4), "denominator": denominator}
+    return {
+        "n": hits,
+        "of": total,
+        "rate": None if not total else round(hits / total, 4),
+        "denominator": denominator,
+    }
 
 
 def aggregate(summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -736,6 +797,8 @@ def aggregate(summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             sum(t["tool_calls"]["executed"] for t in turns),
             "executed tool calls",
         ),
-        "request_completed": _rate(sum(t["request_completed"] for t in turns), len(turns), "all turns"),
+        "request_completed": _rate(
+            sum(t["request_completed"] for t in turns), len(turns), "all turns"
+        ),
         "failure_reasons": dict(Counter(r for t in turns for r in t["failure_reasons"])),
     }

@@ -8,7 +8,14 @@ never ORM objects, internal ids beyond the resource's own, or audit timestamps.
 from datetime import date, datetime
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from app.schemas.coach import ProposalCoverage, ProposalRevision, RevisionKind, SessionFocus
 from app.schemas.exercise import Difficulty, MovementPattern, MuscleRole, WorkoutSection
@@ -95,6 +102,16 @@ EquipmentName = Annotated[
 ]
 
 
+def without_blank_names(value: object) -> object:
+    """A list of equipment names without its blank ones: [""] is what a model
+    sends for "none" (live QA, 2026-10-19: 6 refused searches of 3 turns), and
+    reads as [], which is what it means. A blank name is no piece of equipment,
+    so nothing else changes: a name that is not blank is read as it always was."""
+    if isinstance(value, list):
+        return [item for item in value if not (isinstance(item, str) and not item.strip())]
+    return value
+
+
 class ProposedExerciseInput(ToolInput):
     """An exercise of a proposed plan's main workout: a catalog exercise and its
     prescription. No weight: the coach does not prescribe loads it cannot know."""
@@ -165,6 +182,10 @@ class ProposeWorkoutPlanInput(UserScopedInput):
     revises_plan_id: ResourceId | None = None
     revision: RevisionKind | None = None
 
+    _no_blank_equipment = field_validator(
+        "available_equipment", "unavailable_equipment", mode="before"
+    )(without_blank_names)
+
     @model_validator(mode="after")
     def revision_of_a_plan(self) -> Self:
         if (self.revises_plan_id is None) != (self.revision is None):
@@ -180,6 +201,9 @@ class GetExerciseInput(ToolInput):
 
 
 MuscleName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+ExerciseNameWords = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=2, max_length=60)
+]
 
 
 class SearchExercisesInput(ToolInput):
@@ -199,6 +223,15 @@ class SearchExercisesInput(ToolInput):
     equipment: EquipmentName | None = None
     movement_pattern: MovementPattern | None = None
     difficulty: Difficulty | None = None
+    # Words of the exercise's name, such as "hip circle", "cat cow" or "push up": every
+    # word must be in it (app.tools.exercise_names). For when the user names an exercise,
+    # to look for it, never an id. A name Formiq hides as a duplicate finds the exercise it
+    # keeps in its place.
+    name: ExerciseNameWords | None = None
+
+    _no_blank_equipment = field_validator("available_equipment", mode="before")(
+        without_blank_names
+    )
 
     @model_validator(mode="after")
     def require_a_filter(self) -> Self:
@@ -206,7 +239,7 @@ class SearchExercisesInput(ToolInput):
         if self.model_dump(exclude_none=True) == {}:
             raise ValueError(
                 "at least one of use, muscle, available_equipment, equipment, "
-                "movement_pattern, difficulty is required"
+                "movement_pattern, difficulty, name is required"
             )
         return self
 
@@ -497,6 +530,27 @@ class ExerciseSummaryOutput(BaseModel):
     )
 
 
+class OtherUseExerciseOutput(BaseModel):
+    """An exercise that matches a search's other filters but that Formiq does not
+    use for the section searched. It has no id: it is not a choice for that
+    section, and no proposal may be built from it."""
+
+    name: str
+    # the sections Formiq does use it for; empty when it uses it for none
+    uses: list[WorkoutSection]
+    equipment: list[str]
+
+
+class OtherUseMatchesOutput(BaseModel):
+    """What a search for a section that found nothing leaves out only because of
+    that section: so that "nothing found" is not said of the catalog as a whole."""
+
+    # how many such exercises there are, and a few of them (at most
+    # MAX_OTHER_USE_MATCHES, the most relevant first)
+    total: int
+    exercises: list[OtherUseExerciseOutput]
+
+
 class SearchExercisesOutput(BaseModel):
     # the most relevant first (app.tools.formiq_tools.most_relevant)
     exercises: list[ExerciseSummaryOutput]
@@ -508,3 +562,16 @@ class SearchExercisesOutput(BaseModel):
     excluded_equipment: list[str] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # For a search by use that found nothing: the exercises that match every other
+    # filter but are used for another section only (or for none). They are not
+    # results for this use; they say that the catalog does have such exercises.
+    # Left out when the search found something, or nothing matched without the use.
+    matches_for_other_uses: OtherUseMatchesOutput | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # What the reply must not forget, in Formiq's words: that more exercises match than
+    # are returned (total_matches > count), so a list that is only some of the matches is
+    # never shown as all of them; for a search by name, that the name searched is kept
+    # under another one, or that no exercise has its words, which is not the catalog
+    # lacking the exercise (app.tools.formiq_tools.search_note). Left out otherwise.
+    note: str | None = Field(default=None, exclude_if=lambda value: value is None)

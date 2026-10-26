@@ -22,8 +22,24 @@ def content_capture_allowed(app_env: str | None) -> bool:
     return app_env in CONTENT_CAPTURE_ENVIRONMENTS
 
 
+# The APP_ENV values where AGENT_DEBUG may print the coach's turns to the terminal
+# (app.observability.debug): local development and the tests. APP_ENV must also
+# be set: its default is "development", which says nothing about where the
+# application runs, so a deployment that forgot it never counts as one.
+AGENT_DEBUG_ENVIRONMENTS = frozenset({"development", "test"})
+AgentDebug = Literal["off", "events", "content"]
+
+
+def agent_debug_allowed(app_env: str | None, *, explicit: bool) -> bool:
+    """Whether AGENT_DEBUG may be on where APP_ENV is app_env, which is explicit
+    when the environment or .env gave it (not when its default applies)."""
+    return explicit and app_env in AGENT_DEBUG_ENVIRONMENTS
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env")
+    # hide_input_in_errors: a failed check of the settings as a whole (the
+    # ones below) must not show the other settings, the secrets among them.
+    model_config = SettingsConfigDict(env_file=".env", hide_input_in_errors=True)
 
     app_name: str = "Formiq"
     app_env: str = "development"
@@ -55,6 +71,15 @@ class Settings(BaseSettings):
     # metadata only (docs/agent-production-contract.md, section 9). On outside
     # CONTENT_CAPTURE_ENVIRONMENTS, the settings are refused.
     langfuse_capture_content: bool = False
+    # Local debugging of the coach's turns (app.observability.debug), printed to
+    # stderr only: nothing goes to Langfuse, a file or any service, whatever
+    # LANGFUSE_CAPTURE_CONTENT says. off: nothing. events: the ordered timeline
+    # and safe metadata, no prompt or conversation content. content: also the
+    # prompt text, tool declarations and the tool data that is safe to show,
+    # with every user, model or profile text reduced to its size and a hash. On
+    # outside AGENT_DEBUG_ENVIRONMENTS, or with APP_ENV not set, the settings
+    # are refused.
+    agent_debug: AgentDebug = "off"
     # Access tokens (app.core.security). Without a secret, logging in and every
     # route that needs the signed-in user answer 503: nothing falls back to
     # anonymous access. Only HMAC algorithms are accepted, so a token can never
@@ -84,6 +109,25 @@ class Settings(BaseSettings):
                 "tracing records metadata only"
             )
         return capture
+
+    @field_validator("agent_debug", mode="before")
+    @classmethod
+    def agent_debug_is_case_insensitive(cls, value: object) -> object:
+        # AGENT_DEBUG= (empty) or Events: the intent is clear
+        return (value.strip().lower() or "off") if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def agent_debug_only_in_development(self) -> Self:
+        # Refused, not turned off: the application does not start with the
+        # coach's turns set to be printed. APP_ENV must be set, not defaulted.
+        explicit = "app_env" in self.model_fields_set
+        if self.agent_debug != "off" and not agent_debug_allowed(self.app_env, explicit=explicit):
+            raise ValueError(
+                "AGENT_DEBUG prints the coach's turns to the terminal, so it is for local "
+                "development only: set APP_ENV to 'development' or 'test' (it is "
+                f"{self.app_env!r}{'' if explicit else ', by default, not set'}), or turn it off"
+            )
+        return self
 
     @model_validator(mode="after")
     def check_jwt_secret_length(self) -> Self:

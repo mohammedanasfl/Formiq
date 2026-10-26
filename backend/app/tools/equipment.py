@@ -94,7 +94,9 @@ EQUIPMENT_ALIASES: Mapping[str, tuple[str, ...]] = {
     ),
     "stationary bike": (
         "exercise bike", "spin bike", "indoor bike", "bike", "cycle", "spinning bike",
+        "recumbent bike", "recumbent", "upright bike",
     ),
+    "treadmill": ("tread mill", "running machine", "walking machine", "walking pad"),
     "rowing machine": ("rower", "erg", "rowing erg", "indoor rower"),
     "machine": ("weight machine", "gym machine", "resistance machine"),
     "medicine ball": ("med ball",),
@@ -287,7 +289,9 @@ _HYPOTHETICAL = frozenset(
     }
 )  # fmt: skip
 # Words that, with the user as subject, say they have a piece.
-_POSSESSION_VERBS = frozenset({"have", "has", "got", "own", "use", "keep", "bring", "brought"})
+_POSSESSION_VERBS = frozenset(
+    {"have", "has", "got", "own", "use", "keep", "bring", "brought", "bought", "purchased"}
+)
 _FIRST_PERSON = frozenset({"i", "we", "i've", "ive", "we've", "i'll", "i'm", "im"})
 # Words that say a piece is the user's, or is what they will train with,
 # without a verb: "my dumbbells", "with dumbbells", "only bands".
@@ -450,9 +454,11 @@ def _mentions(
             continue
         results.append((key, stance))
         if stance == OWNED and (
-            {"only", "just"} & set(words[:start]) or _says_it_is_all(words[start + length:])
+            {"only", "just"} & set(words[:start])
+            or _says_it_is_all(words[start + length:])
+            or _all_i_have(words[:start])
         ):
-            # "I only have dumbbells": and nothing else
+            # "I only have dumbbells", "all I have is dumbbells": and nothing else
             results.append((None, NOTHING_ELSE))
     return results
 
@@ -517,7 +523,22 @@ def _stance(
     return MENTIONED
 
 
+# "all I have is", "all I've got are", "all that we own is": what follows is all they have.
+# ("not all I have is ..." says the opposite.)
+_ALL_I_HAVE = re.compile(
+    r"(?<!not )(?<!n't )\ball (?:that )?(?:i|we)(?:'ve)?(?: (?:have|has|got|own|use))+\b"
+)
+
+
+def _all_i_have(before: list[str]) -> bool:
+    """ "all I have is a pair of dumbbells": the pieces named after it are all
+    the user has. "all" alone says nothing of the sort ("I have all kinds of
+    bands"): it must be the user's own having that is all."""
+    return _ALL_I_HAVE.search(" ".join(before)) is not None
+
+
 def _says_it_is_all(after: list[str]) -> bool:
-    """ "dumbbells are all I have", "a bench is what I've got"."""
+    """ "dumbbells are all I have", "a bench is what I've got", and a list that
+    ends so: "the dumbbells and the band are all I have"."""
     text = " ".join(after)
-    return bool(re.match(r"(?:is|are) (?:all|what) (?:i|we)(?:'ve)? (?:have|has|got|own)", text))
+    return bool(re.search(r"\b(?:is|are) (?:all|what) (?:i|we)(?:'ve)? (?:have|has|got|own)", text))

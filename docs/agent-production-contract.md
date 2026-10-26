@@ -98,7 +98,29 @@ then checks the model.
   never its id, and reading it approves nothing.
 - **A turn does not repeat itself.** A catalog search or lookup, or a proposal, that the model
   already has the result of, word for word, is answered with `DUPLICATE_CALL` and not run (a read
-  of the user's own data may be repeated, and a compacted result is not "had").
+  of the user's own data may be repeated, and a compacted result is not "had"). Only a call that
+  ran and came back is a result "had": a call Formiq refused before it ran (a read not made yet,
+  an id nobody had given yet) is not, so the same call may run once the evidence has changed. If
+  it has not, the same gate refuses it again and nothing runs. (The live regression pass of
+  2026-10-15 found the earlier rule, which counted such a refusal as a result, ending proposal
+  turns with nothing.)
+- **Equipment is named, never numbered.** A catalog search for the exercises that use one piece
+  takes it by name (`equipment`: the catalog's name, its plural or a common name, read by
+  `app/tools/equipment.py`), which Formiq resolves; no tool gives the model an equipment id, so an
+  id could never be grounded. An unknown name is refused with the catalog's names, a name for no
+  equipment points to `available_equipment: []`, and a piece the catalog has that no exercise
+  needs is no error: the search finds nothing.
+- **A search that finds nothing for its section does not say the catalog has nothing.** A search by
+  use (`MAIN_WORKOUT`, `WARM_UP`, `COOL_DOWN`) that returns no exercise also names, apart from its
+  results (`matches_for_other_uses`: a total and at most 3 exercises, each with its name, uses and
+  equipment, and no id), exercises that match every other filter and that Formiq uses for another
+  section, or for none. They are not results for that use and no proposal can be built from them:
+  the catalog's one Rowing Machine exercise, Easy Rowing, is a warm-up and cool-down activity, and
+  cardio is never a main exercise, so a main-workout search for it finds nothing and says so (live
+  QA, 2026-10-16, B5: the coach said the catalog had no rowing machine exercises). The coach is told
+  to scope a negative claim to what it searched. A search that finds something, or whose other
+  filters match nothing at all, is as it was; the equipment the user said they lack is left out of
+  the disclosure as of the results.
 - **Inputs are validated, results are bounded.** Arguments are checked against strict schemas; an
   invalid call is refused with a description that never repeats its values. Results have limited
   lists and cut text.
@@ -115,7 +137,15 @@ The model ends every turn with one `respond` call carrying an intent, a decision
 Code checks it against what the turn actually retrieved.
 
 - **Own-data answers need evidence from this turn.** An answer about the user's profile, plans,
-  sessions or an adaptation must rest on data one of the intent's tools returned in this turn.
+  sessions or an adaptation must rest on data one of the intent's tools returned in this turn. For
+  the plan intent (`WORKOUT_PLAN`) a proposal Formiq accepted in the turn is such data
+  (`propose_workout_plan` is one of its tools): a user with no saved plan and nothing awaiting
+  approval has no other evidence for the workout they are shown, since a proposal is kept only once
+  the turn ends (live QA, 2026-10-16, B2: the decision was rejected, the model looked for the
+  proposal with `get_pending_proposal`, found none, and the turn ended with the proposal discarded).
+  A refused proposal is no evidence, and no other intent counts a proposal (a session history or a
+  catalog answer is not made from it). A second proposal in a turn is not run (`PROPOSAL_LIMIT`,
+  `proposal_limit` in the trajectory): the workout was not judged, so it is no rejection of it.
 - **Missing, failed or compacted data is never evidence.** Calling the tool again restores it.
 - **A recommendation for today checks before it answers.** It is accepted only once the user's
   profile, current plan and last workout were each read in this turn, returning data or
@@ -130,8 +160,45 @@ Code checks it against what the turn actually retrieved.
 - **Replies are checked.** A reply that repeats the coach's instructions, claims a change was made,
   or shows internal labels is rejected; so is one that says the coach made or changed a workout,
   or that a new version is ready or to be approved, when the turn made no proposal (every form of
-  the making and changing verbs, `app.agent.trust`), and one that says the user did an exercise
-  the workout session read in the turn shows no completed set of.
+  the making and changing verbs, `app.agent.trust`: "propose" is one of them, so "I have proposed
+  an updated workout" and "a new workout has been proposed" are claims of a proposal made), and
+  one that says the user did an exercise the workout session read in the turn shows no completed
+  set of. "A proposal made" is only one Formiq accepted in the turn: a read of the proposal
+  awaiting approval, or a proposal Formiq refused (however many), never backs it (live QA,
+  2026-10-17: the coach tried twice, both were refused, and it said it had proposed an updated
+  workout beside the unchanged card). Offers and negations ("I can propose a new version", "I
+  haven't proposed anything new", "I tried to propose it, but Formiq refused") claim nothing.
+  A refused reply never reaches the user, whatever the round: the model corrects it within the
+  limits of section 6, and if it never does, the turn ends with Formiq's own reply, which with a
+  proposal Formiq accepted in the turn is worked out from its card (section 6), and otherwise is
+  the "nothing was proposed" or "could not answer" reply.
+- **A reply that explains the proposal the user is shown is not a claim of a new one.** A turn
+  that makes no proposal shows the user the proposal awaiting approval again, unchanged, with the
+  reply, so the reply may then describe it ("below", "here is the proposal", how the coach
+  designed it) when all of these hold: the turn read it in a form Formiq shows again (its coverage
+  is recorded), the turn tried to make no proposal, the reply is an answer, and the user's own
+  message asks about it (a question, or a request to explain or show: `asks_about_proposal`) and
+  asks for no change and calls for none (`asks_for_change`, which includes what the user lacks,
+  cannot do or wants left out: "I don't have a bench"). Still rejected, whatever the words: a new
+  or changed workout said to be made now, a workout said to be saved or approved, a proposal when
+  none awaits, an exercise said to be done that no session shows, and the coach saying it changed
+  something (updated, swapped, replaced, added, removed) that the proposal does not record as
+  changed. Only the proposal's own `changes` (Formiq's comparison with the saved plan) back such a
+  sentence, by naming one of them; "I added a warm-up" says how it was put together and is no
+  change. A message that is not an explanation, or that the words cannot place, gets the strict
+  check, so a mistake of the words costs a model request and never a false claim. The authority
+  for a completed change is only a proposal Formiq accepted in the turn; a proposal saves nothing,
+  so even then "I've updated your workout" is refused as a claim that data changed.
+- **A reply states the workout's length as the proposal does.** The user is shown the proposal's
+  card with the reply, and its minutes are worked out in code. A reply that says how long the
+  workout takes ("a 40-minute workout", "it takes about 20 minutes", "26 minutes in all") must
+  give the proposal's `estimated_minutes` (within two minutes, for rounding) or a section's or a
+  timed exercise's own minutes, else it is rejected (`duration_mismatch`) and the model corrects it
+  in its retry, with the figures in the rejection. The time the user has ("within the 40 minutes
+  you have"), a rest between sets and the rest of a reply are not claims about the length, and the
+  user's own figure does not excuse calling a shorter workout that long (live QA, 2026-10-16, B3).
+  Only an accepted proposal in the turn, or the one awaiting approval that the turn read, gives
+  the figures; a reply shown with neither is not checked.
 
 ## 6. Resource limits
 
@@ -153,11 +220,38 @@ Every request is bounded. As of Phase 5:
 | A proposal's approval | within 30 minutes |
 
 The round beyond the five is given only when the turn's last proposal was refused for something a
-corrected proposal fixes (`INVALID_INPUT`, an id it was not given, or the per-turn limit), and no
-proposal was accepted; in it the model may only propose again or decide. A turn that tried to
+corrected proposal fixes (`INVALID_INPUT`, an id it was not given, the reads it rests on, which
+Formiq has loaded by then (`CONTEXT_MISSING`), or the per-turn limit), and no proposal was
+accepted; in it the model may only propose again or decide. A turn that tried to
 propose and ends with no acceptable decision says that nothing was proposed (never the model's
 text). The live QA of 2026-10-15 found proposal turns ending with nothing after a refusal in the
 last rounds: this is the bounded room to correct one, not a larger general budget.
+
+**A proposal Formiq accepted is not lost to the model's wording.** A turn that ends at its limit
+with a proposal Formiq accepted in the turn, where the last decision the model gave passed the
+decision policy and is an answer and only its reply was refused (a claim of a change, an approval
+or a proposal, a wrong length, an internal name: any of the reply checks of section 5), shows that
+proposal, as any answer does (section 8), and the reply is Formiq's own, worked out from the
+proposal's card and never the model's text: how long the workout takes (its minutes, as Formiq
+worked them out, and each section's), how many main exercises it has, that it replaces a saved
+workout only if the user approves this one (without naming it, a revision), that Formiq's catalog
+could not cover its focus (an incomplete one), and that it is not saved and waits for the user's
+approval. The decision stands as the model gave it, since it was checked. This changes nothing
+else: no request is added (the limit was already reached), the proposal is kept for approval
+exactly as any shown one, pending until the user approves it, and the trajectory still records
+the turn as ended at its limit (`retry_limit_reached`) with its proposal created, so the QA can
+count it. It applies only when all of these hold; otherwise the turn ends as before, with the
+generic reply and no card, or with "nothing was proposed" when every proposal was refused:
+
+- a proposal call was accepted by Formiq in the turn: a proposal it refused (however many), and a
+  read of the proposal awaiting approval, show nothing;
+- the last respond call was valid, its decision passed the decision policy and answers the user
+  (`ANSWER` or `RETRIEVE_THEN_ANSWER`): a refused decision, a call that is no decision, a
+  clarification and a "cannot answer" are not Formiq's to turn into an answer;
+- the card carries the figures to say (its minutes and its main exercises): none is guessed.
+
+The live QA of 2026-10-17 found 3 of 30 accepted proposals dropped this way, each after a refused
+change claim, and the user got the generic reply for work Formiq had accepted.
 
 Failures fail closed and say nothing internal:
 
@@ -199,15 +293,27 @@ Failures fail closed and say nothing internal:
   created a workout or plan ("I've created a core workout for you") unless the turn proposed one.
 - **The model may only propose a new workout plan** (`propose_workout_plan`), and only after the
   user's profile, current plan and last workout were checked in the turn, with a profile to build
-  for. Formiq builds the proposal: the trusted user, active catalog exercises whose ids a tool
+  for. Each of the three is in one of four states in the turn: not loaded, loaded with data,
+  loaded and empty (a new user has no plan or workout yet, which is a check like any other), or
+  failed (never a check, and never taken for "none"). A proposal made while one is not loaded
+  waits for the rest of its batch, and Formiq then reads, for the request's user, whichever
+  neither an earlier round nor that batch read (at most once each in a turn), and returns the
+  results to the model with the refusal (`CONTEXT_MISSING`, with `loaded`): they are evidence
+  for the turn like any tool result, and the model proposes again if a new workout still
+  suits the user. A failed read, or no profile, is a refusal proposing again cannot fix. Formiq builds the proposal: the trusted user, active catalog exercises whose ids a tool
   returned, bounded prescriptions, no weights, and the user's stated time and equipment (what
   they have, `[]` for none, or what they cannot use, by the catalog's name, its plural or a common
   other name, `app/tools/equipment.py`: an unknown name is refused, never ignored, and a name for
   what the user has that negates or doubts itself, "no dumbbells", is refused too). What the user
-  wrote about their equipment in the conversation the model sees holds whatever the model gives:
-  a piece they said they lack ("I don't have any equipment", "I only have dumbbells") is never in
-  a proposal or a workout search, and `available_equipment` may name only what they said they
-  have (mentioning a piece is not having it). It has
+  wrote about their equipment in the conversation holds whatever the model gives, however long
+  ago they wrote it: the coach service reads it from every user turn the client sent (never a turn
+  from "coach"; the latest word replaces an earlier one; "I only have dumbbells" and "all I have
+  is dumbbells" mean nothing else), once, for the tools and for a bounded note to the model
+  (`EquipmentSaid`, in the catalog's own names, within the note's 400 characters and only when
+  turns were left out; the six-turn window is unchanged). A piece they said they lack ("I don't
+  have any equipment", "I only have dumbbells") is never in a proposal or a workout search, and
+  `available_equipment` may name only what they said they have (mentioning a piece is not
+  having it). It has
   three sections, each holding only exercises whose `uses` (Formiq's own classification of the
   catalog, kept apart from an imported exercise's upstream category) include it: a warm-up of
   light (BEGINNER) `WARM_UP` activities, the `MAIN_WORKOUT` exercises, and a cool-down of light
@@ -275,6 +381,13 @@ Failures fail closed and say nothing internal:
   background, and nothing recorded is read back.
 - **Only safe metadata is traced:** counts, sizes, names, statuses, categories, the model name,
   token counts, the trusted user id and the request id, with strings and lists kept short.
+- **Every turn has a trajectory** (`app.observability.trajectory`, described in
+  `docs/agent-trajectory-observability.md`): its model requests and what each cost in tokens and
+  time, its tool calls requested, executed, blocked and failed (never a blocked call among the
+  executed), why a proposal was refused, the retry round and whether it rescued the turn, and
+  how it ended, from Formiq's own state. It is kept whether or not tracing is on, goes to the
+  trace's root as flat aggregates and short event codes, to the log as one JSON line, and to the
+  playground's execution header. Recording it never changes the turn.
 - **Never traced:** the message, the history, the instructions, reasoning, tool arguments' values,
   tool results, profile, workout or nutrition data, keys, passwords, tokens, or exception text.
 - **Except, for development, with `LANGFUSE_CAPTURE_CONTENT` on** (off by default): Langfuse then
@@ -306,9 +419,12 @@ What is **not** guaranteed today:
    goes back to the model.
 4. **A running turn cannot be cancelled,** because the endpoint is synchronous; its reply is
    dropped and it holds nothing once it ends.
-5. **Tracing gaps:** tool timing is per batch; an interrupted request's trace has no final status;
-   the raw tool-call counters include calls refused for the per-turn limit; rendering in a live
-   Langfuse project has not been verified.
+5. **Tracing gaps:** an interrupted request's trace has no final status; rendering in a live
+   Langfuse project has not been verified. (Tool timing is measured for each call, and the
+   counters no longer count a call refused for the per-turn limit among the executed: both
+   changed on 2026-10-16, see the trajectory document.) A proposal's approval is its own request
+   and keeps no id of the turn that made it: the two are joined by the proposal's short
+   reference in their log lines.
 6. **Proposals wait 30 minutes, and cannot be rejected.** There is no rejection endpoint (an
    unapproved proposal expires; the user's expired ones are cleared when they get a new one), and
    approving a plan for a day that already has one does not cancel the other.
@@ -326,10 +442,23 @@ What is **not** guaranteed today:
     other phrasings are missed, so a proposal naming that piece is refused until the model leaves
     it out. Only the conversation the model sees (its last 6 turns) is read.
 11. **The reply checks read claims by their wording.** A false claim in words outside the making
-    and changing verbs, or in another language, can still pass; a comparison's differences are
+    and changing verbs, or in another language, can still pass (the verbs are read in the past
+    tense with the coach as the subject: "I'm proposing" or "I propose the following workout",
+    and a synonym such as "I've submitted", are not read); a comparison's differences are
     worked out by Formiq (`changes`), but the reply that describes them is the model's.
 12. **Proposals made before the 2026-10-15 fix pass** record no focus or revision kind: they are
     read back without their coverage, and are not shown to the user again.
+13. **The explanation of a shown proposal is judged by the turn, not by every word.** In a turn
+    that read the proposal awaiting approval for a user who did not ask for a change, a
+    first-person description of how the coach designed it ("I added a warm-up") is allowed, so
+    the check cannot tell it from the same words said of a change made now, except by the user's
+    own message and the markers in `app.agent.trust`. The user is shown the proposal as it is
+    kept, with the reply.
+14. **An accepted proposal is still lost when the model's decision, not its reply, is refused at the
+    limit** (an intent or decision the policy rejects, a call that is no decision, a clarification
+    or a "cannot answer"), or when its card lacks the figures to say (section 6): the turn ends with
+    the generic reply and no card. Only a refused reply is replaced, because only the reply is
+    Formiq's to replace; the decision is the model's, checked, and is never taken for it.
 
 Changing a guarantee here is an architectural decision: it needs an explicit decision, an update to
 this document, and tests. It is never a test to relax.

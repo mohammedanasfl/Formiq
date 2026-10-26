@@ -19,8 +19,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.catalog.classification import EQUIPMENT_NEEDED, uses_of
+from app.catalog.classification import (
+    EQUIPMENT_NAMED,
+    EQUIPMENT_NEEDED,
+    HIDDEN_DUPLICATE_IDS,
+    movement_pattern_of,
+    uses_of,
+)
+from app.catalog.descriptions import description_of, generated_description
 from app.catalog.images import is_image_path
+from app.catalog.patterns import pattern_of
 from app.schemas.exercise import (
     Difficulty,
     ExerciseSource,
@@ -127,18 +135,23 @@ class SourceExercise:
     source_id: str
     name: str
     difficulty: Difficulty
-    # CARDIO for the cardio category; Formiq has not classified the rest
+    # CARDIO for the cardio category, MOBILITY or STRETCH for a warm-up or
+    # cool-down activity Formiq classified (app.catalog.classification); Formiq
+    # has not classified the rest
     movement_pattern: MovementPattern | None
     # Formiq muscle group names and roles, primary first
     muscles: dict[str, MuscleRole]
     # Formiq equipment names: the record's, or Formiq's correction of it
-    # (EQUIPMENT_NEEDED); empty when it needs none
+    # (EQUIPMENT_NEEDED, EQUIPMENT_NAMED); empty when it needs none
     equipment: list[str]
     uses: list[WorkoutSection]
     # the record's image paths, in order
     image_paths: list[str]
     # the record exactly as the file has it
     record: dict[str, Any]
+    # Formiq's own description beside the record, for the few whose steps do
+    # not say how to do them as a warm-up or cool-down (app.catalog.descriptions)
+    description: str | None = None
     # what is missing from an otherwise valid record, such as instructions
     warnings: list[str] = field(default_factory=list)
 
@@ -312,18 +325,41 @@ def _mapped(record: dict[str, Any], name: str, warnings: list[str]) -> SourceExe
     if record["id"] in EQUIPMENT_NEEDED:
         # Formiq's correction of a record that names no equipment it needs
         equipment = list(EQUIPMENT_NEEDED[record["id"]])
+    elif record["id"] in EQUIPMENT_NAMED:
+        # Formiq's name for the equipment a record calls "machine"
+        equipment = list(EQUIPMENT_NAMED[record["id"]])
     else:
         mapped = EQUIPMENT.get(record["equipment"]) if record["equipment"] is not None else None
         equipment = [mapped] if mapped else []
+    uses = uses_of(record["id"], record["category"], record["equipment"])
+    pattern = movement_pattern_of(record["id"], record["category"])
+    hidden = record["id"] in HIDDEN_DUPLICATE_IDS
+    if pattern is None and not hidden:
+        pattern = pattern_of(record["id"], record, uses)
+    description = description_of(record["id"])
+    if description is None and not hidden:
+        # no hand-written one: say what it is from what the catalog holds of it
+        description = generated_description(
+            difficulty=LEVELS[record["level"]],
+            pattern=pattern,
+            category=record["category"],
+            primary=[name for name, role in muscles.items() if role == MuscleRole.PRIMARY],
+            secondary=[name for name, role in muscles.items() if role == MuscleRole.SECONDARY],
+            equipment=equipment,
+            has_steps=any(
+                isinstance(step, str) and step.strip() for step in record.get("instructions") or []
+            ),
+        )
     return SourceExercise(
         source_id=record["id"],
         name=name,
         difficulty=LEVELS[record["level"]],
-        movement_pattern=MovementPattern.CARDIO if record["category"] == "cardio" else None,
+        movement_pattern=pattern,
         muscles=muscles,
         equipment=equipment,
-        uses=uses_of(record["id"], record["category"], record["equipment"]),
+        uses=uses,
         image_paths=list(record["images"]),
         record=record,
+        description=description,
         warnings=warnings,
     )

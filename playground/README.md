@@ -38,8 +38,17 @@ playground/
   `X-Playground-Request-Id` response headers. These are the same values Langfuse may receive:
   - request id, status, safety category, intent, decision;
   - tools used, iterations, compactions;
-  - model requests, tool calls requested and executed, refused writes, rejections;
-  - termination.
+  - model requests, tool calls requested, executed, blocked, failed and loaded by Formiq, refused
+    writes, rejections;
+  - termination;
+  - the turn's trajectory (`docs/agent-trajectory-observability.md`): the model and the model Gemini
+    reported, tokens per turn (as Gemini reported them, never estimated), latency of the turn, the
+    model requests and the tools, the proposal outcome, the retry round, failure reasons, and the
+    events as short codes.
+
+  The launcher also prints each turn's full summary as one `coach_turn_summary {json}` line on its
+  console. Save the console to a file and run `.venv/bin/python ../playground/qa_metrics.py FILE
+  [--model NAME]` (from `backend/`) for a QA pass's medians, p90s and rates, with sample counts.
 
   They never include the message, history, reply, prompts, reasoning, tool arguments, tool
   results or user data. The response body is the API's own, unchanged. Langfuse tracing, if

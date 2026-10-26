@@ -23,6 +23,7 @@ Run it from backend/, so the application reads backend/.env as usual:
 
 import argparse
 import json
+import logging
 import sys
 from contextvars import ContextVar
 from pathlib import Path
@@ -69,6 +70,49 @@ SHOWN = (
     "decision_rejections",
     "reply_rejections",
     "compacted_tool_results",
+    # the turn's trajectory (app.observability.trajectory): safe aggregates and
+    # the events as short codes; the same metadata the trace root carries
+    "model",
+    "models_reported",
+    "request_completed",
+    "tool_calls_blocked",
+    "tool_calls_failed",
+    "tool_calls_empty",
+    "tool_calls_loaded",
+    "tool_success_rate",
+    "tool_counts",
+    "tool_calls_per_round",
+    "duplicate_calls_blocked",
+    "repeated_lookups",
+    "retries_after_changed_evidence",
+    "proposal_outcome",
+    "proposal_attempts",
+    "proposal_rejections",
+    "missing_prerequisites",
+    "proposal_complete",
+    "retry_rounds_entered",
+    "retry_rounds_recovered",
+    "retry_round_outcome",
+    "budget_exhausted",
+    "budget_reason",
+    "failure_reasons",
+    "tokens_input",
+    "tokens_output",
+    "tokens_cached_input",
+    "tokens_reasoning",
+    "tokens_total",
+    "tokens_source",
+    "tokens_requests_reporting",
+    "tokens_through_proposal",
+    "latency_turn_ms",
+    "latency_model_ms",
+    "latency_tool_ms",
+    "latency_decision_reply_validation_ms",
+    "latency_retry_round_ms",
+    "latency_slowest_request",
+    "model_request_ms",
+    "trajectory",
+    "trajectory_events",
 )
 
 # the current coach request's record; set by the middleware, filled by the backend
@@ -144,6 +188,20 @@ def execution(record: dict[str, Any]) -> dict[str, Any]:
     return {name: record[name] for name in SHOWN if name in record}
 
 
+def log_turn_summaries() -> None:
+    """Prints each coach turn's summary (app.observability.trajectory) to this
+    process's console, one JSON line per turn, for qa_metrics.py to
+    read: model, tool counts, tokens, latency and the events as codes, never a
+    message, a reply or a result. The same line the application logs at INFO."""
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger = logging.getLogger("app.observability.trajectory")
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.disabled = False
+
+
 def install() -> None:
     """Adds the playground to this process's application: the page, the
     recording tracer and the response headers. Never called in production."""
@@ -193,6 +251,7 @@ def main(argv: list[str] | None = None) -> None:
     import uvicorn
 
     install()
+    log_turn_summaries()
     print(f"Formiq Agent Playground: http://localhost:{args.port}/playground/")
     print("LOCAL DEVELOPMENT ONLY")
     uvicorn.run(app, host=HOST, port=args.port)

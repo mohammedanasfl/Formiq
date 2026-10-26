@@ -50,6 +50,9 @@ API route (app/api) → service (app/services) → repository (app/repositories)
   are kept in the database by `app/services/plan_proposal_service.py`)
 - `app/catalog/`: reading, validating and mapping the imported exercise dataset, and Formiq's
   classification of each exercise's uses (no database access)
+- `app/guidance/`: the nutrition and recovery rules behind the recovery summary: protein,
+  carbohydrate, hydration, rest windows, food examples and the sources they cite (pure Python,
+  no database access; see [nutrition and recovery](../docs/nutrition-recovery.md))
 - `data/free-exercise-db/`: the pinned upstream exercise dataset, unmodified, with its licence and
   `SOURCE.md` (provenance, checksums, licence findings)
 - `data/exercise-images/`: the exercise images the API serves (none included yet; see its README)
@@ -214,6 +217,12 @@ uvicorn app.main:app --reload
 The health endpoint is then available at http://127.0.0.1:8000/health, and interactive API
 documentation at http://127.0.0.1:8000/docs.
 
+To watch the coach's turns in the terminal while developing, set `AGENT_DEBUG=events` (the ordered
+timeline, no content) or `AGENT_DEBUG=content` (also the prompt text and the tool data that is safe
+to show; the user's words and profile are always redacted). It needs `APP_ENV=development` (or
+`test`) set explicitly, prints to stderr only and changes nothing a turn does:
+`docs/agent-debug.md`.
+
 ## API
 
 | Method | Path | Request body | Success |
@@ -230,6 +239,13 @@ documentation at http://127.0.0.1:8000/docs.
 | `POST` | `/users/{user_id}/profile` | onboarding profile | 201 |
 | `GET` | `/users/{user_id}/profile` | | 200 |
 | `PATCH` | `/users/{user_id}/profile` | profile fields to change | 200 |
+| `POST` | `/users/{user_id}/workout-sessions/{session_id}/recovery-summary` | optional: discomfort, warning signs, allergens to avoid (enums only) | 200 |
+
+`POST .../recovery-summary` is the nutrition and recovery summary of one COMPLETED workout
+session (`409` while it is IN_PROGRESS or CANCELLED). It only reads: nothing is stored, and no
+language model is involved. Its estimates are ranges with their assumptions and sources, kept
+apart from calculated facts and general guidance; see
+[nutrition and recovery](../docs/nutrition-recovery.md).
 
 `PATCH` changes only the fields that are sent. Optional fields (`last_name`, `target_weight_kg`,
 `goal_period_weeks`, `dietary_preference`) can be cleared with `null`; other fields cannot.
