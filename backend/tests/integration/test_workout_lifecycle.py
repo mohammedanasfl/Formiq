@@ -482,13 +482,13 @@ def test_approvals_at_once_or_repeated_save_one_plan(client, use_provider, users
     body, _ = ask(client, use_provider, me, *at_home(ids))
     shown = body["proposal"]
     start = threading.Barrier(3)
-    statuses = []
+    answers = []
 
     def approve_at_once():
         # each its own client, as separate requests would be
         each = TestClient(app)
         start.wait()
-        statuses.append(approve(each, me, shown).status_code)
+        answers.append(approve(each, me, shown))
 
     threads = [threading.Thread(target=approve_at_once) for _ in range(3)]
     for thread in threads:
@@ -497,10 +497,14 @@ def test_approvals_at_once_or_repeated_save_one_plan(client, use_provider, users
         thread.join(timeout=30)
     assert not any(thread.is_alive() for thread in threads)
 
-    assert sorted(statuses) == [201, 409, 409]
+    # one saved the plan; the others waited for its row and got that plan back
+    assert sorted(answer.status_code for answer in answers) == [200, 200, 201]
+    (saved,) = {answer.json()["id"] for answer in answers}
     # and a retry later
-    assert approve(client, me, shown).status_code == 409
+    later = approve(client, me, shown)
+    assert (later.status_code, later.json()["id"]) == (200, saved)
     (plan_id,) = plans_of(test_engine, me)
+    assert plan_id == saved
     with Session(test_engine) as session:
         stored = session.get(WorkoutPlanProposal, shown["proposal_id"])
         assert (stored.status, stored.workout_plan_id) == ("APPROVED", plan_id)

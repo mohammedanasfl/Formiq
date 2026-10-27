@@ -1,0 +1,100 @@
+{
+  "id": 77,
+  "user_id": 577,
+  "name": "Core Stability & Abs",
+  "description": null,
+  "status": "PLANNED",
+  "scheduled_date": "2026-10-22",
+  "exercises": [
+    {
+      "id": 1,
+      "workout_plan_id": 77,
+      "exercise_id": 101,
+      "exercise": {
+        "name": "Cat-Cow Stretch",
+        "description": null,
+        "instructions": [
+          "Keep your core tight."
+        ]
+      },
+      "exercise_order": 1,
+      "section": "WARM_UP",
+      "sets": 1,
+      "reps": null,
+      "duration_seconds": 40,
+      "weight_kg": null,
+      "rest_seconds": null,
+      "notes": null,
+      "created_at": "2026-10-22T11:59:00Z",
+      "updated_at": "2026-10-22T11:59:00Z"
+    },
+    {
+      "id": 2,
+      "workout_plan_id": 77,
+      "exercise_id": 102,
+      "exercise": {
+        "name": "Plank",
+        "description": null,
+        "instructions": [
+          "Keep your core tight."
+        ]
+      },
+      "exercise_order": 2,
+      "section": "MAIN_WORKOUT",
+      "sets": 3,
+      "reps": null,
+      "duration_seconds": 30,
+      "weight_kg": null,
+      "rest_seconds": 45,
+      "notes": null,
+      "created_at": "2026-10-22T11:59:00Z",
+      "updated_at": "2026-10-22T11:59:00Z"
+    },
+    {
+      "id": 3,
+      "workout_plan_id": 77,
+      "exercise_id": 103,
+      "exercise": {
+        "name": "Dead Bug",
+        "description": null,
+        "instructions": [
+          "Keep your core tight."
+        ]
+      },
+      "exercise_order": 3,
+      "section": "MAIN_WORKOUT",
+      "sets": 3,
+      "reps": 10,
+      "duration_seconds": null,
+      "weight_kg": null,
+      "rest_seconds": 45,
+      "notes": "Slow and controlled",
+      "created_at": "2026-10-22T11:59:00Z",
+      "updated_at": "2026-10-22T11:59:00Z"
+    },
+    {
+      "id": 4,
+      "workout_plan_id": 77,
+      "exercise_id": 104,
+      "exercise": {
+        "name": "Child's Pose",
+        "description": null,
+        "instructions": [
+          "Keep your core tight."
+        ]
+      },
+      "exercise_order": 4,
+      "section": "COOL_DOWN",
+      "sets": 1,
+      "reps": null,
+      "duration_seconds": 45,
+      "weight_kg": null,
+      "rest_seconds": null,
+      "notes": null,
+      "created_at": "2026-10-22T11:59:00Z",
+      "updated_at": "2026-10-22T11:59:00Z"
+    }
+  ],
+  "created_at": "2026-10-22T11:59:00Z",
+  "updated_at": "2026-10-22T11:59:00Z"
+}

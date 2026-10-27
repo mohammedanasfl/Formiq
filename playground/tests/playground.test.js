@@ -233,6 +233,17 @@ test("a proposal is shown section by section, each with its minutes", () => {
   );
 });
 
+test("a weight is part of the prescription shown, and none leaves it as it was (Phase 2.5)", () => {
+  const row = (fields) => proposed(1, "MAIN_WORKOUT", "Cable Woodchop", { sets: 3, reps: 10, ...fields });
+
+  assert.equal(P.prescription(row({ rest_seconds: 60 })), "3 × 10, 60 s rest");
+  assert.equal(P.prescription(row({ weight_kg: null, rest_seconds: 60 })), "3 × 10, 60 s rest");
+  assert.equal(P.prescription(row({ weight_kg: 15, rest_seconds: 60 })), "3 × 10 at 15 kg, 60 s rest");
+  assert.equal(P.prescription(row({ weight_kg: 12.5 })), "3 × 10 at 12.5 kg");
+  // a saved plan's exercise shows its weight the same way
+  assert.equal(P.prescription({ sets: 2, reps: 8, duration_seconds: null, weight_kg: 20, rest_seconds: 90 }), "2 × 8 at 20 kg, 90 s rest");
+});
+
 test("a proposal's coverage is shown as the API's structured data, limitations included", () => {
   const coverage = {
     complete: true,
@@ -316,6 +327,47 @@ test("a failed approval says nothing was approved, with a fixed message", () => 
   assert.match(P.describeApprovalError(404).message, /^Not approved/);
   // proposals are kept in PostgreSQL: a restart loses none
   assert.doesNotMatch(P.describeApprovalError(404).message, /restart/i);
+});
+
+test("an approval saved the plan on the API's 201, and on its 200 for the same approval sent again: nothing else", () => {
+  const plan = { id: 5, name: "Core Stability & Abs" };
+
+  // the first approval answers 201 with the plan; the same approval again answers 200 with the plan it saved
+  assert.equal(P.approvalSaved(201, plan), true);
+  assert.equal(P.approvalSaved(200, plan), true);
+  // anything else is not a save, whatever the body says
+  for (const status of [0, 204, 400, 401, 404, 409, 422, 500, 503]) {
+    assert.equal(P.approvalSaved(status, plan), false, status);
+  }
+  // a success without a plan is not a save
+  for (const data of [null, undefined, {}, { id: "5" }, { id: 5.5 }, { name: "x" }]) {
+    assert.equal(P.approvalSaved(201, data), false);
+    assert.equal(P.approvalSaved(200, data), false);
+  }
+});
+
+test("a first approval and a repeated one are told apart, and neither says anything it did not do", () => {
+  const plan = { id: 5, name: "Core Stability & Abs" };
+
+  assert.equal(P.approvalMessage(201, plan), 'Saved "Core Stability & Abs" as plan 5. Find it under Saved plans.');
+  assert.equal(
+    P.approvalMessage(200, plan),
+    'This proposal was already approved: "Core Stability & Abs" is plan 5. Nothing more was saved. Find it under Saved plans.'
+  );
+  // an approval that finished after the conversation changed
+  assert.equal(P.approvalMessage(201, plan, { late: true }), "An approval finished after the conversation changed: workout plan 5 was saved.");
+  assert.equal(
+    P.approvalMessage(200, plan, { late: true }),
+    "An approval finished after the conversation changed: workout plan 5 is the plan it saved earlier, and nothing more was saved."
+  );
+  assert.equal(P.approvalMessage(409, null, { late: true }), "An approval answered after the conversation changed; nothing was saved.");
+  assert.equal(P.approvalMessage(409, null), "");
+});
+
+test("a refused approval says why in the words of the API's own reasons, including an approved plan changed since", () => {
+  assert.match(P.describeApprovalError(409).message, /expired, was rejected/);
+  assert.match(P.describeApprovalError(409).message, /plan it saved has changed since/);
+  assert.doesNotMatch(P.describeApprovalError(409).message, /was already approved,? or/);
 });
 
 // --- saved plans ---
@@ -535,4 +587,202 @@ test("a failed plan read shows a fixed message", () => {
   });
   assert.equal(P.describePlanError(401).message, "Not signed in, or the session expired. Log in again.");
   assert.equal(P.describePlanError(418).message, "Could not load the plan (HTTP 418).");
+});
+
+// --- logging a saved plan's workout as done: the "Completed" button ---
+
+function userSession() {
+  return P.signIn(P.createSession(), "one@example.test", tokenFor("7"));
+}
+
+// The API's workout sessions, as far as logging a plan uses them. failing:
+// { method, path (a RegExp), status } makes one kind of request fail.
+function sessionsApi({ completed = [], failing = null } = {}) {
+  const requests = [];
+  let exerciseIds = 5000;
+  async function call(method, path, body) {
+    requests.push({ method, path, body });
+    if (failing && failing.method === method && failing.path.test(path)) {
+      return { status: failing.status, data: null };
+    }
+    if (method === "GET") return { status: 200, data: completed };
+    if (method === "POST" && /\/workout-sessions$/.test(path)) return { status: 201, data: { id: 900, status: "IN_PROGRESS" } };
+    if (method === "POST" && /\/exercises$/.test(path)) return { status: 201, data: { id: ++exerciseIds } };
+    if (method === "POST" && /\/sets$/.test(path)) return { status: 201, data: { id: 1 } };
+    if (method === "PATCH") return { status: 200, data: { id: 900, status: "COMPLETED" } };
+    if (method === "DELETE") return { status: 204, data: null };
+    throw new Error(`unexpected request ${method} ${path}`);
+  }
+  return { call, requests };
+}
+
+test("the sessions' paths are the signed-in user's, from the access token, and only with real ids", () => {
+  const session = userSession();
+
+  assert.equal(P.sessionsPath(session), "/users/7/workout-sessions");
+  assert.equal(P.sessionsPath(session, "COMPLETED"), "/users/7/workout-sessions?status=COMPLETED");
+  assert.equal(P.sessionsPath(session, "ANYTHING"), null);
+  assert.equal(P.sessionPath(session, 9), "/users/7/workout-sessions/9");
+  assert.equal(P.sessionExercisesPath(session, 9), "/users/7/workout-sessions/9/exercises");
+  assert.equal(P.sessionSetsPath(session, 9, 12), "/users/7/workout-sessions/9/exercises/12/sets");
+  for (const bad of [0, -1, 1.5, "9", 2147483648, null]) {
+    assert.equal(P.sessionPath(session, bad), null);
+    assert.equal(P.sessionSetsPath(session, 9, bad), null);
+  }
+  // not signed in, or not a token Formiq issues: no path, so nothing is asked for
+  assert.equal(P.sessionsPath(P.createSession()), null);
+  assert.equal(P.sessionsPath(P.signIn(P.createSession(), "one@example.test", TOKEN)), null);
+});
+
+test("a plan is logged as prescribed: its own ids and numbers, never a user", () => {
+  const [warmUp, main, plate] = P.planExercisesInOrder(PLAN);
+
+  assert.deepEqual(P.buildSessionStart(PLAN), { workout_plan_id: 41, notes: "Logged as prescribed from the playground." });
+  assert.deepEqual(P.buildSessionExercise(main), {
+    exercise_id: main.exercise_id,
+    exercise_order: 2,
+    plan_exercise_id: main.id,
+  });
+  // every prescribed set at its prescribed reps; a timed activity has no sets, a set needs reps
+  assert.deepEqual(P.loggedSets(main), [1, 2, 3].map((number) => ({ set_number: number, reps: 8, completed: true })));
+  assert.deepEqual(P.loggedSets(warmUp), []);
+  assert.deepEqual(P.loggedSets(plate), []);
+  assert.deepEqual(P.COMPLETION, { status: "COMPLETED" });
+  const sent = JSON.stringify([P.buildSessionStart(PLAN), P.buildSessionExercise(main), P.loggedSets(main), P.COMPLETION]);
+  assert.ok(!sent.includes("user_id") && !sent.includes(TOKEN));
+});
+
+test("the exercises are logged in the plan's order, whatever order they arrive in", () => {
+  const shuffled = { ...PLAN, exercises: [...PLAN.exercises].reverse() };
+
+  assert.deepEqual(
+    P.planExercisesInOrder(shuffled).map((item) => item.exercise_order),
+    [1, 2, 3]
+  );
+  assert.deepEqual(PLAN.exercises.map((item) => item.exercise_order), [1, 2, 3]); // the plan itself is not reordered
+});
+
+test("logging a plan starts a session from it, logs each exercise and set, then completes it", async () => {
+  const api = sessionsApi();
+
+  const result = await P.logPlan(userSession(), PLAN, api.call);
+
+  assert.deepEqual(result, { ok: true, sessionId: 900, already: false });
+  const [warmUp, main, plate] = P.planExercisesInOrder(PLAN);
+  assert.deepEqual(
+    api.requests.map(({ method, path, body }) => [method, path, body]),
+    [
+      ["GET", "/users/7/workout-sessions?status=COMPLETED", undefined],
+      ["POST", "/users/7/workout-sessions", P.buildSessionStart(PLAN)],
+      ["POST", "/users/7/workout-sessions/900/exercises", P.buildSessionExercise(warmUp)],
+      ["POST", "/users/7/workout-sessions/900/exercises", P.buildSessionExercise(main)],
+      ...P.loggedSets(main).map((set) => ["POST", "/users/7/workout-sessions/900/exercises/5002/sets", set]),
+      ["POST", "/users/7/workout-sessions/900/exercises", P.buildSessionExercise(plate)],
+      ["PATCH", "/users/7/workout-sessions/900", { status: "COMPLETED" }],
+    ]
+  );
+  // nothing is deleted when it worked, and the plan's own status is never written
+  assert.ok(!api.requests.some((request) => request.method === "DELETE" || /workout-plans/.test(request.path)));
+});
+
+test("a plan already logged as completed is not logged again", async () => {
+  const api = sessionsApi({
+    completed: [
+      { id: 12, status: "COMPLETED", workout_plan_id: 40 },
+      { id: 13, status: "IN_PROGRESS", workout_plan_id: 41 },
+      { id: 77, status: "COMPLETED", workout_plan_id: 41 },
+    ],
+  });
+
+  const result = await P.logPlan(userSession(), PLAN, api.call);
+
+  assert.deepEqual(result, { ok: true, sessionId: 77, already: true });
+  assert.deepEqual(api.requests.map((request) => request.method), ["GET"]);
+  assert.equal(P.findCompletedSession(PLAN, [{ id: 12, status: "COMPLETED", workout_plan_id: 40 }]), null);
+  assert.equal(P.findCompletedSession(PLAN, null), null);
+});
+
+test("a step that fails ends the log, and the session it started is deleted so it cannot block the next", async () => {
+  const cases = [
+    { failing: { method: "POST", path: /\/exercises$/, status: 400 }, step: /log exercise 1/ },
+    { failing: { method: "POST", path: /\/sets$/, status: 500 }, step: /log a set of exercise 2/ },
+    { failing: { method: "PATCH", path: /./, status: 400 }, step: /complete the session/ },
+  ];
+  for (const { failing, step } of cases) {
+    const api = sessionsApi({ failing });
+
+    const result = await P.logPlan(userSession(), PLAN, api.call);
+
+    assert.equal(result.ok, false);
+    assert.match(result.step, step);
+    assert.equal(result.status, failing.status);
+    assert.equal(result.cleaned, true);
+    const last = api.requests.at(-1);
+    assert.deepEqual([last.method, last.path], ["DELETE", "/users/7/workout-sessions/900"]);
+    assert.equal(api.requests.filter((request) => request.method === "DELETE").length, 1);
+    // and it stopped at the failure: nothing was logged after it
+    assert.ok(!api.requests.slice(0, -1).some((request) => request.method === "PATCH" && failing.method !== "PATCH"));
+  }
+});
+
+test("a session that cannot start is not deleted, because none was started", async () => {
+  const api = sessionsApi({ failing: { method: "POST", path: /\/workout-sessions$/, status: 409 } });
+
+  const result = await P.logPlan(userSession(), PLAN, api.call);
+
+  assert.deepEqual(result, { ok: false, step: "start the session", status: 409, cleaned: true });
+  assert.deepEqual(api.requests.map((request) => request.method), ["GET", "POST"]);
+  assert.match(P.describeLogError(result.step, 409).message, /already in progress/);
+});
+
+test("when the new session cannot be deleted either, the page says it may still be running", async () => {
+  const api = sessionsApi({
+    failing: { method: "PATCH", path: /./, status: 500 },
+  });
+  const call = (method, path, body) =>
+    method === "DELETE" ? api.call(method, path, body).then(() => ({ status: 500, data: null })) : api.call(method, path, body);
+
+  const result = await P.logPlan(userSession(), PLAN, call);
+
+  assert.equal(result.cleaned, false);
+  const error = P.describeLogError(result.step, result.status, result.cleaned);
+  assert.match(error.message, /may still be running/);
+  assert.deepEqual(error.technical, { step: "complete the session", status: 500, cleaned_up: false });
+});
+
+test("without a sign-in nothing is asked for", async () => {
+  const api = sessionsApi();
+
+  const result = await P.logPlan(P.createSession(), PLAN, api.call);
+
+  assert.deepEqual(result, { ok: false, step: "sign in", status: 401, cleaned: true });
+  assert.deepEqual(api.requests, []);
+});
+
+test("only a planned plan that is not already logged offers the button, and a log is remembered until the plan is opened again", () => {
+  const planned = { ...PLAN, status: "PLANNED" };
+
+  assert.equal(P.canLog(planned), true);
+  assert.equal(P.canLog({ ...planned, status: "CANCELLED" }), false);
+  assert.equal(P.canLog({ ...planned, status: "DRAFT" }), false);
+  assert.equal(P.canLog({ ...planned, loggedSessionId: 900 }), false);
+  assert.equal(P.canLog(null), false);
+
+  const opened = P.recordPlan(userSession(), planned);
+  const logged = P.markLogged(opened, 900);
+  assert.equal(logged.plan.loggedSessionId, 900);
+  assert.equal(P.canLog(logged.plan), false);
+  assert.equal(P.markLogged(opened, "900"), opened); // not a session id
+  assert.equal(P.markLogged(userSession(), 900).plan, null); // no plan open
+  // opened again from the database, it is read afresh, and signing out forgets it
+  assert.equal(P.recordPlan(logged, planned).plan.loggedSessionId, undefined);
+  assert.equal(P.signOut(logged).plan, null);
+});
+
+test("a failed log is described by its step and status, never with the user's data", () => {
+  assert.deepEqual(P.describeLogError("log exercise 2", 500).technical, { step: "log exercise 2", status: 500, cleaned_up: true });
+  assert.match(P.describeLogError("start the session", 401).message, /Log in again/);
+  assert.match(P.describeLogError("start the session", 404).message, /no such plan/);
+  assert.match(P.describeLogError("check earlier sessions", 0).message, /Could not reach the backend/);
+  assert.match(P.describeLogError("x", 418).message, /HTTP 418/);
 });

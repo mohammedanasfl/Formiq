@@ -9,6 +9,7 @@ from app.schemas import (
 )
 from app.services import UserProfileService, UserService
 from app.services.exceptions import (
+    InvalidEquipmentError,
     InvalidProfileUpdateError,
     UserNotFoundError,
     UserProfileAlreadyExistsError,
@@ -47,6 +48,8 @@ def create_profile(user_id: UserId, profile_data: UserProfileCreate, db: DbSessi
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     except UserProfileAlreadyExistsError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except InvalidEquipmentError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
 
 @router.get("/{user_id}/profile", response_model=UserProfileResponse, dependencies=OWN)
@@ -65,5 +68,5 @@ def update_profile(user_id: UserId, profile_data: UserProfileUpdate, db: DbSessi
         return UserProfileService(db).update_profile(user_id, profile_data)
     except UserProfileNotFoundError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
-    except InvalidProfileUpdateError as error:
+    except (InvalidProfileUpdateError, InvalidEquipmentError) as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error

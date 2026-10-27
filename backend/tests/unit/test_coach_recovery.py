@@ -326,6 +326,54 @@ def test_a_proposal_that_ran_and_was_refused_is_not_run_again_word_for_word():
     assert [n for batch in tools.runs for n in batch].count("propose_workout_plan") == 1
 
 
+def test_a_failed_proposal_does_not_make_a_recorded_pending_reply_cost_a_retry():
+    pending = {
+        "output": {
+            "name": "Core & Abs Focus (Harder)",
+            "coverage": {"complete": True},
+            "revision": {"kind": "ADJUST", "replaces_plan_id": 5},
+            "changes": {
+                "changed": [
+                    {
+                        "exercise_name": "Bird Dog",
+                        "before": "3 sets of 12 reps, 90 s rest",
+                        "after": "4 sets of 12 reps, 90 s rest",
+                    }
+                ],
+                "added": [],
+                "removed": [],
+            },
+        }
+    }
+
+    def answer(item):
+        if item.name == "get_pending_proposal":
+            return pending
+        if item.name == "propose_workout_plan":
+            return MISSING_CORE
+        return {"output": {"tool": item.name}}
+
+    tools = ScriptedTools(answer)
+    truth = "The harder version I proposed is currently awaiting your approval."
+    provider = fake_provider(
+        tool_turn(*(call(name) for name in READS), call("get_pending_proposal")),
+        tool_turn(propose(10, 11)),
+        respond_turn(truth, "ADAPTATION", "RETRIEVE_THEN_ANSWER"),
+        # A pre-fix graph would reject the truthful reply and ask for this fourth request.
+        respond_turn(truth, "ADAPTATION", "RETRIEVE_THEN_ANSWER"),
+    )
+
+    state = run(
+        provider,
+        tools,
+        message="Did that save?",
+        proposal_awaiting_approval=True,
+    )
+
+    assert provider.generate_turn.call_count == 3
+    assert state["final_response"] == truth
+
+
 def test_a_search_that_returned_is_not_run_again_word_for_word():
     tools = tools_where(None)
     provider = fake_provider(

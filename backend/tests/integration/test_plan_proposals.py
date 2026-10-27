@@ -191,6 +191,9 @@ def test_a_proposal_is_built_from_the_catalog_and_saves_nothing(
             "reps": reps,
             "duration_seconds": duration,
             "rest_seconds": rest,
+            # a proposal carries a weight only where the saved plan it revises has one, or the
+            # user gave one (Phase 2.5): a new workout has none
+            "weight_kg": None,
             "notes": notes,
         }
 
@@ -1120,8 +1123,9 @@ def test_only_what_suits_the_users_experience_fills_a_gap(
 
 @pytest.mark.parametrize(
     ("max_minutes", "accepted"),
-    # the workout takes about 26 minutes: at least half of 50, not of 60
-    [(None, True), (50, True), (60, False)],
+    # the workout takes about 26 minutes: at least half of 35, not of 60 (and a session of 40
+    # minutes or more needs five main exercises, which this one does not have)
+    [(None, True), (35, True), (60, False)],
 )
 def test_a_workout_uses_at_least_half_the_time_the_user_has(
     tools, user, ids, max_minutes, accepted
@@ -1135,10 +1139,11 @@ def test_a_workout_uses_at_least_half_the_time_the_user_has(
     if accepted:
         assert result["output"]["estimated_minutes"] == 26
     else:
-        assert problem(result) == (
+        # (it also has too few exercises for 60 minutes: both are named)
+        assert (
             "this plan takes about 26 minutes, less than half of the 60 the user has: make it "
             "at least 30 minutes, with more sets or main exercises"
-        )
+        ) in problem(result)
 
 
 @pytest.mark.parametrize(("max_minutes", "accepted"), [(None, False), (30, False), (25, True)])
@@ -1360,12 +1365,9 @@ def test_a_proposed_plan_is_saved_only_by_the_users_approval_and_once(
         for item in shown["exercises"]
     ]
     assert client.get(f"/users/{me}/workout-plans/{plan['id']}").json() == plan
-    # the approval is used up
+    # the approval is used up: approving again saves nothing, and returns the plan it saved
     again = approve(client, me, shown)
-    assert (again.status_code, again.json()) == (
-        409,
-        {"detail": "this proposal was already approved"},
-    )
+    assert (again.status_code, again.json()) == (200, plan)
     assert plans_of(test_engine, me) == [plan["id"]]
 
 
@@ -1936,7 +1938,8 @@ def test_an_incomplete_workout_is_disclosed_to_the_user_and_saved_only_on_approv
     assert plans_of(test_engine, me) == []
     saved = approve(client, me, shown)
     assert saved.status_code == 201
-    assert approve(client, me, shown).status_code == 409
+    again = approve(client, me, shown)
+    assert (again.status_code, again.json()) == (200, saved.json())
     assert plans_of(test_engine, me) == [saved.json()["id"]]
 
 

@@ -16,7 +16,8 @@ from datetime import UTC, date, datetime, time, timedelta
 import pytest
 from sqlalchemy.orm import Session
 
-from app.agent import COACH_INSTRUCTIONS, SAFETY_POLICY, SafetyCategory
+from app.agent import COACH_INSTRUCTIONS, SAFETY_POLICY, CoachDates, SafetyCategory
+from app.agent.graph import date_note
 from app.api.dependencies import get_ai_provider
 from app.main import app
 from app.models import (
@@ -272,7 +273,10 @@ def test_time_and_tiredness_adapt_todays_plan_on_the_normal_path(
     assert outcome["safety_category"] == "SAFE"
     assert outcome["tools_used"] == list(DAILY_READS)
     assert rule in COACH_INSTRUCTIONS
-    assert provider.generate_turn.call_args.kwargs["instructions"] == COACH_INSTRUCTIONS
+    # the instructions, then the calendar of the request (Phase 2.7): nothing else
+    assert provider.generate_turn.call_args.kwargs["instructions"] == (
+        f"{COACH_INSTRUCTIONS}\n\n{date_note(CoachDates(today=formiq_tools.utc_today()))}"
+    )
 
 
 @pytest.mark.parametrize(

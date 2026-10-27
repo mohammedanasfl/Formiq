@@ -24,6 +24,15 @@ MAX_SUGGESTIONS = 3
 MAX_SETS = 15
 # characters of free text (notes, descriptions); longer text is cut
 MAX_TEXT_LENGTH = 500
+
+
+def clip(text: str | None) -> str | None:
+    """The text, cut to MAX_TEXT_LENGTH characters."""
+    if text is None or len(text) <= MAX_TEXT_LENGTH:
+        return text
+    return text[: MAX_TEXT_LENGTH - 1] + "…"
+
+
 # Tool calls run from one model turn; the rest are answered with an error (the
 # coach graph rejects a turn that requests more than 20 calls). Enough for what
 # a new workout needs in one round: the profile, the current plan, the last
@@ -41,6 +50,9 @@ MAX_PROPOSED_EXERCISES = 10
 MAX_PROPOSED_SETS = 10
 MAX_PROPOSED_REPS = 30
 MAX_PROPOSED_REST_SECONDS = 300
+# the most weight, in kg, a proposal may give one exercise: a bound on what the user
+# can state (app.tools.weights), not a recommendation
+MAX_PROPOSED_WEIGHT_KG = 500
 # how many days after today a proposed plan may be scheduled
 MAX_PROPOSAL_DAYS_AHEAD = 14
 # equipment the user cannot use, by name: enough to name every piece the catalog
@@ -73,8 +85,21 @@ DEFAULT_REST_SECONDS = 90
 SHORT_SESSION_MINUTES = 30
 MIN_FULL_BODY_EXERCISES = 4
 MIN_FOCUSED_EXERCISES = 3
+# A core (abs) workout is single-joint moves of short sets, so three exercises are a list of
+# suggestions, not a routine (Bug 2, 2026-10-27: "beginner abs workout" came back as three).
+MIN_CORE_EXERCISES = 4
 MIN_SHORT_SESSION_EXERCISES = 2
 MIN_COUNTED_SETS = 2
+# A longer session holds more main exercises, not only more sets of a few: one more for each
+# MINUTES_PER_MAIN_EXERCISE the user has beyond what the warm-up and cool-down take
+# (WARM_UP_AND_COOL_DOWN_MINUTES), up to MAX_REQUIRED_EXERCISES (about two sets of a main
+# exercise with its rest take that long; more is variety Formiq asks of nobody). It never
+# lowers the minimums above, and changes nothing below 34 minutes (a session of 30 to 33
+# needs what it always did). app.tools.completeness.required_exercises. Coaching defaults,
+# not medical rules.
+MINUTES_PER_MAIN_EXERCISE = 6
+WARM_UP_AND_COOL_DOWN_MINUTES = 10
+MAX_REQUIRED_EXERCISES = 5
 # The warm-up of a session that is not short lasts at least this long, by the
 # duration estimate above.
 MIN_WARM_UP_MINUTES = 3

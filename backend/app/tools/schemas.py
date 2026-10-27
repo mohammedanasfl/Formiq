@@ -35,6 +35,7 @@ from app.tools.limits import (
     MAX_PROPOSED_REPS,
     MAX_PROPOSED_REST_SECONDS,
     MAX_PROPOSED_SETS,
+    MAX_PROPOSED_WEIGHT_KG,
     MAX_SEARCH_EQUIPMENT,
     MAX_SECTION_ACTIVITIES,
     MAX_UNAVAILABLE_EQUIPMENT,
@@ -94,6 +95,10 @@ class GetLatestWorkoutSessionInput(UserScopedInput):
 ProposedSets = Annotated[int, Field(strict=True, ge=1, le=MAX_PROPOSED_SETS)]
 ProposedReps = Annotated[int, Field(strict=True, ge=1, le=MAX_PROPOSED_REPS)]
 ProposedRest = Annotated[int, Field(strict=True, ge=0, le=MAX_PROPOSED_REST_SECONDS)]
+# a weight in kg: a number (not a bool, which JSON can send for one), and finite
+ProposedWeight = Annotated[
+    float, Field(strict=True, gt=0, le=MAX_PROPOSED_WEIGHT_KG, allow_inf_nan=False)
+]
 AvailableMinutes = Annotated[int, Field(strict=True, ge=10, le=180)]
 PlanName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=150)]
 ShortNote = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -114,13 +119,29 @@ def without_blank_names(value: object) -> object:
 
 class ProposedExerciseInput(ToolInput):
     """An exercise of a proposed plan's main workout: a catalog exercise and its
-    prescription. No weight: the coach does not prescribe loads it cannot know."""
+    prescription. The coach never chooses a weight, because it cannot know a load:
+    one it leaves out is the saved plan's own for the same exercise (a revision
+    keeps it) or none. weight_kg and remove_weight rest on the user's words, which
+    Formiq checks (app.tools.weights)."""
 
     exercise_id: ResourceId
     sets: ProposedSets
     reps: ProposedReps
     rest_seconds: ProposedRest | None = None
     notes: ShortNote | None = None
+    # the weight the user gave for this exercise, in kg; left out, the plan's is kept
+    weight_kg: ProposedWeight | None = None
+    # true only when the user asked for this exercise to have no weight: the plan's
+    # saved weight is then taken off
+    remove_weight: bool = False
+
+    @model_validator(mode="after")
+    def one_weight_instruction(self) -> Self:
+        if self.remove_weight and self.weight_kg is not None:
+            raise ValueError(
+                "give weight_kg to set a weight or remove_weight to take it off, not both"
+            )
+        return self
 
 
 # A warm-up or cool-down activity's prescription: light, and strict likewise.
@@ -157,7 +178,8 @@ class ProposeWorkoutPlanInput(UserScopedInput):
     """A whole workout, in its three sections, in the order they are done."""
 
     name: PlanName
-    # today when not given
+    # when not given: today for a new workout, and for a revision the day of the plan it
+    # revises (a different day only when the user named one, FormiqTools._scheduled_day)
     scheduled_date: date | None = None
     # what the main workout trains, which it must fulfil (app.tools.completeness)
     focus: SessionFocus = SessionFocus.FULL_BODY
@@ -268,9 +290,21 @@ class ProfileOutput(BaseModel):
     dietary_preference: str | None
 
 
+class SavedEquipmentOutput(BaseModel):
+    """What the user's profile says about the equipment they have, by the
+    catalog's names and never an id: no tool gives the model an equipment id.
+    LISTED: they have these pieces and nothing else. NONE: they have no
+    equipment (bodyweight only). NOT_SAVED: the profile never said, so nothing
+    is known of it."""
+
+    status: Literal["LISTED", "NONE", "NOT_SAVED"]
+    equipment: list[str]
+
+
 class UserProfileOutput(BaseModel):
     user_id: int
     profile: ProfileOutput
+    equipment: SavedEquipmentOutput
 
 
 class PlanExerciseOutput(BaseModel):
@@ -429,6 +463,9 @@ class ProposedExerciseOutput(BaseModel):
     reps: int | None
     duration_seconds: int | None
     rest_seconds: int | None
+    # in kg: the weight the saved plan has for it, kept, or the one the user gave;
+    # null for none. A proposal never gives a weight the user did not
+    weight_kg: float | None = None
     notes: str | None
 
 
@@ -475,8 +512,10 @@ class PendingProposalOutput(BaseModel):
     coverage: ProposalCoverage | None
     # the saved plan its approval replaces; null for a new workout
     revision: ProposalRevision | None
-    # whether that plan is still as it was when proposed: if not, approving
-    # the proposal fails, and a new one is needed
+    # whether that plan is still as it was when proposed: always true for a
+    # proposal the coach can read, since one whose plan changed could not be
+    # approved and awaits nothing (PlanProposalService.approvable); null for a
+    # new workout
     replaced_plan_unchanged: bool | None
     # how it differs from the plan it revises, or else from the current plan
     # (null when there is neither)

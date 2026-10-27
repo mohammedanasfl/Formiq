@@ -1,7 +1,8 @@
 // The playground page: wires the controls to Playground (playground.js) and
 // to the existing POST /auth/login, POST /coach/message,
-// POST /coach/proposals/{id}/approve and GET /users/{id}/workout-plans[/{plan_id}],
-// on the same origin.
+// POST /coach/proposals/{id}/approve, GET /users/{id}/workout-plans[/{plan_id}] and,
+// for the saved plan's "Completed" button, the workout sessions of
+// /users/{id}/workout-sessions (P.logPlan), on the same origin.
 // Everything, the access token included, is held in memory; nothing is written
 // to storage or cookies, and the password is never kept.
 (function () {
@@ -162,13 +163,13 @@
 
   // The latest reply's proposal, as the API returned it: the session bar, its
   // coverage and each section. It is marked saved only once the API answered
-  // 201 with the plan.
+  // 201 (or 200, for an approval sent again) with the plan.
   function renderProposal() {
     const proposal = session.proposal;
     // while a new message is on its way, the earlier proposal steps aside
     $("proposal").hidden = !proposal || (pending !== null && pending.epoch === session.epoch);
     if (!proposal) return;
-    // its state from the API's data, never from the reply: saved only after a 201
+    // its state from the API's data, never from the reply: saved only after a 201 or a 200 with the plan
     const state = P.proposalState(proposal);
     $("proposal").classList.toggle("is-saved", state.saved);
     $("proposal-kicker").textContent = state.kicker;
@@ -299,6 +300,12 @@
       ["Status", String(plan.status).toLowerCase()],
       ["Plan", plan.id],
     ]);
+    // Completed: a plan has no such status; its workout is done when a completed session says so
+    $("complete-plan").hidden = !P.canLog(plan);
+    $("plan-logged").hidden = !plan.loggedSessionId;
+    if (plan.loggedSessionId) {
+      $("plan-logged").textContent = `Logged as completed: workout session ${plan.loggedSessionId}.`;
+    }
     const sections = $("plan-sections");
     sections.replaceChildren();
     for (const part of P.planSections(plan)) {
@@ -395,7 +402,9 @@
 
   function setBusy(value) {
     busy = value;
-    for (const id of ["send", "login", "clear", "inject", "approve"]) $(id).disabled = value;
+    for (const id of ["send", "login", "clear", "inject", "approve", "complete-plan"]) {
+      $(id).disabled = value;
+    }
     $("logout").disabled = value || !session.token;
     $("load-plans").disabled = value || !session.token;
   }
@@ -506,19 +515,16 @@
       latencyMs: performance.now() - started,
       email: session.email,
     });
-    const saved = status === 201 && data && Number.isInteger(data.id);
+    // 201 for the first approval, 200 for the same approval sent again (the plan it saved)
+    const saved = P.approvalSaved(status, data);
     if (epoch !== session.epoch) {
-      notice(
-        saved
-          ? `An approval finished after the conversation changed: workout plan ${data.id} was saved.`
-          : "An approval answered after the conversation changed; nothing was saved."
-      );
+      notice(P.approvalMessage(status, data, { late: true }));
       return;
     }
     if (saved) {
       session = P.recordApproval(session, proposal.proposal_id, data);
       renderConversation();
-      notice(`Saved "${data.name}" as plan ${data.id}. Find it under Saved plans.`);
+      notice(P.approvalMessage(status, data));
     } else {
       if (status === 401 && session.token) {
         session = P.signOut(session);
@@ -588,6 +594,77 @@
     if (plan === null) return;
     session = P.recordPlan(session, plan);
     renderConversation();
+  }
+
+  // One call of the logging flow (P.logPlan): the API's own, with the token the flow
+  // began with (the headers), so that a session it started can still be removed
+  // when the page's user changes meanwhile.
+  async function call(method, path, body, headers) {
+    const started = performance.now();
+    let status = 0;
+    let data = null;
+    try {
+      const response = await fetch(path, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        credentials: "omit",
+        cache: "no-store",
+      });
+      status = response.status;
+      data = await response.json().catch(() => null);
+    } catch {
+      status = 0;
+    }
+    renderRequestInfo({
+      method,
+      status,
+      endpoint: path,
+      latencyMs: performance.now() - started,
+      email: session.email,
+    });
+    return { status, data };
+  }
+
+  // The "Completed" button: logs the open plan's workout as done exactly as
+  // prescribed, as a completed workout session (P.logPlan).
+  async function completePlan() {
+    const plan = session.plan;
+    if (busy || !P.canLog(plan)) return;
+    const who = session;
+    const headers = P.requestHeaders(who);
+    hideError();
+    notice("");
+    setBusy(true);
+    let result;
+    try {
+      result = await P.logPlan(who, plan, (method, path, body) => call(method, path, body, headers));
+    } finally {
+      setBusy(false);
+    }
+    if (who.epoch !== session.epoch) {
+      notice(
+        result.ok
+          ? `A workout log finished after the conversation changed: plan ${plan.id} was logged as workout session ${result.sessionId}.`
+          : "A workout log finished after the conversation changed; nothing was kept."
+      );
+      return;
+    }
+    if (!result.ok) {
+      if (result.status === 401 && session.token) {
+        session = P.signOut(session);
+        renderConversation();
+      }
+      showError(P.describeLogError(result.step, result.status, result.cleaned));
+      return;
+    }
+    session = P.markLogged(session, result.sessionId);
+    renderConversation();
+    notice(
+      result.already
+        ? `Plan ${plan.id} was already logged as completed: workout session ${result.sessionId}.`
+        : `Logged plan ${plan.id} as completed, exactly as prescribed: workout session ${result.sessionId}.`
+    );
   }
 
   async function login() {
@@ -730,6 +807,7 @@
   });
   $("logout").addEventListener("click", logout);
   $("approve").addEventListener("click", approve);
+  $("complete-plan").addEventListener("click", completePlan);
   $("load-plans").addEventListener("click", loadPlans);
   $("clear").addEventListener("click", clear);
   $("inject").addEventListener("click", () => inject());

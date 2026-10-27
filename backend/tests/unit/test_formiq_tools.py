@@ -463,6 +463,27 @@ def test_tools_reach_data_only_through_the_services():
         assert not {name for name in everything if name.startswith(forbidden[:-1])}, path.name
 
 
+def test_the_proposal_view_calls_only_read_methods_of_the_services():
+    """The view a stored proposal is read back through (the coach's tool and the API both use it)
+    reads the catalog and the user's plans, and changes nothing."""
+    source = (TOOLS / "proposal_view.py").read_text()
+    called = {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr in {"catalog", "plans"}
+    }
+
+    assert called == {
+        # a catalog exercise's name, equipment and whether it is active
+        "get_exercise_by_id",
+        # the plan a proposal replaces, and a digest of it
+        "get_plan",
+        "version_of",
+    }
+
+
 def test_tools_call_only_read_methods_of_the_services():
     source = (TOOLS / "formiq_tools.py").read_text()
     called = {

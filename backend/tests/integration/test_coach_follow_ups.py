@@ -127,8 +127,11 @@ def test_the_proposal_awaiting_approval_is_read_back_and_shown_again(
         )) == shown["proposal_id"]  # fmt: skip
 
     # approved once, from either card: then it awaits nothing
-    assert approve(client, me, again).status_code == 201
-    assert approve(client, me, shown).status_code == 409
+    first = approve(client, me, again)
+    assert first.status_code == 201
+    # the same proposal from the other card: the plan the first approval saved
+    repeated = approve(client, me, shown)
+    assert (repeated.status_code, repeated.json()) == (200, first.json())
     after, provider = ask(client, use_provider, me, *none_waiting())
     assert "get_pending_proposal before saying" not in instructions_of(provider)
     assert received(provider, 1)["get_pending_proposal"]["error"]["code"] == "RESOURCE_NOT_FOUND"
@@ -145,7 +148,8 @@ def test_another_users_proposal_is_never_read(client, use_provider, users, ids):
     assert received(provider, 1)["get_pending_proposal"]["error"] == {
         "code": "RESOURCE_NOT_FOUND",
         "message": "the user has no workout proposal awaiting approval: none was made, or it "
-        "was approved or expired; there is no id to ask for",
+        "was approved, rejected or expired, or can no longer be approved; there is no id to "
+        "ask for",
     }
     assert "proposal" not in body
 
@@ -241,13 +245,14 @@ def test_a_revision_awaiting_approval_says_what_it_changes(
     assert (changes["removed"], changes["unchanged"], changes["identical"]) == ([], [], False)
     assert read["coverage"]["focus"] == "CORE"
 
-    # the plan changed since: the proposal says its approval would fail
+    # the plan changed since: approving the proposal would fail, so it awaits nothing and the
+    # coach is shown nothing of it (the same rule as GET /coach/proposals/pending)
     with Session(test_engine) as session:
         session.get(WorkoutPlan, plan_id).name = "Renamed"
         session.commit()
-    _, provider = ask(client, use_provider, me, *reading_it("It changes the sets."))
-    read = received(provider, 1)["get_pending_proposal"]["output"]
-    assert read["replaced_plan_unchanged"] is False
+    _, provider = ask(client, use_provider, me, *none_waiting())
+    assert received(provider, 1)["get_pending_proposal"]["error"]["code"] == "RESOURCE_NOT_FOUND"
+    assert "get_pending_proposal before saying" not in instructions_of(provider)
 
 
 def test_what_a_proposal_is_for_is_kept_with_it(

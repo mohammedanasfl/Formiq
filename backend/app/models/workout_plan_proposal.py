@@ -31,7 +31,9 @@ class WorkoutPlanProposal(Base):
     parameters: Mapped[dict[str, Any]] = mapped_column(JSONB)
     # the digest of the exact proposal the user was shown: an approval must carry it
     binding: Mapped[str] = mapped_column(String(64))
-    # a ProposalStatus value: PENDING, or APPROVED once its plan is saved
+    # a ProposalStatus value: PENDING until approved, rejected or expired; APPROVED once its
+    # plan is saved; REJECTED when the user rejected it. A plain string column with no
+    # constraint on its values, so a status added later needs no migration.
     status: Mapped[str] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

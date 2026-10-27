@@ -109,12 +109,14 @@ def test_a_created_proposal_is_one_kept_for_the_users_approval_and_is_then_an_ap
     assert any(code.endswith(":prop_created") or ":prop_created:" in code for code in root["trajectory"])
     assert events(caplog) == []  # nothing is approved by being proposed
 
-    assert approve(client, me, shown).status_code == 201
+    first = approve(client, me, shown)
+    assert first.status_code == 201
     (approved,) = events(caplog)
     assert approved["type"] == "proposal_approved" and approved["proposal_ref"] == shown["proposal_id"][:8]
 
-    # a second approval is refused, and is no approval event
-    assert approve(client, me, shown).status_code == 409
+    # a second approval saves nothing and is no approval event: it returns the saved plan
+    again = approve(client, me, shown)
+    assert (again.status_code, again.json()) == (200, first.json())
     assert len(events(caplog)) == 1
 
 

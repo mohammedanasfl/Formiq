@@ -2,9 +2,10 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from app.schemas.workout_plan import PlanSection
+from app.schemas.timezone import TIMEZONE_PATTERN, zone_of
+from app.schemas.workout_plan import MAX_INTEGER, PlanSection
 
 # Surrounding whitespace is dropped, and a blank message is rejected. The limit
 # keeps one message, and the model request it becomes, a reasonable size.
@@ -45,6 +46,24 @@ class CoachMessageRequest(BaseModel):
     message: CoachMessageText
     # earlier turns, oldest first; the coach keeps the most recent ones
     history: list[CoachHistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
+    # The saved workout plan the user is changing, when they opened the coach
+    # from it: theirs and PLANNED, checked before the model is asked anything,
+    # and then the only plan this request's proposal may revise. Left out (or
+    # null), the coach works out what the user means from the conversation.
+    # Strict, as the coach's own ids are: "7" and 7.0 are not an id.
+    workout_plan_id: Annotated[int, Field(strict=True, ge=1, le=MAX_INTEGER)] | None = None
+    # The user's IANA time zone, as their device has it ("Asia/Kolkata"): "today", "tomorrow" and
+    # the 14-day window are their local days in it (Phase 2.7, app.tools.coach_calendar). Left out
+    # or null, they are UTC days, which the coach is told. Refused (422) when it is not a zone of the
+    # time zone database: never guessed, never replaced by UTC without saying so.
+    timezone: Annotated[str, StringConstraints(pattern=TIMEZONE_PATTERN)] | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def a_known_time_zone(cls, value: str | None) -> str | None:
+        if value is not None and zone_of(value) is None:
+            raise ValueError("timezone must be an IANA time zone name such as Asia/Kolkata or UTC")
+        return value
 
 
 class SessionFocus(StrEnum):
@@ -89,6 +108,65 @@ class ProposalRevision(BaseModel):
     kept_exercises: list[str]
 
 
+class ProposalRevisionResponse(ProposalRevision):
+    """A revision as the API shows it: also how long the plan it replaces takes."""
+
+    # Formiq's estimate, by the formula that gives a proposal's estimated_minutes
+    # (a plan stores no length); null when the plan cannot be read as it was
+    # proposed, so a client never compares with a length it was not given
+    replaces_plan_estimated_minutes: int | None
+
+
+class Prescription(BaseModel):
+    """What a workout asks of one exercise."""
+
+    sets: int
+    # each set's target: reps, or a duration in seconds (one of them)
+    reps: int | None
+    duration_seconds: int | None
+    rest_seconds: int | None
+    # in kg: a saved plan may carry a weight, and a proposal carries it on unless
+    # the user gave another or asked for none; null for none
+    weight_kg: float | None
+    # the same, as one line: "3 sets of 10 reps at 20 kg, 60 s rest"
+    summary: str
+
+
+class ExerciseChange(BaseModel):
+    """An exercise one workout has and the other has not (the other side is
+    null), or has with another prescription (both sides)."""
+
+    section: PlanSection
+    exercise_name: str
+    before: Prescription | None
+    after: Prescription | None
+
+
+class ProposalChanges(BaseModel):
+    """What differs between a proposal and the saved plan it replaces, worked
+    out by Formiq from what each prescribes, by section and exercise: nothing
+    else differs. The coach's own comparison (app.tools.comparison): the one
+    the coach is held to when it describes a change."""
+
+    # the saved plan the proposal is compared with, and the day it is scheduled
+    # for (the proposal's own day is in the proposal)
+    compared_with_plan_id: int
+    compared_with_plan_name: str
+    compared_with_scheduled_date: date | None
+    # the exercises only the proposal has, those only the plan has, and those
+    # both have with another prescription (its weight included); in section
+    # order
+    added: list[ExerciseChange]
+    removed: list[ExerciseChange]
+    changed: list[ExerciseChange]
+    # the exercises both have, prescribed alike, by name
+    unchanged: list[str]
+    name_changed: bool
+    scheduled_date_changed: bool
+    # true when the two prescribe the same workout
+    identical: bool
+
+
 class CoverageLimitation(BaseModel):
     """Why a proposed workout falls short of its focus: Formiq's catalog has
     no exercise, or too few, that the user can do for it."""
@@ -129,6 +207,9 @@ class ProposedExerciseResponse(BaseModel):
     reps: int | None
     duration_seconds: int | None
     rest_seconds: int | None
+    # in kg: the weight the saved plan has for it, carried on, or the one the user
+    # gave; null for none (always given, so a client never infers it)
+    weight_kg: float | None
     notes: str | None
 
 
@@ -155,7 +236,11 @@ class WorkoutPlanProposalResponse(BaseModel):
     # whether the main workout fulfils its focus, and what is missing when not
     coverage: ProposalCoverage
     # the saved plan it would replace, when it revises one; null for a new workout
-    revision: ProposalRevision | None = None
+    revision: ProposalRevisionResponse | None = None
+    # how it differs from that plan, as the plan is now; null for a new workout,
+    # and when the plan is not as it was when proposed (approving would then be
+    # refused), so a change is never listed that the plan does not show
+    changes: ProposalChanges | None = None
 
 
 class CoachMessageResponse(BaseModel):
@@ -164,9 +249,28 @@ class CoachMessageResponse(BaseModel):
     proposal: WorkoutPlanProposalResponse | None = None
 
 
+class PendingProposalResponse(WorkoutPlanProposalResponse):
+    """A proposal that still awaits the user's approval, as GET
+    /coach/proposals/pending lists it: the same card and the same binding as
+    when it was shown."""
+
+    created_at: datetime
+
+
+class PendingProposalsResponse(BaseModel):
+    """The user's proposals that can still be approved, the most recently made
+    first; none is the empty list."""
+
+    proposals: list[PendingProposalResponse]
+
+
 class ProposalApprovalRequest(BaseModel):
     """The user's approval of a proposed plan, as it was shown to them."""
 
     model_config = ConfigDict(extra="forbid")
 
     binding: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+
+class ProposalRejectionRequest(ProposalApprovalRequest):
+    """The user's rejection of a proposed plan, as it was shown to them."""

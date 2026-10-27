@@ -96,8 +96,10 @@ def test_a_false_update_claim_never_reaches_the_user_beside_the_unchanged_card(
     assert kept(test_engine, me) == before
 
     # approval still saves exactly that card, once
-    assert approve(client, me, card).status_code == 201
-    assert approve(client, me, card).status_code == 409
+    first = approve(client, me, card)
+    assert first.status_code == 201
+    again = approve(client, me, card)
+    assert (again.status_code, again.json()) == (200, first.json())
     with Session(test_engine) as session:
         assert len(session.scalars(select(WorkoutPlan).where(WorkoutPlan.user_id == me)).all()) == 1
 

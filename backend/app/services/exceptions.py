@@ -42,6 +42,10 @@ class InvalidProfileUpdateError(ServiceError):
     """The profile update sets a required field to null."""
 
 
+class InvalidEquipmentError(ServiceError):
+    """The equipment a profile names is not active catalog equipment."""
+
+
 class ExerciseNotFoundError(ServiceError):
     """The exercise does not exist in the catalog."""
 
@@ -77,6 +81,11 @@ class WorkoutPlanNotEditableError(WorkoutPlanConflictError):
 
 class WorkoutPlanNotDeletableError(WorkoutPlanConflictError):
     """Only DRAFT plans can be deleted; a PLANNED plan is cancelled instead."""
+
+
+class WorkoutPlanNotRevisableError(WorkoutPlanConflictError):
+    """The coach was asked to change a plan that is not PLANNED: a DRAFT is not
+    ready, and a CANCELLED plan is not to be done."""
 
 
 class ExerciseOrderTakenError(WorkoutPlanConflictError):
@@ -141,4 +150,10 @@ class ProposalNotFoundError(ServiceError):
 
 class ProposalNotApprovableError(ServiceError):
     """The approval was refused: it was for something other than the proposal
-    as shown, or the proposal was already approved, or has expired."""
+    as shown, or the proposal was already approved (and what it saved is no
+    longer as it was), rejected, or has expired."""
+
+
+class ProposalNotRejectableError(ServiceError):
+    """The rejection was refused: it was for something other than the proposal
+    as shown, or the proposal was already approved."""

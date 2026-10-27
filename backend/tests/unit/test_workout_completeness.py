@@ -26,7 +26,7 @@ from app.tools.completeness import (
     required_exercises,
     trainable,
 )
-from app.tools.formiq_tools import section_minutes
+from app.tools.comparison import section_minutes
 from app.tools.schemas import ProposedExerciseOutput
 
 LOWER = BodyRegion.LOWER_BODY
@@ -186,15 +186,21 @@ def test_what_the_pool_covers_is_what_its_main_movers_train():
     ("focus", "max_minutes", "required"),
     [
         (SessionFocus.FULL_BODY, None, 4),
-        (SessionFocus.FULL_BODY, 60, 4),
+        (SessionFocus.FULL_BODY, 60, 5),
         (SessionFocus.FULL_BODY, 30, 4),
         (SessionFocus.FULL_BODY, 29, 2),
         (SessionFocus.FULL_BODY, 10, 2),
         (SessionFocus.UPPER_BODY, None, 3),
-        (SessionFocus.LOWER_BODY, 45, 3),
+        # a longer session needs more exercises (required_exercises), from 34 minutes
+        (SessionFocus.UPPER_BODY, 33, 3),
+        (SessionFocus.UPPER_BODY, 34, 4),
+        (SessionFocus.LOWER_BODY, 45, 5),
         (SessionFocus.PUSH, None, 3),
         (SessionFocus.PULL, None, 3),
+        # an abs workout of three is a list of suggestions: four, as a full body
+        (SessionFocus.CORE, None, 4),
         (SessionFocus.CORE, 20, 2),
+        (SessionFocus.CORE, 60, 5),
     ],
 )
 def test_the_minimum_depends_on_the_focus_and_a_short_session(focus, max_minutes, required):

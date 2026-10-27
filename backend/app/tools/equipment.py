@@ -15,6 +15,11 @@ Two deterministic readings, neither of them a search for a substring:
   of equipment answering a question): mentioning it ("what is a kettlebell
   swing?", "should I buy a kettlebell?") is not having it.
 
+- saved_equipment() reads the equipment saved in the user's profile as what they have
+  until they say otherwise: stated_equipment() starts from it, and a statement in the
+  conversation replaces it piece by piece ("I also have a bench", "no bench"), or
+  as a whole ("I only have dumbbells", "I don't have any equipment").
+
 Both match whole words and known phrases only: a name is the catalog's own
 (without case, hyphens or extra spaces), its plural, or an alias listed here;
 anything else is no equipment, never a near match.
@@ -342,19 +347,40 @@ class StatedEquipment:
         return bool(self.has or self.lacks or self.has_nothing_else)
 
 
-def stated_equipment(texts: Sequence[str], catalog_keys: Iterable[str]) -> StatedEquipment:
+def saved_equipment(names: Iterable[str], none: bool) -> StatedEquipment | None:
+    """What the user's profile says they have, as a statement of it: the catalog
+    equipment they chose (names) and nothing else, or no equipment at all (none:
+    bodyweight only). The profile's list is the answer to "what equipment do you
+    have?", so a piece it does not list is one they lack. None when the profile
+    never said (no names and not none): nothing is assumed of a user who was not
+    asked, or who skipped the question."""
+    keys = frozenset() if none else frozenset(equipment_key(name) for name in names)
+    if not keys and not none:
+        return None
+    return StatedEquipment(has=keys, has_nothing_else=True)
+
+
+def stated_equipment(
+    texts: Sequence[str], catalog_keys: Iterable[str], saved: StatedEquipment | None = None
+) -> StatedEquipment:
     """What the user said about their equipment in these texts, oldest first:
-    a later statement about a piece replaces an earlier one."""
+    a later statement about a piece replaces an earlier one. saved is what their
+    profile says (saved_equipment()), where they stand until a text says otherwise:
+    a text that names a piece replaces what the profile says of it, and one that
+    says they have only what it names, or no equipment at all, replaces the profile's
+    list."""
     index = {
         alias: key
         for alias, key in _alias_index(catalog_keys).items()
         if alias not in _TEXT_EXCLUDED_ALIASES
     }
     phrases = sorted({tuple(alias.split()) for alias in index}, key=len, reverse=True)
-    has: set[str] = set()
-    lacks: set[str] = set()
+    has: set[str] = set(saved.has) if saved else set()
+    lacks: set[str] = set(saved.lacks) if saved else set()
     mentioned: set[str] = set()
-    nothing_else = False
+    nothing_else = saved.has_nothing_else if saved else False
+    # the pieces in `has` only because the profile lists them, and no text has named yet
+    from_profile = set(has)
     for text in texts:
         for clause, question, exception in _clauses(text):
             for key, stance in _mentions(clause, question, exception, index, phrases):
@@ -365,8 +391,14 @@ def stated_equipment(texts: Sequence[str], catalog_keys: Iterable[str]) -> State
                         # "no equipment" replaces what they said they have;
                         # "no other equipment" keeps it
                         has.clear()
+                        from_profile.clear()
+                    elif stance == NOTHING_ELSE:
+                        # "I only have dumbbells": what the profile lists besides is not theirs now
+                        has -= from_profile
+                        from_profile.clear()
                     continue
                 mentioned.add(key)
+                from_profile.discard(key)
                 if stance == OWNED:
                     has.add(key)
                     lacks.discard(key)

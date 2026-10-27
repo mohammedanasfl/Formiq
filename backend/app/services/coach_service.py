@@ -3,11 +3,13 @@ import math
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
 from app.agent import (
     CoachContext,
+    CoachDates,
     PendingProposal,
     CoachDecision,
     ConversationTurn,
@@ -29,7 +31,12 @@ from app.observability.trajectory import (
     PROPOSAL_SHOWN_PENDING,
 )
 from app.repositories import UserRepository
-from app.services.exceptions import UserNotFoundError
+from app.schemas import WorkoutPlanStatus
+from app.services.exceptions import (
+    UserNotFoundError,
+    WorkoutPlanNotFoundError,
+    WorkoutPlanNotRevisableError,
+)
 from app.services.exercise_catalog_service import ExerciseCatalogService
 from app.services.plan_proposal_service import PlanProposalService
 from app.services.user_profile_service import UserProfileService
@@ -37,7 +44,8 @@ from app.services.user_service import UserService
 from app.services.workout_plan_service import WorkoutPlanService
 from app.services.workout_session_service import WorkoutSessionService
 from app.tools import FormiqTools
-from app.tools.equipment import StatedEquipment, equipment_key, stated_equipment
+from app.tools.coach_calendar import calendar_at
+from app.tools.equipment import StatedEquipment, equipment_key, saved_equipment, stated_equipment
 from app.tools.schemas import ProposedWorkoutPlanOutput
 
 logger = logging.getLogger(__name__)
@@ -79,12 +87,30 @@ class CoachService:
         return self.answer(user_id, message, history).reply
 
     def answer(
-        self, user_id: int, message: str, history: Sequence[ConversationTurn] = ()
+        self,
+        user_id: int,
+        message: str,
+        history: Sequence[ConversationTurn] = (),
+        workout_plan_id: int | None = None,
+        timezone: str | None = None,
     ) -> CoachAnswer:
         """The coach's reply to the user's message, from the coach graph, and the
         workout plan it proposed, if any. history is the earlier conversation the
         client sent, oldest first: the graph sees it compacted to its bound, and
         it is stored nowhere.
+
+        workout_plan_id is the saved plan the user opened the coach to change.
+        It is checked before anything else runs (so before any model request):
+        it must be the user's own and PLANNED, else WorkoutPlanNotFoundError
+        (another user's plan is not told apart from a missing one) or
+        WorkoutPlanNotRevisableError. The coach is then held to it: a proposal
+        of this request revises that plan, or is refused.
+
+        timezone is the user's IANA time zone, from the app (the request schema
+        validated it): "today", "tomorrow" and every date the coach reads, shows
+        or is held to are the user's local ones in it (Phase 2.7,
+        app.tools.coach_calendar). Without it they are UTC dates, which the coach
+        is told.
 
         Raises AIProviderNotConfiguredError when no API key is set, and
         AIProviderError when the model cannot answer.
@@ -93,6 +119,8 @@ class CoachService:
         here, which the log line at its end repeats: metadata only, and nothing
         the trace records changes the reply.
         """
+        if workout_plan_id is not None:
+            self._check_target(user_id, workout_plan_id)
         request_id = uuid.uuid4().hex
         with self.tracer.request(
             "coach_request",
@@ -105,7 +133,9 @@ class CoachService:
                 # what the client sent, as roles and sizes: never the text
                 trace.debug.user_input(message, [(turn.role, turn.text) for turn in history])
             try:
-                reply, decision, tools = self._reply(user_id, message, history, trace)
+                reply, decision, tools = self._reply(
+                    user_id, message, history, trace, workout_plan_id, timezone
+                )
                 answered = (
                     decision.decision in _ANSWERS and decision.safety is SafetyCategory.SAFE
                 )
@@ -157,6 +187,21 @@ class CoachService:
             logger.info("Coach request %s ended: status=%s", request_id, status)
             return CoachAnswer(reply, proposal)
 
+    def _check_target(self, user_id: int, plan_id: int) -> None:
+        """The plan the request names must be the user's own and PLANNED: a
+        request is never answered for a plan it may not change. A rejected
+        request is not traced: it never reaches the model."""
+        if self.users.get_by_id(user_id) is None:
+            raise UserNotFoundError(f"user {user_id} does not exist")
+        plan = WorkoutPlanService(self.session).get_plan(user_id, plan_id)
+        if plan is None:
+            raise WorkoutPlanNotFoundError(f"user {user_id} has no workout plan {plan_id}")
+        if plan.status != WorkoutPlanStatus.PLANNED:
+            raise WorkoutPlanNotRevisableError(
+                f"workout plan {plan_id} is {plan.status}: only a PLANNED workout plan can be "
+                "changed with the coach"
+            )
+
     @staticmethod
     def _finish_trajectory(trace: RunTrace, status: str, **fields: str) -> None:
         """The turn's trajectory ends (app.observability.trajectory): a proposal
@@ -177,17 +222,34 @@ class CoachService:
         message: str,
         history: Sequence[ConversationTurn],
         trace: RunTrace,
+        workout_plan_id: int | None = None,
+        timezone: str | None = None,
     ) -> tuple[str, CoachDecision, FormiqTools]:
         if self.users.get_by_id(user_id) is None:
             raise UserNotFoundError(f"user {user_id} does not exist")
         # From Formiq's records, not the conversation: whether a proposal made
-        # earlier awaits the user's approval, so the reply may point them to it,
-        # and the model is told to read it before saying anything about it
-        waiting = (
-            []
+        # earlier awaits the user's approval (one they could still approve), so
+        # the reply may point them to it, and the model is told to read it before
+        # saying anything about it. A request about a plan is about that plan's
+        # proposals only: another plan's is not pointed to, nor is a new workout.
+        proposals = (
+            None
             if self.proposal_terms is None
-            else PlanProposalService(self.session, self.proposal_terms).awaiting_approval(user_id)
+            else PlanProposalService(self.session, self.proposal_terms)
         )
+        waiting = (
+            [] if proposals is None else proposals.awaiting_approval(user_id, revising=workout_plan_id)
+        )
+        # The proposals this request does not read (it is about one plan) and the plans an
+        # approval saved: facts the reply is held to, so that it never says the user has no
+        # proposal waiting while another plan's does, nor that a workout was applied when
+        # nothing was approved (app.agent.trust.Lifecycle).
+        elsewhere = (
+            len(proposals.awaiting_approval(user_id)) - len(waiting)
+            if proposals is not None and workout_plan_id is not None
+            else 0
+        )
+        approved = frozenset() if proposals is None else proposals.approved_plan_ids(user_id)
         pending = None
         if waiting:
             left = waiting[0].expires_at - self.proposal_terms.clock()
@@ -198,11 +260,14 @@ class CoachService:
         # What the user said about their equipment in any turn of theirs, not
         # only the turns the model is sent: one reading, for the model's note
         # and for the tools' filtering, so that a limit they stated is kept
-        # however long ago they said it.
+        # however long ago they said it. It starts from the equipment saved in their
+        # profile, which is what they have until they say otherwise in the conversation.
+        saved = UserProfileService(self.session).get_saved_equipment(user_id)
         stated, said = read_equipment(
             history,
             message,
             [item.name for item in ExerciseCatalogService(self.session).list_equipment(is_active=True)],
+            None if saved is None else saved_equipment(saved.names, saved.none),
         )
         # End the read transaction, so its connection goes back to the pool
         # while the model answers, which can take seconds. The tools end theirs
@@ -220,7 +285,11 @@ class CoachService:
         tools = self._tools(
             [*((turn.role, turn.text) for turn in state["conversation"].turns), ("user", message)],
             stated,
+            workout_plan_id,
+            timezone,
         )
+        # the one calendar the tools work in, told to the model (a stand-in for the tools may have none)
+        calendar = getattr(tools, "calendar", None)
         state = coach_graph.invoke(
             state,
             context=CoachContext(
@@ -230,17 +299,36 @@ class CoachService:
                 trace=trace,
                 proposal_awaiting_approval=bool(waiting),
                 pending_proposal=pending,
+                target_plan_id=workout_plan_id,
+                other_proposals_awaiting=elsewhere,
+                approved_plan_ids=approved,
+                dates=None
+                if calendar is None
+                else CoachDates(
+                    today=calendar.today,
+                    timezone=calendar.timezone,
+                    from_request=calendar.source == "request",
+                ),
             ),
         )
         trace.update(iterations=state["iteration_count"], compactions=state["context_compactions"])
         return state["final_response"], state["decision"], tools
 
     def _tools(
-        self, conversation: Sequence[tuple[str, str]], stated: StatedEquipment | None = None
+        self,
+        conversation: Sequence[tuple[str, str]],
+        stated: StatedEquipment | None = None,
+        target_plan_id: int | None = None,
+        timezone: str | None = None,
     ) -> FormiqTools:
         """The coach's tools, reading through the services on this session, and
         proposing plans on the proposal terms, in this conversation, with the
-        equipment the user said they have and lack in all of it."""
+        equipment the user said they have and lack in all of it, and the plan
+        the request names (target_plan_id), if any. Their dates are the user's
+        local ones in the time zone given, from Formiq's clock, or UTC dates
+        without one."""
+        now = self.proposal_terms.clock() if self.proposal_terms is not None else datetime.now(UTC)
+        calendar = calendar_at(now, timezone)
         return FormiqTools(
             users=UserService(self.session),
             profiles=UserProfileService(self.session),
@@ -256,21 +344,31 @@ class CoachService:
             ),
             conversation=conversation,
             stated=stated,
+            target_plan_id=target_plan_id,
+            # Use the same captured instant for UTC fallback and supplied local zones. Passing the
+            # date explicitly prevents FormiqTools from taking a second wall-clock reading.
+            today=calendar.today,
+            timezone=timezone,
         )
 
 
 def read_equipment(
-    history: Sequence[ConversationTurn], message: str, catalog_names: Sequence[str]
+    history: Sequence[ConversationTurn],
+    message: str,
+    catalog_names: Sequence[str],
+    saved: StatedEquipment | None = None,
 ) -> tuple[StatedEquipment, EquipmentSaid]:
     """What the user said about the equipment they have and lack, in every user
     turn the client sent and in this message, oldest first so that a later
     statement replaces an earlier one (app.tools.equipment), and the same as the
     note for the model (EquipmentSaid, by the catalog's names). Only the user's
     own turns are read: a turn from "coach" is the client's claim of what the
-    coach said, and says nothing of what the user has."""
+    coach said, and says nothing of what the user has. saved is what their
+    profile says they have (saved_equipment()): where they stand until a turn of
+    theirs says otherwise."""
     names = {equipment_key(name): name for name in catalog_names}
     words = [turn.text for turn in history if turn.role == "user"]
-    stated = stated_equipment([*words, message], list(names))
+    stated = stated_equipment([*words, message], list(names), saved)
 
     def named(keys: frozenset[str]) -> tuple[str, ...]:
         return tuple(name for key, name in names.items() if key in keys)

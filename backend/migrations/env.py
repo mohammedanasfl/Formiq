@@ -8,6 +8,7 @@ from alembic import context
 import app.models  # noqa: F401  (registers the models on Base.metadata)
 from app.core.config import settings
 from app.db.base import Base
+from migrations.boundary import reject_guarded_offline_migration, run_guarded_migration
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -43,6 +44,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
+    reject_guarded_offline_migration(config)
     url = database_url
     context.configure(
         url=url,
@@ -65,12 +67,13 @@ def run_migrations_online() -> None:
     connectable = create_engine(database_url, poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        def migrate() -> None:
+            context.configure(connection=connection, target_metadata=target_metadata)
 
-        with context.begin_transaction():
-            context.run_migrations()
+            with context.begin_transaction():
+                context.run_migrations()
+
+        run_guarded_migration(config, connection, migrate)
 
 
 if context.is_offline_mode():

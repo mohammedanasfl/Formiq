@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 
+from migrations.boundary import DATABASE_GUARD_ATTRIBUTE
 from app.api.dependencies import get_access_tokens
 from app.catalog.free_exercise_db import load_records
 from app.core.config import settings
@@ -25,7 +26,11 @@ from app.models import (
 )
 from app.schemas.workout_plan import MAX_INTEGER
 from tests.auth import TEST_ACCESS_TOKENS, bearer
-from tests.integration.database import check_test_database_url
+from tests.integration.database import (
+    assert_disposable,
+    check_test_database_url,
+    ensure_disposable_database,
+)
 from tests.integration.imported_catalog import (
     PRESENT_IMAGES,
     ImportedCatalog,
@@ -76,21 +81,38 @@ class PathUserClient(TestClient):
 
 @pytest.fixture(scope="session")
 def test_database_url():
-    return check_test_database_url(settings.test_database_url, settings.database_url)
+    """The URL of the disposable test database (tests.integration.database): created and marked
+    on first use, and refused if it exists without the tests' marker. Every fixture that touches a
+    database depends on this one, so nothing is migrated or emptied before it has passed."""
+    url = check_test_database_url(settings.test_database_url, settings.database_url)
+    ensure_disposable_database(url)
+    return url
 
 
 @pytest.fixture(scope="session")
 def test_alembic_config(test_database_url):
     """Alembic configuration that migrates the test database, not DATABASE_URL."""
+    # Migration tests use this config directly, without necessarily requesting test_engine.
+    # Check the exact target before any upgrade/downgrade command can use it.
+    migration_engine = create_engine(test_database_url)
+    try:
+        with migration_engine.connect() as connection:
+            assert_disposable(connection)
+    finally:
+        migration_engine.dispose()
     config = Config(str(ALEMBIC_INI))
     config.attributes["database_url"] = test_database_url
+    config.attributes[DATABASE_GUARD_ATTRIBUTE] = assert_disposable
     return config
 
 
 @pytest.fixture(scope="session")
 def test_engine(test_database_url, test_alembic_config):
-    command.upgrade(test_alembic_config, "head")
     engine = create_engine(test_database_url)
+    # where the engine really points, before the first migration
+    with engine.connect() as connection:
+        assert_disposable(connection)
+    command.upgrade(test_alembic_config, "head")
     yield engine
     engine.dispose()
 
@@ -106,6 +128,8 @@ def db_session(test_engine):
 
 def delete_user_rows(engine):
     with Session(engine) as session:
+        # fails closed: never in a database that is not the disposable one, however it was reached
+        assert_disposable(session.connection())
         # workout sessions and plans first: a user with sessions or plans cannot be
         # deleted (RESTRICT); their exercises and sets are deleted with them (CASCADE)
         session.execute(delete(WorkoutSession))
@@ -165,8 +189,11 @@ def client(test_engine, monkeypatch):
 def rollback_connection(test_engine):
     """Connection to the test database whose transaction is rolled back after the test."""
     with test_engine.connect() as connection:
+        # begin first: the check's query would start a transaction itself (autobegin), and
+        # begin() refuses a connection that is already in one
         transaction = connection.begin()
         try:
+            assert_disposable(connection)
             yield connection
         finally:
             transaction.rollback()
@@ -234,6 +261,7 @@ def retirable_exercise_id(test_engine):
     because the catalog tests expect the catalog to hold only the seed.
     """
     with Session(test_engine) as session:
+        assert_disposable(session.connection())
         exercise = Exercise(
             name="Test Retirable Exercise", difficulty="BEGINNER", movement_pattern="SQUAT"
         )
@@ -244,6 +272,7 @@ def retirable_exercise_id(test_engine):
         yield exercise_id
     finally:
         with Session(test_engine) as session:
+            assert_disposable(session.connection())
             session.execute(
                 delete(WorkoutSessionExercise).where(
                     WorkoutSessionExercise.exercise_id == exercise_id
@@ -287,8 +316,10 @@ def imported_catalog(test_engine, tmp_path_factory):
         (images_dir / path).write_bytes(b"\xff\xd8\xff test image")
     records = load_records()
     with test_engine.connect() as connection:
+        # begin first (see rollback_connection)
         transaction = connection.begin()
         try:
+            assert_disposable(connection)
             with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
                 formiq_before = snapshot(session, "FORMIQ")
                 summary = run_import(session, records, images_dir)

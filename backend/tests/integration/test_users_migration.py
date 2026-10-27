@@ -38,6 +38,7 @@ USER_PROFILES_COLUMNS = {
     "activity_level",
     "sleep_hours",
     "dietary_preference",
+    "no_equipment",
     "created_at",
     "updated_at",
 }

@@ -29,12 +29,19 @@ class ExerciseSource(StrEnum):
 
     FORMIQ = "FORMIQ"
     FREE_EXERCISE_DB = "FREE_EXERCISE_DB"
+    EXERCISES_DATASET = "EXERCISES_DATASET"
 
 
 class Difficulty(StrEnum):
     BEGINNER = "BEGINNER"
     INTERMEDIATE = "INTERMEDIATE"
     ADVANCED = "ADVANCED"
+    # The exercise's source gives no level, and Formiq does not guess one. The
+    # column is plain text, so it needs no migration. The coach never offers an
+    # UNRATED exercise to a beginner or as a warm-up or cool-down activity
+    # (app.tools.formiq_tools), and does not search by it (a filter for a level
+    # finds only the rated ones).
+    UNRATED = "UNRATED"
 
 
 class MovementPattern(StrEnum):

@@ -17,12 +17,15 @@ from app.tools.limits import (
     MAX_PROPOSED_REPS,
     MAX_PROPOSED_REST_SECONDS,
     MAX_PROPOSED_SETS,
+    MAX_PROPOSED_WEIGHT_KG,
     MAX_SEARCH_EQUIPMENT,
     MAX_SEARCH_RESULTS,
     MAX_SECTION_ACTIVITIES,
     MAX_SECTION_MINUTES,
     MAX_UNAVAILABLE_EQUIPMENT,
     MIN_ACTIVITY_SECONDS,
+    MAX_REQUIRED_EXERCISES,
+    MIN_CORE_EXERCISES,
     MIN_COUNTED_SETS,
     MIN_FOCUSED_EXERCISES,
     MIN_FULL_BODY_EXERCISES,
@@ -38,7 +41,9 @@ GET_USER_PROFILE = ToolDeclaration(
     description=(
         "Get the user's Formiq fitness profile: first and last name, age, height, weight, "
         "gender, training experience, goal, target weight and goal period, training frequency "
-        "and location, activity level, sleep and dietary preference. Never their email or "
+        "and location, activity level, sleep and dietary preference, and the equipment they "
+        "saved in it (`equipment`: status LISTED with the pieces they have and no others, NONE "
+        "for no equipment at all, or NOT_SAVED when they never said). Never their email or "
         "phone number, which Formiq does not give you. Use it when your answer depends on "
         "who the user is or what they are training for. Takes no arguments."
     ),
@@ -197,8 +202,11 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
         "Propose a new workout for the user to review: a warm-up, the main exercises and a "
         "cool-down. It saves nothing: Formiq shows the proposal to the user, and only their "
         "own approval in Formiq saves it. Use it when no planned workout suits the day, "
-        "after get_user_profile, get_current_workout_plan and get_latest_workout_session "
-        "have returned. Every exercise and activity must be an active Formiq catalog "
+        "and whenever the user asks you for a workout, routine or session (for a part of the "
+        "body, a length of time, a place or a level): that request is the proposal, never "
+        "answered with a list of exercises. Call it after get_user_profile, "
+        "get_current_workout_plan and get_latest_workout_session have returned. Every "
+        "exercise and activity must be an active Formiq catalog "
         "exercise whose id a tool returned, used for a section its uses include: main "
         "exercises MAIN_WORKOUT, warm-up activities WARM_UP, cool-down activities COOL_DOWN "
         "(search_exercises by use finds them). Choose the main exercises first, then each "
@@ -215,7 +223,13 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
         "(coverage.complete false) and its limitations say what is missing, which you must "
         "tell the user. When the user asks to change, rewrite or replace one of their saved "
         "plans, give revises_plan_id and revision: approving the proposal then saves it and "
-        "cancels that plan, and its revision says which main exercises it keeps."
+        "cancels that plan, on the plan's own day unless the user asked to move it, and its "
+        "revision says which main exercises it keeps. To only move a saved plan to another "
+        "day, propose it again with revision ADJUST, the same exercises and scheduled_date "
+        "the day the user named (a move to the plan's own day, or to no named day, is "
+        "refused as unchanged). A revision keeps each exercise's saved weight unless the "
+        "user gave another or asked for none (weight_kg, remove_weight); you never choose a "
+        "weight."
     ),
     parameters={
         "type": "object",
@@ -227,8 +241,16 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
             "scheduled_date": {
                 "type": "string",
                 "description": (
-                    "The day it is for, as YYYY-MM-DD: today (the default) or up to "
-                    f"{MAX_PROPOSAL_DAYS_AHEAD} days later."
+                    "The day it is for, as YYYY-MM-DD, copied from the calendar in the "
+                    "instructions (never worked out). A new workout: today (the default) or up "
+                    f"to {MAX_PROPOSAL_DAYS_AHEAD} days later, and the day the user named when "
+                    "they named one. A revision of a saved plan keeps that plan's own day when "
+                    "this is left out, which is almost always right: give a day only when the "
+                    "user asked to move the workout and named the day "
+                    f"(today or up to {MAX_PROPOSAL_DAYS_AHEAD} days later). Formiq refuses a "
+                    "day they did not name, a different day than the one they named, and words "
+                    "that name no single day (\"the weekend\", \"next week\"): ask which day "
+                    "they mean instead of choosing."
                 ),
             },
             "focus": {
@@ -242,11 +264,14 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
                     "pull; LOWER_BODY, PUSH, PULL and CORE their own. An arm, calf or grip "
                     "exercise (Triceps, Biceps, Forearms, Calves) belongs to its region but "
                     "never covers it. A core exercise may go with any focus. Only different "
-                    f"exercises of at least {MIN_COUNTED_SETS} sets for the focus count: at "
+                    f"exercises of at least {MIN_COUNTED_SETS} sets for the focus count, and "
+                    "variations of one movement (several crunches) count once: at "
                     f"least {MIN_FULL_BODY_EXERCISES} for FULL_BODY and "
-                    f"{MIN_FOCUSED_EXERCISES} for another focus, or "
-                    f"{MIN_SHORT_SESSION_EXERCISES} when max_minutes is under "
-                    f"{SHORT_SESSION_MINUTES}, which never drops a region the focus needs."
+                    f"{MIN_CORE_EXERCISES} for CORE, {MIN_FOCUSED_EXERCISES} for another focus, "
+                    f"or {MIN_SHORT_SESSION_EXERCISES} when max_minutes is under "
+                    f"{SHORT_SESSION_MINUTES}, which never drops a region the focus needs; "
+                    f"a longer max_minutes needs more, up to {MAX_REQUIRED_EXERCISES}. These "
+                    "are floors: choose more when the time allows."
                 ),
             },
             "warm_up": _activities("warm-up", WorkoutSection.WARM_UP),
@@ -273,10 +298,36 @@ PROPOSE_WORKOUT_PLAN = ToolDeclaration(
                             "type": "integer",
                             "minimum": 0,
                             "maximum": MAX_PROPOSED_REST_SECONDS,
+                            "description": "The rest after each set: give it for every exercise.",
                         },
                         "notes": {
                             "type": "string",
-                            "description": "Short guidance, such as a rep range; never a weight.",
+                            "description": (
+                                "A short cue, from the exercise's catalog description or steps "
+                                "(get_exercise): how to do it. Never a weight, a benefit or a "
+                                "claim about pain or injury; left out rather than guessed."
+                            ),
+                        },
+                        "weight_kg": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "maximum": MAX_PROPOSED_WEIGHT_KG,
+                            "description": (
+                                "The weight in kg, ONLY when the user gave it for this exercise "
+                                "(a figure of theirs in kg or lb, or the plan's own weight "
+                                "moved by a figure they gave: 'add 5 kg'). Never choose one: "
+                                "Formiq refuses a weight the user did not give. Leave it out "
+                                "otherwise: a revision then keeps the weight the saved plan "
+                                "has for this exercise."
+                            ),
+                        },
+                        "remove_weight": {
+                            "type": "boolean",
+                            "description": (
+                                "true ONLY when the user asked for this exercise to have no "
+                                "weight: the saved plan's weight is then taken off. Never "
+                                "with weight_kg."
+                            ),
                         },
                     },
                     "required": ["exercise_id", "sets", "reps"],
@@ -414,8 +465,14 @@ SEARCH_EXERCISES = ToolDeclaration(
             },
             "difficulty": {
                 "type": "string",
-                "enum": [difficulty.value for difficulty in Difficulty],
-                "description": "The exercise's difficulty.",
+                # UNRATED (the exercise's source gives no level) is not a level to search for
+                "enum": [
+                    level.value for level in Difficulty if level != Difficulty.UNRATED
+                ],
+                "description": (
+                    "The exercise's difficulty. A search by difficulty finds only exercises "
+                    "that have one; an exercise whose source gives no level is shown as UNRATED."
+                ),
             },
             "name": {
                 "type": "string",
