@@ -15,6 +15,7 @@ import json
 import logging
 import subprocess
 import sys
+from datetime import date
 from enum import Enum
 from pathlib import Path
 from unittest.mock import Mock
@@ -27,6 +28,7 @@ import app
 from app.agent import (
     SAFETY_POLICY,
     CoachContext,
+    CoachDates,
     ConversationTurn,
     PendingProposal,
     SafetyCategory,
@@ -234,6 +236,16 @@ def test_the_service_builds_the_context_from_exactly_the_approved_dependencies()
         "proposal_awaiting_approval",
         # and the numbers it read with it (PendingProposal)
         "pending_proposal",
+        # the plan the request names: the service checked it is the user's own and PLANNED
+        "target_plan_id",
+        # Phase 2.5: plain facts the service read from the user's own proposal records, for the
+        # reply check (app.agent.trust.Lifecycle): how many other proposals await their
+        # approval, and the plans an approval of theirs saved. Numbers only, no text
+        "other_proposals_awaiting",
+        "approved_plan_ids",
+        # Phase 2.7: the calendar of the request (CoachDates): today for the user, from Formiq's
+        # clock in the validated time zone: plain values the instructions tell the model
+        "dates",
     }
     assert context.args == []
 
@@ -315,16 +327,35 @@ def test_the_runtime_context_is_fixed_and_holds_only_the_approved_fields():
         "trace",
         "proposal_awaiting_approval",
         "pending_proposal",
+        "target_plan_id",
+        "other_proposals_awaiting",
+        "approved_plan_ids",
+        "dates",
     }
     # a fact for the reply check, nothing that reaches approvals
     assert fields["proposal_awaiting_approval"] is bool
+    # Phase 2.5: two more, plain numbers for the reply check: how many proposals await the
+    # user's approval that the request does not read, and the plan ids their approvals saved
+    assert fields["other_proposals_awaiting"] is int
+    assert fields["approved_plan_ids"] == frozenset[int]
+    # the plan the request names: one plain id, the service's to set (never the model's)
+    assert fields["target_plan_id"] == int | None
     # and what the instructions say of it: plain numbers from the same records
     assert {item.name: item.type for item in dataclasses.fields(PendingProposal)} == {
         "expires_in_minutes": int,
         "revises_plan_id": int | None,
     }
+    # Phase 2.7: the request's calendar, one date and plain values: no text, nothing to call
+    assert fields["dates"] == CoachDates | None
+    assert {item.name: item.type for item in dataclasses.fields(CoachDates)} == {
+        "today": date,
+        "timezone": str,
+        "from_request": bool,
+        "days": int,
+    }
     context = CoachContext(user_id=USER, provider=fake_provider(), tools=FakeTools())
     assert context.proposal_awaiting_approval is False
+    assert context.target_plan_id is None
     with pytest.raises(dataclasses.FrozenInstanceError):
         context.user_id = OTHER  # type: ignore[misc]
 

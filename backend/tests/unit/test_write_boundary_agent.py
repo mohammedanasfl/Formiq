@@ -211,10 +211,18 @@ def test_nothing_the_coach_runs_with_can_reach_approvals():
         "trace",
         "proposal_awaiting_approval",
         "pending_proposal",
+        "target_plan_id",
+        # Phase 2.5: plain facts for the reply check (numbers and plan ids), not approvals
+        "other_proposals_awaiting",
+        "approved_plan_ids",
+        # Phase 2.7: the request's calendar, plain values (a date and a time zone name)
+        "dates",
     }
     # Whether a proposal awaits the user's approval, read by the coach service
     # before the run: a plain bool, so nothing to call, store or decide with
     assert fields["proposal_awaiting_approval"] is bool
+    # and the plan the request names, checked by the service: a plain id
+    assert fields["target_plan_id"] == int | None
     # and what the instructions say of it: plain numbers from the same records
     assert {item.name: item.type for item in dataclasses.fields(PendingProposal)} == {
         "expires_in_minutes": int,
@@ -274,5 +282,15 @@ def test_the_api_has_one_approval_endpoint_for_the_coachs_proposals():
         for method in operations
     }
     approve = ("/coach/proposals/{proposal_id}/approve", "POST")
-    assert {p for p in paths if p[0].startswith("/coach")} == {("/coach/message", "POST"), approve}
-    assert [p for p in paths if "approv" in p[0] or "proposal" in p[0]] == [approve]
+    # beside it, the user may reject a proposal and read the ones still waiting:
+    # neither saves anything, so approving stays this one route's
+    reject = ("/coach/proposals/{proposal_id}/reject", "POST")
+    pending = ("/coach/proposals/pending", "GET")
+    assert {p for p in paths if p[0].startswith("/coach")} == {
+        ("/coach/message", "POST"),
+        approve,
+        reject,
+        pending,
+    }
+    assert [p for p in paths if "approv" in p[0]] == [approve]
+    assert sorted(p for p in paths if "proposal" in p[0]) == sorted([approve, reject, pending])

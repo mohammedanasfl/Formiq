@@ -41,6 +41,7 @@ from app.services.exceptions import (
     WorkoutSessionNotFoundError,
 )
 from app.services.recovery_summary_service import MAX_NOTE_LENGTH
+from tests.integration.database import assert_disposable
 from tests.integration.workout_plans import add_plan, add_user, columns
 
 STARTED = datetime(2026, 10, 14, 17, 0, tzinfo=UTC)
@@ -271,6 +272,7 @@ def unclassified_exercise(test_engine, service_session):
     the chest. It is deleted afterwards with the session exercises that use it, because
     the catalog tests expect the catalog to hold only the seed."""
     with Session(test_engine) as session:
+        assert_disposable(session.connection())
         chest = session.scalars(select(MuscleGroup).where(MuscleGroup.name == "Chest")).one()
         exercise = Exercise(
             name="Test Unclassified Exercise",
@@ -286,6 +288,7 @@ def unclassified_exercise(test_engine, service_session):
         yield exercise_id
     finally:
         with Session(test_engine) as session:
+            assert_disposable(session.connection())
             session.execute(
                 delete(WorkoutSessionExercise).where(
                     WorkoutSessionExercise.exercise_id == exercise_id

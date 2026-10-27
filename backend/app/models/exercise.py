@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.catalog.descriptions import REPLACES_STEPS
 from app.db.base import Base
+from app.schemas.exercise import ExerciseSource
 
 if TYPE_CHECKING:
     from app.models.equipment import Equipment
@@ -77,9 +78,21 @@ class Exercise(Base):
         """The upstream record's steps, in order and unchanged; none for
         Formiq's own exercises, which have a description instead, and none for an
         imported one whose steps Formiq replaced with its own description
-        (app.catalog.descriptions.REPLACES_STEPS): they are a machine's menu and
-        its calorie estimate (the record keeps them, in source_record). Any other
-        imported description is a summary, and the steps are still the record's."""
+        (app.catalog.descriptions.REPLACES_STEPS, free-exercise-db's records
+        only): they are a machine's menu and its calorie estimate (the record
+        keeps them, in source_record). Any other imported description is a
+        summary, and the steps are still the record's.
+
+        Where the steps are kept depends on the source: free-exercise-db has a
+        list of steps, exercises-dataset has its English steps under
+        instruction_steps (the only language Formiq keeps)."""
+        if self.source == ExerciseSource.EXERCISES_DATASET:
+            by_language = (self.source_record or {}).get("instruction_steps")
+            steps = by_language.get("en") if isinstance(by_language, dict) else None
+            if not isinstance(steps, list):
+                return []
+            return [step for step in steps if isinstance(step, str)]
+        # REPLACES_STEPS holds free-exercise-db record ids: no other source's id is read as one
         if self.source_id in REPLACES_STEPS and self.description and self.source_record:
             return []
         steps = (self.source_record or {}).get("instructions")
@@ -87,6 +100,10 @@ class Exercise(Base):
 
     @property
     def category(self) -> str | None:
-        """The upstream record's category, unchanged; None for Formiq's own."""
+        """The upstream record's category, unchanged; None for Formiq's own, and
+        for exercises-dataset's, whose category is the body part, not a kind of
+        training such as "strength" or "stretching"."""
+        if self.source == ExerciseSource.EXERCISES_DATASET:
+            return None
         category = (self.source_record or {}).get("category")
         return category if isinstance(category, str) else None

@@ -9,7 +9,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.agent import COACH_INSTRUCTIONS, RESPOND
+from app.agent import COACH_INSTRUCTIONS, RESPOND, CoachDates
+from app.agent.graph import date_note
+from app.tools import formiq_tools
 from app.ai import AIProviderError, AIProviderNotConfiguredError, GeminiProvider, user_content
 from app.schemas import UserCreate, UserProfileCreate, WorkoutPlanCreate
 from app.services import CoachService, UserProfileService, UserService, WorkoutPlanService
@@ -49,7 +51,9 @@ def test_reply_comes_from_the_model_through_the_graph(service, user, provider):
     assert service.reply(user.id, "How should I start?") == "Start with three sets of eight."
     provider.generate_turn.assert_called_once_with(
         [user_content("How should I start?")],
-        instructions=COACH_INSTRUCTIONS,
+        # the instructions, and Formiq's calendar for the request (Phase 2.7): UTC's date, since
+        # the request sent no time zone
+        instructions=f"{COACH_INSTRUCTIONS}\n\n{date_note(CoachDates(today=formiq_tools.utc_today()))}",
         tools=[*TOOL_DECLARATIONS, RESPOND],
         required_tool_names=[tool.name for tool in [*TOOL_DECLARATIONS, RESPOND]],
     )

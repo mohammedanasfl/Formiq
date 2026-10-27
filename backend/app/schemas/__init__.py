@@ -2,7 +2,10 @@ from app.schemas.auth import AccessTokenResponse, LoginRequest, RegisterRequest
 from app.schemas.coach import (
     CoachMessageRequest,
     CoachMessageResponse,
+    PendingProposalResponse,
+    PendingProposalsResponse,
     ProposalApprovalRequest,
+    ProposalRejectionRequest,
     WorkoutPlanProposalResponse,
 )
 from app.schemas.equipment import EquipmentResponse
@@ -47,6 +50,7 @@ from app.schemas.recovery_summary import (
 )
 from app.schemas.user import UserCreate, UserResponse
 from app.schemas.user_profile import (
+    ProfileEquipmentResponse,
     UserProfileCreate,
     UserProfileResponse,
     UserProfileUpdate,
@@ -82,6 +86,7 @@ __all__ = [
     "UserProfileCreate",
     "UserProfileUpdate",
     "UserProfileResponse",
+    "ProfileEquipmentResponse",
     "Difficulty",
     "MovementPattern",
     "MuscleRole",
@@ -120,6 +125,9 @@ __all__ = [
     "CoachMessageRequest",
     "CoachMessageResponse",
     "ProposalApprovalRequest",
+    "ProposalRejectionRequest",
+    "PendingProposalResponse",
+    "PendingProposalsResponse",
     "WorkoutPlanProposalResponse",
     "BodyArea",
     "DiscomfortKind",

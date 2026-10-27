@@ -106,7 +106,9 @@ def test_the_proposal_made_under_debugging_is_approved_once_by_its_user_only(
     first = approve(client, me, card)
     again = approve(client, me, card)
 
-    assert (first.status_code, again.status_code) == (201, 409)
+    # a repeated approval saves nothing more: it returns the plan the first one saved
+    assert (first.status_code, again.status_code) == (201, 200)
+    assert again.json() == first.json()
     saved = first.json()
     assert (saved["name"], saved["status"]) == (card["name"], "PLANNED")
     assert [

@@ -131,12 +131,15 @@
   }
 
   // An exercise's prescription as shown: "3 × 10, 60 s rest", or "2 × 30 s"
-  // for a timed one.
+  // for a timed one, and "3 × 10 at 15 kg, 60 s rest" with a weight (a proposal
+  // carries its plan's weights on, and the user may have given one): never
+  // hidden, because approving saves it.
   function prescription(exercise) {
     const target =
       exercise.duration_seconds == null ? `${exercise.reps}` : `${exercise.duration_seconds} s`;
+    const weight = exercise.weight_kg == null ? "" : ` at ${Number(exercise.weight_kg)} kg`;
     const rest = exercise.rest_seconds == null ? "" : `, ${exercise.rest_seconds} s rest`;
-    return `${exercise.sets} × ${target}${rest}`;
+    return `${exercise.sets} × ${target}${weight}${rest}`;
   }
 
   // Whether the proposal fulfils its focus, as Formiq judged it, from the
@@ -339,6 +342,149 @@
     return value ? { ...session, plan: value } : session;
   }
 
+  // --- logging a saved plan's workout as done ---
+
+  // A plan has no completed status of its own (DRAFT, PLANNED, CANCELLED): its
+  // workout is done when a COMPLETED workout session says so. The "Completed"
+  // button logs the open plan as done exactly as prescribed, with the API's own
+  // sessions: one started from the plan, each exercise of it with its sets, then
+  // the session COMPLETED. A timed activity is logged without sets, as the API
+  // takes them (a set needs reps). For testing what the coach does after a workout.
+  const SESSION_NOTE = "Logged as prescribed from the playground.";
+  const SESSION_STATUSES = ["IN_PROGRESS", "COMPLETED", "CANCELLED"];
+  const COMPLETION = { status: "COMPLETED" };
+
+  function validId(value) {
+    return Number.isInteger(value) && value >= 1 && value <= MAX_ID;
+  }
+
+  // GET and POST /users/{id}/workout-sessions[?status=...]: the signed-in user's own.
+  function sessionsPath(session, status = null) {
+    const userId = tokenUserId(session.token);
+    if (userId === null) return null;
+    if (status === null) return `/users/${userId}/workout-sessions`;
+    return SESSION_STATUSES.includes(status) ? `/users/${userId}/workout-sessions?status=${status}` : null;
+  }
+
+  function sessionPath(session, sessionId) {
+    const sessions = sessionsPath(session);
+    return sessions === null || !validId(sessionId) ? null : `${sessions}/${sessionId}`;
+  }
+
+  function sessionExercisesPath(session, sessionId) {
+    const path = sessionPath(session, sessionId);
+    return path === null ? null : `${path}/exercises`;
+  }
+
+  function sessionSetsPath(session, sessionId, sessionExerciseId) {
+    const path = sessionExercisesPath(session, sessionId);
+    return path === null || !validId(sessionExerciseId) ? null : `${path}/${sessionExerciseId}/sets`;
+  }
+
+  // The bodies carry the plan's own ids and numbers: never a user.
+  function buildSessionStart(plan) {
+    return { workout_plan_id: plan.id, notes: SESSION_NOTE };
+  }
+
+  function planExercisesInOrder(plan) {
+    return [...plan.exercises].sort((a, b) => a.exercise_order - b.exercise_order);
+  }
+
+  function buildSessionExercise(item) {
+    return { exercise_id: item.exercise_id, exercise_order: item.exercise_order, plan_exercise_id: item.id };
+  }
+
+  // Every prescribed set, done at its prescribed reps; none for a timed activity.
+  function loggedSets(item) {
+    if (!Number.isInteger(item.reps) || item.reps < 1) return [];
+    return Array.from({ length: item.sets }, (_, index) => ({
+      set_number: index + 1,
+      reps: item.reps,
+      completed: true,
+    }));
+  }
+
+  // The id of a COMPLETED session of this plan among the user's sessions, or null:
+  // a second press must not log the same workout twice.
+  function findCompletedSession(plan, sessions) {
+    if (!Array.isArray(sessions)) return null;
+    const found = sessions.find(
+      (item) => item && item.status === "COMPLETED" && item.workout_plan_id === plan.id && validId(item.id)
+    );
+    return found ? found.id : null;
+  }
+
+  // Only a PLANNED plan can start a session, and one already logged is not logged again.
+  function canLog(plan) {
+    return Boolean(plan) && plan.status === "PLANNED" && !plan.loggedSessionId;
+  }
+
+  function markLogged(session, sessionId) {
+    if (!session.plan || !validId(sessionId)) return session;
+    return { ...session, plan: { ...session.plan, loggedSessionId: sessionId } };
+  }
+
+  // Logs the plan as done through call(method, path, body) -> { status, data }, which
+  // the page answers with fetch. It first looks for a completed session of the plan.
+  // Any step that fails ends it, and the session it started is deleted (the API allows
+  // one running session at a time, so a left one would block the user's next workout).
+  // Returns { ok, sessionId, already } or { ok: false, step, status, cleaned }.
+  async function logPlan(session, plan, call) {
+    const listPath = sessionsPath(session, "COMPLETED");
+    const startPath = sessionsPath(session);
+    if (listPath === null || startPath === null) return { ok: false, step: "sign in", status: 401, cleaned: true };
+    const listed = await call("GET", listPath);
+    if (listed.status !== 200) return { ok: false, step: "check earlier sessions", status: listed.status, cleaned: true };
+    const earlier = findCompletedSession(plan, listed.data);
+    if (earlier !== null) return { ok: true, sessionId: earlier, already: true };
+
+    const started = await call("POST", startPath, buildSessionStart(plan));
+    if (started.status !== 201 || !validId(started.data && started.data.id)) {
+      return { ok: false, step: "start the session", status: started.status, cleaned: true };
+    }
+    const sessionId = started.data.id;
+    let problem = null;
+    for (const item of planExercisesInOrder(plan)) {
+      const logged = await call("POST", sessionExercisesPath(session, sessionId), buildSessionExercise(item));
+      if (logged.status !== 201 || !validId(logged.data && logged.data.id)) {
+        problem = { step: `log exercise ${item.exercise_order}`, status: logged.status };
+        break;
+      }
+      for (const set of loggedSets(item)) {
+        const added = await call("POST", sessionSetsPath(session, sessionId, logged.data.id), set);
+        if (added.status !== 201) {
+          problem = { step: `log a set of exercise ${item.exercise_order}`, status: added.status };
+          break;
+        }
+      }
+      if (problem) break;
+    }
+    if (!problem) {
+      const done = await call("PATCH", sessionPath(session, sessionId), COMPLETION);
+      if (done.status !== 200 || !done.data || done.data.status !== "COMPLETED") {
+        problem = { step: "complete the session", status: done.status };
+      }
+    }
+    if (!problem) return { ok: true, sessionId, already: false };
+    const removed = await call("DELETE", sessionPath(session, sessionId));
+    return { ok: false, ...problem, cleaned: removed.status === 204 };
+  }
+
+  const LOG_MESSAGES = {
+    400: "Nothing was logged: Formiq would not take this workout.",
+    404: "Nothing was logged: the signed-in user has no such plan.",
+    409: "Nothing was logged: a workout is already in progress. Complete or cancel it first.",
+  };
+
+  function describeLogError(step, status, cleaned = true) {
+    const base =
+      LOG_MESSAGES[status] || MESSAGES[status] || `Could not log the workout (HTTP ${status}). Nothing was kept.`;
+    return {
+      message: cleaned ? base : `${base} A session of this attempt may still be running: complete or cancel it.`,
+      technical: { step, status, cleaned_up: cleaned },
+    };
+  }
+
   // --- the user's profile ---
 
   // GET, POST and PATCH /users/{id}/profile: the signed-in user's own.
@@ -532,10 +678,12 @@
   }
 
   // A failed approval: a fixed message by status, never the raw body. Nothing
-  // was saved.
+  // was saved. (The same approval sent again is no failure: the API answers 200
+  // with the plan the first one saved, so a 409 "already approved" means that plan
+  // was changed, cancelled or removed since.)
   const APPROVAL_MESSAGES = {
     404: "Not approved: the signed-in user has no such proposal. Ask the coach for a new one.",
-    409: "Not approved: this proposal expired, was already approved, or can no longer be saved. Ask the coach for a new one.",
+    409: "Not approved: this proposal expired, was rejected, or can no longer be saved, or it was approved and the plan it saved has changed since. Ask the coach for a new one.",
     422: "Not approved: the approval request could not be processed.",
   };
 
@@ -544,6 +692,30 @@
       message: APPROVAL_MESSAGES[status] || MESSAGES[status] || `Not approved (HTTP ${status}).`,
       technical: { status },
     };
+  }
+
+  // Whether an approval's answer is a saved plan: the API's 201 with the plan (the
+  // first approval), or its 200 with the plan (the same approval sent again, which
+  // saves nothing more and returns the plan the first one saved). Nothing else is.
+  function approvalSaved(status, data) {
+    return (status === 201 || status === 200) && Boolean(data) && Number.isInteger(data.id);
+  }
+
+  // What the page says of an approval's answer, which only a saved plan (approvalSaved)
+  // has a message for; `late` is an answer that arrived after the conversation changed.
+  function approvalMessage(status, data, { late = false } = {}) {
+    if (!approvalSaved(status, data)) {
+      return late ? "An approval answered after the conversation changed; nothing was saved." : "";
+    }
+    const again = status === 200;
+    if (late) {
+      return again
+        ? `An approval finished after the conversation changed: workout plan ${data.id} is the plan it saved earlier, and nothing more was saved.`
+        : `An approval finished after the conversation changed: workout plan ${data.id} was saved.`;
+    }
+    return again
+      ? `This proposal was already approved: "${data.name}" is plan ${data.id}. Nothing more was saved. Find it under Saved plans.`
+      : `Saved "${data.name}" as plan ${data.id}. Find it under Saved plans.`;
   }
 
   // The X-Playground-Execution header, or null when absent or unreadable.
@@ -595,11 +767,27 @@
     planSections,
     recordPlans,
     recordPlan,
+    COMPLETION,
+    sessionsPath,
+    sessionPath,
+    sessionExercisesPath,
+    sessionSetsPath,
+    buildSessionStart,
+    planExercisesInOrder,
+    buildSessionExercise,
+    loggedSets,
+    findCompletedSession,
+    canLog,
+    markLogged,
+    logPlan,
+    describeLogError,
     NO_DESCRIPTION,
     NO_INSTRUCTIONS,
     addTurn,
     describeError,
     describeApprovalError,
+    approvalSaved,
+    approvalMessage,
     describePlanError,
     describeLoginError,
     parseExecution,

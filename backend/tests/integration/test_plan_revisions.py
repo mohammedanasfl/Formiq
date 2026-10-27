@@ -176,12 +176,13 @@ def revision_of(plan_id, kind, ids, *names, sets=3, **fields):
 @pytest.fixture
 def more_core(db_session, ids):
     """Core exercises the user could do instead, with no equipment: in this
-    test's transaction only."""
+    test's transaction only. Four, as a core workout needs four different ones
+    (Bug 2, 2026-10-27: three was its minimum before)."""
     return {
         **ids,
         **{
             name: add_main_exercise(db_session, name, "Core", "BEGINNER").id
-            for name in ("Test Dead Bug", "Test Side Plank", "Test Hollow Hold")
+            for name in ("Test Dead Bug", "Test Side Plank", "Test Hollow Hold", "Test Leg Raise")
         },
     }
 
@@ -201,7 +202,8 @@ def test_an_alternative_must_replace_what_the_catalog_has_replacements_for(
         tools,
         user,
         **revision_of(
-            plan.id, "ALTERNATIVE", ids, "Bird Dog", "Band Pallof Press", "Test Side Plank"
+            plan.id, "ALTERNATIVE", ids, "Bird Dog", "Band Pallof Press", "Test Side Plank",
+            "Test Leg Raise",
         ),
     )
 
@@ -220,7 +222,8 @@ def test_an_alternative_must_replace_what_the_catalog_has_replacements_for(
         tools,
         user,
         **revision_of(
-            plan.id, "ALTERNATIVE", ids, "Test Dead Bug", "Band Pallof Press", "Bird Dog"
+            plan.id, "ALTERNATIVE", ids, "Test Dead Bug", "Band Pallof Press", "Bird Dog",
+            "Test Leg Raise",
         ),
     )
     assert "keeps exercise" in problem(reordered)
@@ -229,7 +232,8 @@ def test_an_alternative_must_replace_what_the_catalog_has_replacements_for(
         tools,
         user,
         **revision_of(
-            plan.id, "ALTERNATIVE", ids, "Cable Woodchop", "Test Side Plank", "Test Hollow Hold"
+            plan.id, "ALTERNATIVE", ids, "Cable Woodchop", "Test Side Plank", "Test Hollow Hold",
+            "Test Leg Raise",
         ),
     )
 
@@ -249,8 +253,9 @@ def test_an_alternative_may_keep_what_the_catalog_has_no_replacement_for(
     tools, db_session, ids, more_core
 ):
     """With no equipment, the core exercises the user can do are Bird Dog and
-    the three test ones. The plan holds three of them, so an alternative can
-    bring in only one other: it may keep two, and says which."""
+    the four test ones. The plan holds three of them, so an alternative of the
+    four a core workout needs can bring in only two others: it may keep two, and
+    says which."""
     ids = more_core
     user = add_user(db_session, "rewrite@example.com")
     plan = core_plan(db_session, user.id, ids, "Bird Dog", "Test Dead Bug", "Test Side Plank")
@@ -265,6 +270,7 @@ def test_an_alternative_may_keep_what_the_catalog_has_no_replacement_for(
             "Bird Dog",
             "Test Hollow Hold",
             "Test Dead Bug",
+            "Test Leg Raise",
             available_equipment=[],
         ),
     )
@@ -326,8 +332,12 @@ def test_an_adjustment_must_change_something(tools, db_session, ids):
 
     unchanged = propose(tools, user, **{**as_saved, "revises_plan_id": plan.id})
 
+    # changed on purpose in Phase 2.5: the refusal also says how a move to another day is made
     assert problem(unchanged) == (
-        f"this is workout plan {plan.id} unchanged: make the changes the user asked for"
+        f"this is workout plan {plan.id} unchanged, on its own day {TODAY.isoformat()}: make the "
+        "changes the user asked for. To move it to another day, give scheduled_date for the day "
+        "they named; when they did not name a day, ask which (ASK_CLARIFICATION) and do not "
+        "choose one"
     )
     assert tools.proposals == []
 
@@ -434,6 +444,9 @@ def test_a_rewrite_is_proposed_saving_nothing_and_its_approval_replaces_the_plan
         "replaces_plan_name": "Core & Abs Focus",
         "kind": "ALTERNATIVE",
         "kept_exercises": list(CORE_PLAN),
+        # three main exercises of 3 sets, each of 45 s and 90 s of rest: 3 x 3 x 135 s = 1215 s,
+        # and no warm-up or cool-down
+        "replaces_plan_estimated_minutes": 21,
     }
     assert shown["coverage"]["focus"] == "CORE"
     # proposed: nothing saved, nothing replaced
@@ -456,12 +469,9 @@ def test_a_rewrite_is_proposed_saving_nothing_and_its_approval_replaces_the_plan
     assert cancelled["exercises"] == original["exercises"]
     # reopening the saved plan reads what PostgreSQL holds
     assert client.get(f"/users/{me}/workout-plans/{saved['id']}").json() == saved
-    # once
+    # once: approving again saves nothing and replaces nothing, and returns the plan it saved
     again = approve(client, me, shown)
-    assert (again.status_code, again.json()) == (
-        409,
-        {"detail": "this proposal was already approved"},
-    )
+    assert (again.status_code, again.json()) == (200, saved)
     assert stored_plans(test_engine, me) == [(plan_id, "CANCELLED"), (saved["id"], "PLANNED")]
 
 

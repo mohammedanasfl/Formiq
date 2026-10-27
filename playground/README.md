@@ -105,13 +105,14 @@ The page works like a small app: a sign-in screen, then the coach.
   each limitation's message. A proposal that revises a saved plan says which (from the API's
   `revision`): that approving it saves it as a new plan and cancels that one, and which main
   exercises it keeps; its button reads **Approve and replace plan N**. The card's first line
-  says "Proposed, not saved until you approve it" until the approval answers 201, then
-  "Approved and saved as plan N": never both, and never from the coach's reply. After an
+  says "Proposed, not saved until you approve it" until the approval answers 201 (or 200, for
+  the same approval sent again), then "Approved and saved as plan N": never both, and never from the coach's reply. After an
   approval, the saved plans are read again from the API.
   **Approve and save** sends its id and binding with the token. "Saved as plan N", with
   how many warm-up, main and cool-down exercises the saved plan has, appears only after the API
-  answers 201 with the plan; any other answer (404, 409, 401, 422, no response) is shown as an
-  error, and nothing is marked saved. The next reply, a new conversation, a sign-in or a sign-out
+  answers 201 with the plan, or 200 with the plan it saved earlier (the same approval sent again:
+  nothing more is saved, and the page says so); any other answer (404, 409, 401, 422, no response)
+  is shown as an error, and nothing is marked saved. The next reply, a new conversation, a sign-in or a sign-out
   removes the card (an unapproved proposal simply expires on the server after 30 minutes). The
   proposal is kept in PostgreSQL, so it can still be approved after the server restarts.
 - **Saved plans.** The tab lists the signed-in user's plans, read from the database when it first
@@ -120,6 +121,13 @@ The page works like a small app: a sign-in screen, then the coach.
   and numbered instructions Formiq's catalog has for it. What the catalog lacks is said plainly
   ("No description in Formiq's catalog.", "No step-by-step instructions in Formiq's catalog."),
   never filled in. Nothing here asks the coach.
+- **Completed.** On an eligible saved `PLANNED` plan, **Completed** first checks for an existing
+  `COMPLETED` session for that plan so a repeated press does not log it twice. Otherwise it creates an
+  `IN_PROGRESS` session from the plan, adds each plan exercise in order, adds every prescribed reps-based
+  set as completed, and marks the session `COMPLETED`. Timed exercises are added without sets because the
+  current session-set schema requires `reps`. If any step fails, the playground deletes the session it
+  started; the error says whether cleanup succeeded. This is the playground's session-writing flow and
+  does not add session writes to the mobile frontend.
 - **Developer tools** opens a side panel with the safe metadata above (the last request's
   execution, and its HTTP status and latency measured in the browser), the **quick tests** (they
   only fill the message box; you always send by hand) and **Add a turn to the history**, which
@@ -152,14 +160,15 @@ PostgreSQL: the model is a fake, and the database session a mock. The backend's 
 | [ ] | Daily recommendation | "What should I do today?" | `DAILY_WORKOUT`; tools include `get_user_profile`, `get_current_workout_plan`, `get_latest_workout_session` (a read that found nothing, such as no workout yet, is not listed under *Tools used* but counts in *Tool calls executed*); today's planned exercises with their sets, reps and prescribed weights, or a plain "no plan" with a next step |
 | [ ] | Daily, with a constraint | The 20-minutes, tired and no-dumbbells quick tests | A shorter or lighter version of today's plan, or rest; no invented weights |
 | [ ] | Proposed plan | A user with a profile and no plan for today: "What should I do today?" | Tools include `search_exercises` and `propose_workout_plan`; the reply asks the user to review and approve, never says it was saved. The *Proposed workout* panel shows a warm-up, a main workout and a cool-down, all from the catalog and fitting the user's constraints, with minutes that add up, marked not saved. **Approve and save** shows "Saved as workout plan N" with the same section counts, and the plan, each exercise with its `section`, is at `GET /users/{id}/workout-plans/N` in http://localhost:2001/docs. Typing "yes" in the chat saves nothing |
-| [ ] | Proposed plan, constrained | "I have 25 minutes, no equipment, and I can't kneel. What should I do today?" | The whole workout fits 25 minutes; no exercise needs equipment; no kneeling activity (such as Child's Pose, Cat-Cow, Cat Stretch, Kneeling Hip Flexor Stretch, Bird Dog, Hip Circles (prone)); every exercise from the catalog, with `uses` that include its section |
+| [ ] | Proposed plan, constrained | "I have 25 minutes, no equipment, and I can't kneel. What should I do today?" | The whole workout fits 25 minutes; no exercise needs equipment; no kneeling activity (such as Child's Pose, Cat-Cow, Kneeling Hip Flexor Stretch, Bird Dog, Hip Circles (prone)); every exercise from the catalog, with `uses` that include its section |
 | [ ] | Saved plan details | After **Approve and save** | **Open saved plan** shows each exercise with its description and instructions, or says the catalog has none; no new coach request (Developer tools: the last request is unchanged) |
 | [ ] | Reopen a plan | Reload the page, sign in, open **Saved plans**, choose the plan | The same plan and content, read with `GET /users/{id}/workout-plans/{plan_id}`; the coach is not asked |
 | [ ] | Proposal follow-ups | After a proposal, without approving it: "Why did you choose these exercises?", "Show me the final proposal.", "What changed from my current plan?" | Tools include `get_pending_proposal`; the answer names only the proposal's own exercises, and what changed only as its `changes` say; the reply carries the same proposal again (same id), never a new one; approving it once saves it |
 | [ ] | Saved plans | With two or more saved plans: "Show me my saved plans.", then "Change my workout." | `list_workout_plans` lists them all; the change is answered with a question naming the plans (`ASK_CLARIFICATION`), never a revision of one of them |
 | [ ] | Equipment said once | "I only have dumbbells and resistance bands.", then "Make me an upper-body workout." | Every exercise needs only dumbbells, bands or nothing; "I don't have any equipment." gives only bodyweight ones, and is never answered with the off-topic redirect |
-| [ ] | Approval refused | Approve the same proposal again from /docs | 409: shown as "Not approved", never as saved |
-| [ ] | Approval after a restart | Get a proposal, restart the server, then **Approve and save** it (within 30 minutes) | 201: proposals are kept in PostgreSQL, so a restart loses none; approving it again is a 409 |
+| [ ] | Approval repeated | Approve the same proposal again from /docs, with the same binding | 200 with the same plan the first approval saved, and no second plan; the page, if it sends it again, says "already approved", not "saved" twice |
+| [ ] | Approval refused | Approve a proposal after it expired (30 minutes), or send another binding | 409: shown as "Not approved", never as saved |
+| [ ] | Approval after a restart | Get a proposal, restart the server, then **Approve and save** it (within 30 minutes) | 201: proposals are kept in PostgreSQL, so a restart loses none; approving it again is a 200 with the same plan |
 | [ ] | Workout history question | "What workout did I do recently?" | Asks for a session id, or answers only from a session it read; never invents one |
 | [ ] | Exercise question | "What muscles does exercise 1 train?" | Uses `get_exercise`, or answers generally and says so |
 | [ ] | Ambiguous question | "Make it harder." | `ASK_CLARIFICATION` |

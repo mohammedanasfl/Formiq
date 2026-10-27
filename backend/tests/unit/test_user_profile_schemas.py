@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from app.models import UserProfile
+from app.models import Equipment, UserProfile
 from app.schemas import UserProfileCreate, UserProfileResponse, UserProfileUpdate
 
 VALID_PROFILE = {
@@ -30,7 +30,8 @@ OPTIONAL_FIELDS = {"last_name", "target_weight_kg", "goal_period_weeks", "dietar
 def test_user_profile_create_accepts_complete_profile():
     profile = UserProfileCreate.model_validate(VALID_PROFILE)
 
-    assert profile.model_dump() == VALID_PROFILE
+    # a profile that says nothing of equipment says nothing: no ids, and not "none"
+    assert profile.model_dump() == {**VALID_PROFILE, "equipment_ids": [], "no_equipment": False}
 
 
 def test_user_profile_create_accepts_profile_without_optional_fields():
@@ -105,7 +106,13 @@ def test_user_profile_update_has_the_same_fields_as_create():
 def test_user_profile_response_serializes_user_profile_model():
     timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     profile = UserProfile(
-        id=1, user_id=2, **VALID_PROFILE, created_at=timestamp, updated_at=timestamp
+        id=1,
+        user_id=2,
+        **VALID_PROFILE,
+        no_equipment=False,
+        equipment=[Equipment(id=4, name="Bench"), Equipment(id=9, name="Dumbbell")],
+        created_at=timestamp,
+        updated_at=timestamp,
     )
 
     response = UserProfileResponse.model_validate(profile)
@@ -114,6 +121,8 @@ def test_user_profile_response_serializes_user_profile_model():
         "id": 1,
         "user_id": 2,
         **VALID_PROFILE,
+        "no_equipment": False,
+        "equipment": [{"id": 4, "name": "Bench"}, {"id": 9, "name": "Dumbbell"}],
         "created_at": timestamp,
         "updated_at": timestamp,
     }
@@ -122,5 +131,9 @@ def test_user_profile_response_serializes_user_profile_model():
 def test_user_profile_schemas_match_user_profiles_columns():
     columns = set(UserProfile.__table__.columns.keys())
 
-    assert set(UserProfileResponse.model_fields) == columns
-    assert set(UserProfileCreate.model_fields) == columns - {"id", "user_id", "created_at", "updated_at"}
+    # the equipment is not a column: it is the rows of user_profile_equipment, listed by the
+    # response and chosen by id in the request
+    assert set(UserProfileResponse.model_fields) == columns | {"equipment"}
+    assert set(UserProfileCreate.model_fields) == (
+        columns - {"id", "user_id", "created_at", "updated_at"} | {"equipment_ids"}
+    )

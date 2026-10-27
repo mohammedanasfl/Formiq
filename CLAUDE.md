@@ -41,8 +41,10 @@ python -m app.cli import-exercises [--dry-run] # import/refresh the free-exercis
 .venv/bin/python ../playground/server.py      # playground at http://localhost:2001/playground/
 ```
 
-Tests use the `formiq_test` database, whose schema comes from Alembic migrations only. The
-playground always runs on port 2001. `tests/conftest.py` turns the application's Langfuse tracer
+Tests use the disposable `formiq_pytest` database (created and marked by the tests on the server
+`TEST_DATABASE_URL` names; they refuse any other database), whose schema comes from Alembic
+migrations only. `formiq_test` is the QA database: a test run never touches it (Phase 2.7; see
+`backend/README.md`). The playground always runs on port 2001. `tests/conftest.py` turns the application's Langfuse tracer
 off for every test, whatever `backend/.env` enables; tracing tests build their own tracer.
 Run the playground tests in their own pytest run: in the same session as backend tests that
 start the app, they error with "Cannot add middleware after an application has started".
@@ -94,8 +96,43 @@ start the app, they error with "Cannot add middleware after an application has s
   `app/catalog/` changes (the catalog corrections reach a database only through it; it is safe to
   re-run, and `--dry-run` shows what it would change). The dev database is current.
 - Not done yet: timed sets (a set needs `reps`, so a timed exercise is logged without sets; needs
-  a migration); exercise names in session history; a proposal rejection endpoint; five imported
-  main exercises have no instructions or description.
+  a migration); exercise names in session history; five imported main exercises have no
+  instructions or description.
+
+## Coach proposals: approve, reject, pending (Phase 2.1 to 2.3, on `phase-7-nutrition-recovery`)
+
+- `POST /coach/proposals/{id}/approve`: 201 the first time, 200 with the same plan when sent again
+  (idempotent; 409 if the saved plan changed since). `POST /coach/proposals/{id}/reject`: 204, status
+  `REJECTED` (no migration), 409 for an approved one; rejecting again is 204 only while the row is
+  kept: an expired proposal's row is cleared when its user next gets a new one, and then a reject or
+  approve is a 404. `GET /coach/proposals/pending` lists what can still be approved.
+- One rule for "awaiting approval" (`PlanProposalService.approvable`), used by that list and by what the
+  coach reads; a request that names a plan (`workout_plan_id`) reads only proposals that revise it.
+  A revision keeps its plan's day; another day only when the user named one (`app/tools/schedule.py`).
+  Details and limits: `docs/agent-production-contract.md` sections 8 and 10.
+
+- Phase 2.5 (on the same branch, uncommitted): a day move is a revision on its own (an ADJUST is
+  unchanged only when its day is the plan's too); a proposal carries `weight_kg` per exercise, a
+  revision keeps its plan's weights, and the model sets one only when the user gave it
+  (`app/tools/weights.py`); the reply check is held to the records (`Lifecycle` in
+  `app/agent/trust.py`): nothing is said saved, applied or updated without them, "no proposal is
+  waiting" is said only when none is, and a refused proposal presents nothing. Details and limits:
+  `docs/agent-production-contract.md` sections 5, 8 and 10. Scripted tests only; live Gemini not run.
+
+- Phase 2.7 (same branch, uncommitted, scripted tests only; live Gemini and Android not re-run): the
+  coach's dates are the user's own and deterministic. `POST /coach/message` takes an optional IANA
+  `timezone` (the app sends the device's); "today" is the user's local day in it, the UTC day without it
+  (`app/tools/coach_calendar.py`), the model is told the calendar in its instructions
+  (`CoachContext.dates`), and the proposal tool resolves the user's own words to dates by rules
+  (`app/tools/schedule.py`): the model's `scheduled_date` must be the day they named, "the weekend",
+  "next week" and other words that fit two days are asked about, never guessed. A newer proposal for a
+  saved plan supersedes the user's earlier pending ones for it (`SUPERSEDED`, no migration). The reply
+  guard classifies claims on a normalized text (workout names, quotes and `&` are one word) and holds
+  state claims to the plan they name; a sentence that says the pending proposal awaits approval may call
+  it "the harder version" only if the record supports the word. Backend tests now run in the disposable
+  `formiq_pytest` database, never `formiq_test` (QA) or the development one. Details and limits:
+  `docs/agent-production-contract.md` sections 5, 8 and 10; the live plan is in
+  `docs/live-gemini-regression-checklist.md`.
 
 ## Decisions to remember
 

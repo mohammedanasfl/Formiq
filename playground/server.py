@@ -202,14 +202,21 @@ def log_turn_summaries() -> None:
     logger.disabled = False
 
 
+def recording_tracer(configured: Tracer) -> Tracer:
+    """The configured tracer (Langfuse when enabled), with the recorder in front.
+    Its capture setting is the configured one, and so is AGENT_DEBUG's local
+    terminal output, if it is on: apart from the backend, which it never reaches."""
+    return Tracer(
+        RecordingBackend(configured.backend),
+        capture_content=configured.capture_content,
+        debug=configured.debug,
+    )
+
+
 def install() -> None:
     """Adds the playground to this process's application: the page, the
     recording tracer and the response headers. Never called in production."""
-    # the configured tracer (Langfuse when enabled), with the recorder in front
-    configured = get_tracer()
-    tracer = Tracer(
-        RecordingBackend(configured.backend), capture_content=configured.capture_content
-    )
+    tracer = recording_tracer(get_tracer())
     app.dependency_overrides[get_tracer] = lambda: tracer
 
     @app.middleware("http")

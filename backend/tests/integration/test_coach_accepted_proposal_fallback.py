@@ -129,7 +129,9 @@ def test_the_shown_card_is_approved_once_and_saves_exactly_that_workout(
     again = approve(client, me, card)
 
     assert first.status_code == 201
-    assert again.status_code == 409
+    # a repeated approval saves nothing more: it returns the plan the first one saved
+    assert again.status_code == 200
+    assert again.json() == first.json()
     saved = first.json()
     assert (saved["name"], saved["status"]) == (card["name"], "PLANNED")
     assert [
@@ -174,7 +176,9 @@ def test_a_revision_whose_reply_is_refused_is_shown_and_replaces_its_plan_only_o
     assert response.status_code == 201
     saved = response.json()
     assert stored_plans(test_engine, me) == [(plan_id, "CANCELLED"), (saved["id"], "PLANNED")]
-    assert approve(client, me, card).status_code == 409
+    # again: the plan that approval saved, and no second plan
+    again = approve(client, me, card)
+    assert (again.status_code, again.json()) == (200, saved)
     assert stored_plans(test_engine, me) == [(plan_id, "CANCELLED"), (saved["id"], "PLANNED")]
 
 

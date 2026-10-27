@@ -52,6 +52,7 @@ import logging
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from enum import StrEnum
 from typing import Any, Literal, NamedTuple, Protocol
 
@@ -97,12 +98,15 @@ from app.agent.policy import (
     context_states,
     fitness_terms,
     known_ids,
+    pending_descriptors,
     pending_proposal_changes,
+    pending_proposal_names,
     pending_proposal_shown,
     proposal_context_gap,
     proposal_length,
     tools_used,
     ungrounded_ids,
+    workout_names,
 )
 from app.agent.safety import SafetyAssessment, assess_safety
 from app.agent.state import CoachState
@@ -110,6 +114,7 @@ from app.agent.trace_metadata import call_metadata, result_metadata
 from app.agent.trust import (
     REPLY_MISSTATES_DURATION,
     REPLY_PROBLEMS,
+    Lifecycle,
     ProposalLength,
     is_reply_problem,
     reply_problem,
@@ -204,6 +209,8 @@ DUPLICATE_CALL = "DUPLICATE_CALL"
 CONTEXT_MISSING = "CONTEXT_MISSING"
 # the reads whose results are workout sessions: what the user did
 SESSION_READS = frozenset({"get_workout_session", "get_latest_workout_session"})
+# the reads whose results are saved workout plans
+PLAN_READS = frozenset({"get_workout_plan", "get_current_workout_plan", "list_workout_plans"})
 # A refused proposal that proposing again can correct: Formiq named what is
 # wrong (the tools' INVALID_INPUT, with suggestions), an id it was not given, the
 # reads it rests on (which Formiq has loaded by then), or the call was beyond the
@@ -328,11 +335,28 @@ COACH_INSTRUCTIONS = (
     "propose_workout_plan, from exercises search_exercises returned. Fit it to the "
     "user's goal, experience, training location, and what they said about time, "
     "equipment and energy; give max_minutes, and available_equipment ([] for none) or "
-    "unavailable_equipment, when they said. Formiq also holds what the user said about "
-    "their equipment in this conversation: it leaves out what they lack, and refuses "
-    "available_equipment naming what they did not say they have. "
+    "unavailable_equipment, when they said. Formiq also holds the equipment saved in "
+    "their profile (get_user_profile lists it) and what the user said about their "
+    "equipment in this conversation, which replaces it: it leaves out what they lack, "
+    "and refuses available_equipment naming what they neither saved nor said they have. "
+    "When their profile lists equipment, or none, that is what they have unless they say "
+    "otherwise: do not ask for it again. "
     "Do not train again the muscles their last workout trained yesterday. Prescribe "
-    "sets, reps and rest, never weights.\n"
+    "sets, reps and rest. Never choose a weight: you cannot know a load. A revision keeps "
+    "the weight the saved plan has for each exercise, whatever you leave out; give weight_kg "
+    "only when the user gave the weight (a figure in kg or lb, or 'add 5 kg') and "
+    "remove_weight only when they asked for none. When they want it heavier or lighter "
+    "without saying how much, ask how many kg (ASK_CLARIFICATION): never promise a weight "
+    "you cannot propose.\n"
+    "- A request for a workout is the request to propose one: when the user asks for a "
+    "workout, routine or session (\"a beginner abs workout\", \"20 minutes at home\", "
+    "\"something for my legs\"), search for it and propose it with propose_workout_plan in "
+    "this turn, as intent WORKOUT_PLAN, even when they already have a plan: it is not the "
+    "plan they asked for. Never answer it with a list of exercises, and never ask whether "
+    "they want a workout: they just asked for one. Ask one short question "
+    "(ASK_CLARIFICATION) only when something essential is missing that their profile and "
+    "message do not give. Name the part of the body they asked for as the focus (abs or "
+    "core is CORE).\n"
     "- You have only a few rounds of tool calls, so batch them: in the first round call "
     "get_user_profile, get_current_workout_plan and get_latest_workout_session with every "
     "search the workout needs (MAIN_WORKOUT, WARM_UP and COOL_DOWN), all together, and "
@@ -345,18 +369,30 @@ COACH_INSTRUCTIONS = (
     "accepts one proposal a turn.\n"
     "- A proposal is a complete session for its focus: FULL_BODY unless the user asks "
     "for one part of the body. A full-body workout trains the lower body, an upper-body "
-    "push and an upper-body pull, with 4 to 6 main exercises of 2 or 3 sets for a "
-    "beginner; a focused one 3 to 5. Under 30 minutes, 2 or 3 exercises may do, still "
-    "covering the focus. Never repeat an exercise, and never give a beginner an "
-    "ADVANCED one. Formiq rejects a workout that falls short and names what is "
-    "missing: search for it and propose again.\n"
+    "push and an upper-body pull. Formiq's minimums for the main exercises (4 for a full "
+    "body or an abs workout, 3 for another part of the body, 2 under 30 minutes, 5 from "
+    "about 40 minutes) are floors, not targets: aim for 5 or 6 when the user gave no time "
+    "or has 40 minutes or more (4 or 5 for a beginner, with 2 or 3 sets of each), 4 in "
+    "about 30 minutes, 2 or 3 under 30, still covering the focus. More time means more "
+    "different exercises, not many sets of a few. Choose different movements: Formiq "
+    "counts variations of one (several crunches, say) as one exercise. Never repeat an "
+    "exercise, and never give a beginner an ADVANCED one. Formiq rejects a workout that "
+    "falls short and names what is missing: search for it and propose again.\n"
+    "- Give every main exercise its sets, reps and rest_seconds (60 to 90 seconds), in the "
+    "order to do them, and, when you have read the exercise's description or steps "
+    "(get_exercise), a short cue for it in notes: how to do it, from what the catalog says, "
+    "never a weight, a benefit or a claim about pain or injury. Leave notes out rather "
+    "than guess.\n"
     "- Every proposal has a warm-up, the main exercises and a cool-down, all from the "
     "catalog. Search for them together, in one turn: search_exercises with use "
     "MAIN_WORKOUT, WARM_UP and COOL_DOWN, each with available_equipment when the user "
-    "said what they have ([] for no equipment: bodyweight exercises need none), never "
-    "guessed from their training location, and difficulty "
+    "said what they have or their profile lists it ([] for no equipment: bodyweight "
+    "exercises need none), never guessed from their training location, and difficulty "
     "BEGINNER for a beginner. If the main results miss a region the focus needs, also "
-    "search use MAIN_WORKOUT with a muscle of it, such as Upper Back or Lats for a pull.\n"
+    "search use MAIN_WORKOUT with a muscle of it, such as Upper Back or Lats for a pull. "
+    "For a workout of one part of the body, search its muscle (Core for abs): a search "
+    "returns only some of its matches, the first of each movement, so choose across them "
+    "rather than from the first few.\n"
     "- Choose the main exercises first. Then each warm-up and cool-down activity must be "
     "CARDIO or list a muscle that one of your main exercises lists: Formiq rejects any "
     "other, such as a shoulder drill or a back stretch with a legs-only workout. Each "
@@ -383,7 +419,9 @@ COACH_INSTRUCTIONS = (
     "the conversation does not say which one they mean, ask which, naming them, with "
     "ASK_CLARIFICATION: never choose one for them, and Formiq refuses a revision of a "
     "plan they did not make clear. Tell them that approving it replaces that plan, and "
-    "name any exercise it keeps from it, and why.\n"
+    "name any exercise it keeps from it, and why. To only move a saved plan to another "
+    "day, propose it again with revision ADJUST, the same exercises and scheduled_date the "
+    "day the user named; if they named no day, ask which, and never choose one.\n"
     "- A proposal awaiting approval is not a saved plan until the user approves it in "
     "Formiq, and a saved plan is not just a recommendation: never call one the other. "
     "When the user asks about the workout you proposed (what it holds, why an exercise is "
@@ -394,7 +432,14 @@ COACH_INSTRUCTIONS = (
     "propose the changed workout.\n"
     "- A proposal saves nothing: present it as a suggestion to review and approve in "
     "Formiq, which saves it. Never say it is saved, and never take a yes in this "
-    "conversation as their approval.\n"
+    "conversation as their approval. Say what state a workout is in and no other: "
+    "proposed (made now, awaiting their approval), awaiting approval (made earlier, "
+    "still waiting), saved (a plan you read), not made (Formiq refused your proposal: say "
+    "so and why, and do not present or offer a workout). Never say you updated, adjusted, "
+    "applied or saved a workout, or that the user's plan was: you can only propose, and "
+    "only their approval in Formiq changes a saved plan. When your request is about one "
+    "plan and get_pending_proposal finds none for it, say there is none for that workout, "
+    "never that the user has none: other workouts of theirs may await approval.\n"
     "- Formiq shows the user the proposal itself: every exercise with its sets, reps or "
     "time and rest, the minutes each section takes, and its coverage. Do not list it "
     "again in the reply: in a few sentences, say what it works, why it fits them today "
@@ -525,11 +570,72 @@ def pending_note(pending: PendingProposal) -> str:
     )
 
 
+def target_note(plan_id: int) -> str:
+    """What the instructions say of the plan the request names: its number
+    only, never its name or anything else the user wrote."""
+    return (
+        f"Formiq's records for this request: the user opened their saved workout plan "
+        f"{plan_id} in Formiq to change it. When they say \"this workout\" or \"it\", they mean "
+        f"plan {plan_id}: read it with get_workout_plan (plan_id {plan_id}) before describing "
+        f"it, and do not ask which workout they mean. Propose a change to it with "
+        f"revises_plan_id {plan_id} and a revision (ADJUST for the changes they asked for, "
+        f"ALTERNATIVE for a different workout); approving it replaces plan {plan_id}. Formiq "
+        f"refuses a proposal that revises another plan, or none."
+    )
+
+
+@dataclass(frozen=True)
+class CoachDates:
+    """The calendar the request runs in, from Formiq's clock (app.tools.coach_calendar): today
+    for the user, the time zone it was worked out in, and whether the app sent that zone. Plain
+    values, never the user's text; the instructions tell them to the model (date_note) so it
+    never has to work a date out."""
+
+    today: date
+    timezone: str = "UTC"
+    # the app sent the time zone; otherwise it is Formiq's default, UTC
+    from_request: bool = False
+    # today and the days after it that the model is shown: the 14 a workout may be planned for
+    days: int = 15
+
+
+def date_note(dates: CoachDates) -> str:
+    """What the instructions say of the date: Formiq's calendar for the request, in plain
+    words and numbers of its own. The model is never left to infer today's date, and is told
+    what Formiq checks of the dates it gives."""
+    where = (
+        f"the user's time zone, {dates.timezone}, which their app sent"
+        if dates.from_request
+        else "UTC: the app sent no time zone, so these are UTC dates, which can be a day off "
+        "from the user's own"
+    )
+    listed = []
+    for offset in range(dates.days):
+        day = dates.today + timedelta(days=offset)
+        suffix = " (today)" if offset == 0 else " (tomorrow)" if offset == 1 else ""
+        listed.append(f"{day:%a} {day.isoformat()}{suffix}")
+    return (
+        "Formiq's calendar for this request, from Formiq's clock and never from the user's "
+        f"words: today is {dates.today:%A} {dates.today.isoformat()}, in {where}. The days from "
+        f"today: {', '.join(listed)}. Use these dates exactly and never work one out yourself: "
+        "\"tomorrow\" is the date marked tomorrow, and a weekday is the next one listed. When "
+        "you give scheduled_date, give the exact date of the day the user named. Formiq refuses "
+        "a day other than the one they named, and words that name no single day (\"the "
+        "weekend\", \"next week\", a weekday said on that same weekday, two days at once): do "
+        "not choose one, propose nothing and ask which day they mean (ASK_CLARIFICATION)."
+    )
+
+
 def coach_instructions(context: "CoachContext") -> str:
     """The instructions of a request the safety backstop did not flag."""
-    if context.pending_proposal is None:
-        return COACH_INSTRUCTIONS
-    return f"{COACH_INSTRUCTIONS}\n\n{pending_note(context.pending_proposal)}"
+    notes = []
+    if context.dates is not None:
+        notes.append(date_note(context.dates))
+    if context.target_plan_id is not None:
+        notes.append(target_note(context.target_plan_id))
+    if context.pending_proposal is not None:
+        notes.append(pending_note(context.pending_proposal))
+    return "\n\n".join([COACH_INSTRUCTIONS, *notes])
 
 
 @dataclass(frozen=True)
@@ -560,6 +666,69 @@ class CoachContext:
     # numbers from the same records, so the model reads it before answering
     # about it. It approves nothing either.
     pending_proposal: PendingProposal | None = None
+    # The saved plan the user opened the coach to change, from the request body
+    # through CoachService, which checked it is theirs and PLANNED: the one
+    # plan a proposal of this turn may revise (the tools refuse another), and
+    # an id the turn may use without the user having written it. Never taken
+    # from the model or the conversation.
+    target_plan_id: int | None = None
+    # How many other proposals of the user's await their approval that this request does not
+    # read (a request about one plan reads only the proposals that revise it), and the saved
+    # plans that the user's approvals saved, from Formiq's records when the request began:
+    # what a reply is held to when it speaks of where their workouts stand (app.agent.trust).
+    # Plain numbers, never from the model or the conversation; they approve nothing.
+    other_proposals_awaiting: int = 0
+    approved_plan_ids: frozenset[int] = frozenset()
+    # The calendar of the request (Phase 2.7): today for the user, from Formiq's clock in the
+    # time zone the app sent (or UTC), told to the model by the instructions so that it never
+    # works a date out. Never taken from the model or the conversation.
+    dates: CoachDates | None = None
+
+
+def lifecycle_of(
+    context: "CoachContext", earlier: Sequence[ToolResult], seen: Sequence[ToolResult]
+) -> Lifecycle:
+    """Where the user's workouts stand, for the reply check: from Formiq's records (the
+    context) and the turn's tool results. A proposal call that Formiq refused is no proposal:
+    only an accepted one (proposed()) is, whatever was called. The saved plans the turn read
+    are those the model saw (seen), PLANNED ones only."""
+    return Lifecycle(
+        refused=proposal_attempted(earlier) and not proposed(earlier),
+        others_awaiting=context.other_proposals_awaiting,
+        plans_read=saved_plans_read(seen),
+        approved_plans=context.approved_plan_ids,
+        target_plan_id=context.target_plan_id,
+    )
+
+
+def saved_plans_read(results: Iterable[ToolResult]) -> frozenset[int]:
+    """The ids of the PLANNED saved plans these results show: a plan read by id or as the
+    current one, and the plans a listing holds."""
+    found: set[int] = set()
+    for result in results:
+        output = result.result.get("output")
+        if result.call.name not in PLAN_READS or not isinstance(output, dict):
+            continue
+        items = output.get("plans") if result.call.name == "list_workout_plans" else [output]
+        for item in items if isinstance(items, list) else []:
+            plan_id = item.get("plan_id") if isinstance(item, dict) else None
+            if (
+                isinstance(plan_id, int)
+                and not isinstance(plan_id, bool)
+                and item.get("status") == "PLANNED"
+            ):
+                found.add(plan_id)
+    return frozenset(found)
+
+
+def known_ids_of(
+    context: "CoachContext", user_message: str, results: Iterable[ToolResult]
+) -> set[int]:
+    """The ids the turn may use (known_ids), and the plan the request names."""
+    ids = known_ids(user_message, results)
+    if context.target_plan_id is not None:
+        ids.add(context.target_plan_id)
+    return ids
 
 
 def coach_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, Any]:
@@ -845,6 +1014,24 @@ def tools_node(state: CoachState, runtime: Runtime[CoachContext]) -> dict[str, A
             recorded_changes=pending_proposal_changes(seen),
             length=proposal_length(earlier, seen, user_texts(state)),
             fitness=fitness_terms(state["user_message"], state["conversation"].size > 0),
+            lifecycle=lifecycle_of(context, earlier, seen),
+            # Formiq's own evidence for what a reply may call things (Phase 2.7): the workouts'
+            # names, so how one is quoted decides nothing; and what the record of the proposal
+            # awaiting approval supports calling it, when the user asked for no change
+            workout_names=workout_names([*earlier, *seen]),
+            # A proposal attempt is not evidence that a proposal exists.  It also must not
+            # erase independent evidence from get_pending_proposal: a failed/refused attempt
+            # can occur while an older recorded proposal still awaits approval.  The descriptor
+            # helper only reads successful pending-proposal output, so failed proposal results
+            # contribute nothing here.
+            pending_support=(
+                frozenset()
+                if asks_for_change(state["user_message"])
+                else pending_descriptors(seen)
+            ),
+            pending_names=(
+                () if asks_for_change(state["user_message"]) else pending_proposal_names(seen)
+            ),
         )  # fmt: skip
         if rejection is None:
             trace.terminate("decision_accepted")
@@ -1062,7 +1249,7 @@ def run_calls(
     is refused with those results in hand for the model (context_refusal), so the
     model never has to call for them, and may propose again."""
     results: dict[int, dict[str, Any]] = {}
-    known = known_ids(user_message, earlier)
+    known = known_ids_of(context, user_message, earlier)
     accepted = proposed(earlier)
     proposing = False
     runnable = []
@@ -1151,7 +1338,7 @@ def run_calls(
                     calls[index],
                     proposal_context_gap([*earlier, *holding]),
                     holding[len(runnable) :],
-                    known_ids(user_message, [*earlier, *holding]),
+                    known_ids_of(context, user_message, [*earlier, *holding]),
                 )
     finally:
         record_tool_results(
@@ -1420,6 +1607,10 @@ def check_respond(
     recorded_changes: Sequence[str] = (),
     length: ProposalLength | None = None,
     fitness: Sequence[str] = (),
+    lifecycle: Lifecycle | None = None,
+    workout_names: Sequence[str] = (),
+    pending_support: frozenset[str] = frozenset(),
+    pending_names: Sequence[str] = (),
 ) -> tuple[Respond | None, str | None]:
     """The respond call's arguments, and why its decision cannot end the turn
     (None when it can): the decision policy, the safety policy, then the reply
@@ -1501,6 +1692,10 @@ def check_respond(
             not_done=undone_exercises(results),
             # the user is shown the proposal only with an answer
             length=length if respond.decision in ANSWERS else None,
+            lifecycle=lifecycle,
+            workout_names=workout_names,
+            pending_support=pending_support,
+            pending_names=pending_names,
         )
         reply_check.content(
             input=respond.reply, output={"accepted": rejection is None, "rejection": rejection}

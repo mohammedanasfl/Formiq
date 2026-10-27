@@ -118,8 +118,9 @@ POLICY: dict[Intent, IntentPolicy] = {
     ),
     Intent.WORKOUT_PLAN: IntentPolicy(
         "The user's workout plans: what one prescribes, which plans they have, the "
-        "workout you proposed that awaits their approval, or the workout you propose "
-        "in this turn.",
+        "workout you proposed that awaits their approval, a workout they ask you to make "
+        "(for a part of the body, a length of time, a place or a level), or the workout "
+        "you propose in this turn.",
         # propose_workout_plan counts only when Formiq accepted the proposal (its
         # result is data): it is the workout the user is shown, which no read can
         # return yet, since a proposal is kept only once the turn ends. A user with
@@ -142,7 +143,8 @@ POLICY: dict[Intent, IntentPolicy] = {
         frozenset({Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
     ),
     Intent.EXERCISE: IntentPolicy(
-        "Facts about exercises, or finding exercises in the Formiq catalog.",
+        "Facts about exercises, or finding exercises in the Formiq catalog: not a request "
+        "for a workout, which is WORKOUT_PLAN and is answered with a proposal.",
         frozenset({"get_exercise", "search_exercises"}),
         frozenset({Decision.ANSWER, Decision.RETRIEVE_THEN_ANSWER}) | _FALLBACKS,
     ),
@@ -591,6 +593,141 @@ def pending_proposal_changes(results: Iterable[ToolResult]) -> tuple[str, ...]:
                 if isinstance(name, str) and name:
                     names.append(name)
     return tuple(dict.fromkeys(names))
+
+
+def workout_names(results: Iterable[ToolResult]) -> tuple[str, ...]:
+    """What the turn's workouts are called: the names in the results the model saw (saved
+    plans, the proposal awaiting approval, a proposal Formiq accepted, the plan a proposal
+    revises) and the name the model itself gave a proposal it made, accepted or refused. A reply
+    may call a workout by its name however it is quoted or punctuated ("Core & Abs Focus",
+    'Core and Abs Focus (Harder)'): the reply check reads each of these as one thing, a named
+    workout, never as the words between "your" and "workout" (app.agent.trust.normalize_claims).
+    Only Formiq's records and the model's own arguments: never the user's text."""
+    found: list[str] = []
+
+    def keep(value: Any) -> None:
+        if isinstance(value, str) and len(value.strip()) >= 3:
+            found.append(" ".join(value.split()))
+
+    for result in results:
+        if result.call.name == "propose_workout_plan":
+            keep(result.call.arguments.get("name"))
+        output = result.result.get("output")
+        if not isinstance(output, dict):
+            continue
+        keep(output.get("name"))
+        for plan in output.get("plans") or []:
+            keep(plan.get("name") if isinstance(plan, dict) else None)
+        revision = output.get("revision")
+        if isinstance(revision, dict):
+            keep(revision.get("replaces_plan_name"))
+        changes = output.get("changes")
+        if isinstance(changes, dict):
+            keep(changes.get("compared_with_plan_name"))
+    return tuple(dict.fromkeys(found))
+
+
+def pending_proposal_names(results: Iterable[ToolResult]) -> tuple[str, ...]:
+    """The names a successfully read pending proposal may truthfully be called.
+
+    A revision can be called by its proposed name or the saved plan it replaces. These stay
+    separate from ``workout_names``: that contains every workout the turn read, while only these
+    names identify the proposal that still awaits approval. Failed calls contribute nothing
+    because ``shown_pending_proposals`` accepts only successful pending-proposal output.
+    """
+    found: list[str] = []
+
+    def keep(value: Any) -> None:
+        if isinstance(value, str) and len(value.strip()) >= 3:
+            found.append(" ".join(value.split()))
+
+    for output in shown_pending_proposals(results):
+        keep(output.get("name"))
+        revision = output.get("revision")
+        if isinstance(revision, dict):
+            keep(revision.get("replaces_plan_name"))
+        changes = output.get("changes")
+        if isinstance(changes, dict):
+            keep(changes.get("compared_with_plan_name"))
+    return tuple(dict.fromkeys(found))
+
+
+_AMOUNT = {
+    "sets": re.compile(r"(\d+)\s+sets?\b"),
+    "reps": re.compile(r"(\d+)\s+reps?\b"),
+    "weight": re.compile(r"(\d+(?:\.\d+)?)\s*kg\b"),
+    "time": re.compile(r"(\d+)\s*s\b(?!\s+rest)"),
+}
+# what a revision may be called, whatever it changed: it is a changed version of a saved plan
+_REVISION_WORDS = frozenset(
+    {"updated", "revised", "changed", "modified", "adjusted", "edited", "altered", "amended",
+     "refined", "tweaked", "reworked"}
+)  # fmt: skip
+_NEW_WORDS = frozenset({"new", "fresh", "another", "alternative", "different", "replacement"})
+
+
+def pending_descriptors(results: Iterable[ToolResult]) -> frozenset[str]:
+    """The words Formiq's own record of the proposal awaiting approval supports for describing
+    it as new, changed, harder, shorter and the like, from what the turn read of it
+    (get_pending_proposal): the words of its name, the generic words for what it is (a revision
+    of a saved plan is an updated, revised, changed plan; a new workout is a new one), and the
+    direction of what its comparison with the saved plan records, when everything that changed
+    moved the same way (more sets, reps or weight, an exercise added: harder; fewer, an exercise
+    removed: easier and shorter; a mixture: neither). A reply that calls
+    the pending proposal "the harder version" while saying it awaits approval is describing it,
+    and is right exactly when the record says so; a word the record does not support is the
+    model's own, and stays a claim of a version that was never made. Empty when the turn read
+    no such proposal."""
+    words: set[str] = set()
+    for output in shown_pending_proposals(results):
+        words.update(re.findall(r"[a-z]+", str(output.get("name", "")).casefold()))
+        revision = output.get("revision")
+        if isinstance(revision, dict):
+            words |= _REVISION_WORDS
+            if revision.get("kind") == "ALTERNATIVE":
+                words |= _NEW_WORDS
+        else:
+            words |= _NEW_WORDS
+        changes = output.get("changes")
+        if not isinstance(changes, dict):
+            continue
+        # which way the proposal moved from the saved plan, field by field: a direction is
+        # supported only when everything that changed moved the same way ("harder" is not true of
+        # a revision with more sets and fewer reps, nor is "easier")
+        up: set[str] = set()
+        down: set[str] = set()
+        if changes.get("added"):
+            up.add("exercises")
+        if changes.get("removed"):
+            down.add("exercises")
+        for item in changes.get("changed") or []:
+            if not isinstance(item, dict):
+                continue
+            for kind, pattern in _AMOUNT.items():
+                before = pattern.search(str(item.get("before") or ""))
+                after = pattern.search(str(item.get("after") or ""))
+                if kind == "weight" and after is None and before is not None:
+                    down.add("weight")
+                    continue
+                if before is None or after is None:
+                    continue
+                if float(after.group(1)) > float(before.group(1)):
+                    up.add(kind)
+                elif float(after.group(1)) < float(before.group(1)):
+                    down.add(kind)
+        if up and not down:
+            words |= {"harder", "bigger"}
+            if up & {"exercises", "sets", "reps", "time"}:
+                words.add("longer")
+            if "weight" in up:
+                words.add("heavier")
+        if down and not up:
+            words |= {"easier", "simpler"}
+            if down & {"exercises", "sets", "reps", "time"}:
+                words.add("shorter")
+            if "weight" in down:
+                words.add("lighter")
+    return frozenset(words)
 
 
 # the time a user says they have: "40 minutes", "25-30 min", "an hour and a half" is not read

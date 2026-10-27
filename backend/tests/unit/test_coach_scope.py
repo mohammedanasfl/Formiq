@@ -50,7 +50,7 @@ def profile_tools():
         weight_kg=60.0, gender="female", fitness_experience="beginner", goal="fat_loss",
         target_weight_kg=None, goal_period_weeks=None, training_frequency_per_week=3,
         training_location="home", activity_level="moderate", sleep_hours=7.0,
-        dietary_preference=None, email=EMAIL, phone=PHONE,
+        dietary_preference=None, email=EMAIL, phone=PHONE, no_equipment=False, equipment=[],
     )  # fmt: skip
     users, profiles = Mock(), Mock()
     users.get_user_by_id.return_value = user

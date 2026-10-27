@@ -1,0 +1,487 @@
+{
+  "none": {
+    "proposals": []
+  },
+  "one": {
+    "proposals": [
+      {
+        "proposal_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "binding": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "expires_at": "2026-10-22T12:30:00Z",
+        "name": "Core Stability & Abs",
+        "scheduled_date": "2026-10-22",
+        "exercises": [
+          {
+            "exercise_order": 1,
+            "section": "WARM_UP",
+            "exercise_id": 7,
+            "exercise_name": "Cat-Cow Stretch",
+            "equipment": [],
+            "sets": 1,
+            "reps": null,
+            "duration_seconds": 40,
+            "rest_seconds": null,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 2,
+            "section": "MAIN_WORKOUT",
+            "exercise_id": 11,
+            "exercise_name": "Plank",
+            "equipment": [],
+            "sets": 3,
+            "reps": null,
+            "duration_seconds": 30,
+            "rest_seconds": 45,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 3,
+            "section": "MAIN_WORKOUT",
+            "exercise_id": 12,
+            "exercise_name": "Dead Bug",
+            "equipment": [
+              "Exercise Mat"
+            ],
+            "sets": 3,
+            "reps": 10,
+            "duration_seconds": null,
+            "rest_seconds": 45,
+            "weight_kg": null,
+            "notes": "Slow and controlled"
+          },
+          {
+            "exercise_order": 4,
+            "section": "MAIN_WORKOUT",
+            "exercise_id": 13,
+            "exercise_name": "Goblet Squat",
+            "equipment": [
+              "Kettlebell"
+            ],
+            "sets": 3,
+            "reps": 10,
+            "duration_seconds": null,
+            "rest_seconds": 60,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 5,
+            "section": "COOL_DOWN",
+            "exercise_id": 9,
+            "exercise_name": "Child's Pose",
+            "equipment": [],
+            "sets": 1,
+            "reps": null,
+            "duration_seconds": 45,
+            "rest_seconds": null,
+            "weight_kg": null,
+            "notes": null
+          }
+        ],
+        "warm_up_minutes": 1,
+        "main_minutes": 14,
+        "cool_down_minutes": 1,
+        "estimated_minutes": 16,
+        "coverage": {
+          "complete": true,
+          "focus": "CORE",
+          "trained_regions": [
+            "CORE"
+          ],
+          "missing_regions": [],
+          "main_exercises_counted": 3,
+          "main_exercises_required": 3,
+          "limitations": []
+        },
+        "revision": {
+          "replaces_plan_id": 41,
+          "replaces_plan_name": "Core & Abs Focus",
+          "kind": "ADJUST",
+          "kept_exercises": [
+            "Plank",
+            "Goblet Squat"
+          ],
+          "replaces_plan_estimated_minutes": 17
+        },
+        "changes": {
+          "compared_with_plan_id": 41,
+          "compared_with_plan_name": "Core & Abs Focus",
+          "compared_with_scheduled_date": "2026-10-22",
+          "added": [
+            {
+              "section": "MAIN_WORKOUT",
+              "exercise_name": "Dead Bug",
+              "before": null,
+              "after": {
+                "sets": 3,
+                "reps": 10,
+                "duration_seconds": null,
+                "rest_seconds": 45,
+                "weight_kg": null,
+                "summary": "3 sets of 10 reps, 45 s rest"
+              }
+            }
+          ],
+          "removed": [
+            {
+              "section": "MAIN_WORKOUT",
+              "exercise_name": "Bicycle Crunch",
+              "before": {
+                "sets": 3,
+                "reps": 20,
+                "duration_seconds": null,
+                "rest_seconds": 45,
+                "weight_kg": null,
+                "summary": "3 sets of 20 reps, 45 s rest"
+              },
+              "after": null
+            }
+          ],
+          "changed": [
+            {
+              "section": "WARM_UP",
+              "exercise_name": "Cat-Cow Stretch",
+              "before": {
+                "sets": 1,
+                "reps": null,
+                "duration_seconds": 30,
+                "rest_seconds": null,
+                "weight_kg": null,
+                "summary": "1 set of 30 s"
+              },
+              "after": {
+                "sets": 1,
+                "reps": null,
+                "duration_seconds": 40,
+                "rest_seconds": null,
+                "weight_kg": null,
+                "summary": "1 set of 40 s"
+              }
+            },
+            {
+              "section": "MAIN_WORKOUT",
+              "exercise_name": "Goblet Squat",
+              "before": {
+                "sets": 3,
+                "reps": 10,
+                "duration_seconds": null,
+                "rest_seconds": 60,
+                "weight_kg": 20.0,
+                "summary": "3 sets of 10 reps at 20 kg, 60 s rest"
+              },
+              "after": {
+                "sets": 3,
+                "reps": 10,
+                "duration_seconds": null,
+                "rest_seconds": 60,
+                "weight_kg": null,
+                "summary": "3 sets of 10 reps, 60 s rest"
+              }
+            }
+          ],
+          "unchanged": [
+            "Plank",
+            "Child's Pose"
+          ],
+          "name_changed": true,
+          "scheduled_date_changed": false,
+          "identical": false
+        },
+        "created_at": "2026-10-22T12:00:00Z"
+      }
+    ]
+  },
+  "two": {
+    "proposals": [
+      {
+        "proposal_id": "cccccccccccccccccccccccccccccccc",
+        "binding": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "expires_at": "2026-10-22T12:40:00Z",
+        "name": "Bodyweight Basics",
+        "scheduled_date": "2026-10-23",
+        "exercises": [
+          {
+            "exercise_order": 1,
+            "section": "WARM_UP",
+            "exercise_id": 21,
+            "exercise_name": "Arm Circles",
+            "equipment": [],
+            "sets": 1,
+            "reps": 10,
+            "duration_seconds": null,
+            "rest_seconds": null,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 2,
+            "section": "MAIN_WORKOUT",
+            "exercise_id": 22,
+            "exercise_name": "Push-Up",
+            "equipment": [],
+            "sets": 3,
+            "reps": 12,
+            "duration_seconds": null,
+            "rest_seconds": 60,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 3,
+            "section": "MAIN_WORKOUT",
+            "exercise_id": 23,
+            "exercise_name": "Resistance Band Row",
+            "equipment": [
+              "Resistance Band"
+            ],
+            "sets": 3,
+            "reps": 12,
+            "duration_seconds": null,
+            "rest_seconds": 60,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 4,
+            "section": "MAIN_WORKOUT",
+            "exercise_id": 24,
+            "exercise_name": "Bird Dog",
+            "equipment": [],
+            "sets": 3,
+            "reps": 10,
+            "duration_seconds": null,
+            "rest_seconds": 60,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 5,
+            "section": "COOL_DOWN",
+            "exercise_id": 25,
+            "exercise_name": "Doorway Chest Stretch",
+            "equipment": [],
+            "sets": 2,
+            "reps": null,
+            "duration_seconds": 30,
+            "rest_seconds": null,
+            "weight_kg": null,
+            "notes": "Each side"
+          }
+        ],
+        "warm_up_minutes": 1,
+        "main_minutes": 16,
+        "cool_down_minutes": 1,
+        "estimated_minutes": 18,
+        "coverage": {
+          "complete": true,
+          "focus": "FULL_BODY",
+          "trained_regions": [
+            "UPPER_PUSH",
+            "UPPER_PULL",
+            "CORE"
+          ],
+          "missing_regions": [
+            "LOWER_BODY"
+          ],
+          "main_exercises_counted": 3,
+          "main_exercises_required": 4,
+          "limitations": []
+        },
+        "revision": null,
+        "changes": null,
+        "created_at": "2026-10-22T12:10:00Z"
+      },
+      {
+        "proposal_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "binding": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "expires_at": "2026-10-22T12:30:00Z",
+        "name": "Core Stability & Abs",
+        "scheduled_date": "2026-10-22",
+        "exercises": [
+          {
+            "exercise_order": 1,
+            "section": "WARM_UP",
+            "exercise_id": 7,
+            "exercise_name": "Cat-Cow Stretch",
+            "equipment": [],
+            "sets": 1,
+            "reps": null,
+            "duration_seconds": 40,
+            "rest_seconds": null,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 2,
+            "section": "MAIN_WORKOUT",
+            "exercise_id": 11,
+            "exercise_name": "Plank",
+            "equipment": [],
+            "sets": 3,
+            "reps": null,
+            "duration_seconds": 30,
+            "rest_seconds": 45,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 3,
+            "section": "MAIN_WORKOUT",
+            "exercise_id": 12,
+            "exercise_name": "Dead Bug",
+            "equipment": [
+              "Exercise Mat"
+            ],
+            "sets": 3,
+            "reps": 10,
+            "duration_seconds": null,
+            "rest_seconds": 45,
+            "weight_kg": null,
+            "notes": "Slow and controlled"
+          },
+          {
+            "exercise_order": 4,
+            "section": "MAIN_WORKOUT",
+            "exercise_id": 13,
+            "exercise_name": "Goblet Squat",
+            "equipment": [
+              "Kettlebell"
+            ],
+            "sets": 3,
+            "reps": 10,
+            "duration_seconds": null,
+            "rest_seconds": 60,
+            "weight_kg": null,
+            "notes": null
+          },
+          {
+            "exercise_order": 5,
+            "section": "COOL_DOWN",
+            "exercise_id": 9,
+            "exercise_name": "Child's Pose",
+            "equipment": [],
+            "sets": 1,
+            "reps": null,
+            "duration_seconds": 45,
+            "rest_seconds": null,
+            "weight_kg": null,
+            "notes": null
+          }
+        ],
+        "warm_up_minutes": 1,
+        "main_minutes": 14,
+        "cool_down_minutes": 1,
+        "estimated_minutes": 16,
+        "coverage": {
+          "complete": true,
+          "focus": "CORE",
+          "trained_regions": [
+            "CORE"
+          ],
+          "missing_regions": [],
+          "main_exercises_counted": 3,
+          "main_exercises_required": 3,
+          "limitations": []
+        },
+        "revision": {
+          "replaces_plan_id": 41,
+          "replaces_plan_name": "Core & Abs Focus",
+          "kind": "ADJUST",
+          "kept_exercises": [
+            "Plank",
+            "Goblet Squat"
+          ],
+          "replaces_plan_estimated_minutes": 17
+        },
+        "changes": {
+          "compared_with_plan_id": 41,
+          "compared_with_plan_name": "Core & Abs Focus",
+          "compared_with_scheduled_date": "2026-10-22",
+          "added": [
+            {
+              "section": "MAIN_WORKOUT",
+              "exercise_name": "Dead Bug",
+              "before": null,
+              "after": {
+                "sets": 3,
+                "reps": 10,
+                "duration_seconds": null,
+                "rest_seconds": 45,
+                "weight_kg": null,
+                "summary": "3 sets of 10 reps, 45 s rest"
+              }
+            }
+          ],
+          "removed": [
+            {
+              "section": "MAIN_WORKOUT",
+              "exercise_name": "Bicycle Crunch",
+              "before": {
+                "sets": 3,
+                "reps": 20,
+                "duration_seconds": null,
+                "rest_seconds": 45,
+                "weight_kg": null,
+                "summary": "3 sets of 20 reps, 45 s rest"
+              },
+              "after": null
+            }
+          ],
+          "changed": [
+            {
+              "section": "WARM_UP",
+              "exercise_name": "Cat-Cow Stretch",
+              "before": {
+                "sets": 1,
+                "reps": null,
+                "duration_seconds": 30,
+                "rest_seconds": null,
+                "weight_kg": null,
+                "summary": "1 set of 30 s"
+              },
+              "after": {
+                "sets": 1,
+                "reps": null,
+                "duration_seconds": 40,
+                "rest_seconds": null,
+                "weight_kg": null,
+                "summary": "1 set of 40 s"
+              }
+            },
+            {
+              "section": "MAIN_WORKOUT",
+              "exercise_name": "Goblet Squat",
+              "before": {
+                "sets": 3,
+                "reps": 10,
+                "duration_seconds": null,
+                "rest_seconds": 60,
+                "weight_kg": 20.0,
+                "summary": "3 sets of 10 reps at 20 kg, 60 s rest"
+              },
+              "after": {
+                "sets": 3,
+                "reps": 10,
+                "duration_seconds": null,
+                "rest_seconds": 60,
+                "weight_kg": null,
+                "summary": "3 sets of 10 reps, 60 s rest"
+              }
+            }
+          ],
+          "unchanged": [
+            "Plank",
+            "Child's Pose"
+          ],
+          "name_changed": true,
+          "scheduled_date_changed": false,
+          "identical": false
+        },
+        "created_at": "2026-10-22T12:00:00Z"
+      }
+    ]
+  }
+}

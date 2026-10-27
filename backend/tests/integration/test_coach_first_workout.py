@@ -91,8 +91,11 @@ def test_approving_the_first_workout_saves_one_plan_once(
 
     # not the user it was made for: no such proposal
     assert approve(client, other, card).status_code == 404
-    assert approve(client, me, card).status_code == 201
-    assert approve(client, me, card).status_code == 409
+    first = approve(client, me, card)
+    assert first.status_code == 201
+    # a repeated approval saves nothing more: it returns the plan the first one saved
+    again = approve(client, me, card)
+    assert (again.status_code, again.json()) == (200, first.json())
 
     with Session(test_engine) as session:
         plans = session.scalars(select(WorkoutPlan).where(WorkoutPlan.user_id == me)).all()

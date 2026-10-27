@@ -6,6 +6,7 @@ from app.models.muscle_group import MuscleGroup
 from app.models.user import User
 from app.models.user_credential import UserCredential
 from app.models.user_profile import UserProfile
+from app.models.user_profile_equipment import user_profile_equipment
 from app.models.workout_plan import WorkoutPlan
 from app.models.workout_plan_exercise import WorkoutPlanExercise
 from app.models.workout_plan_proposal import WorkoutPlanProposal
@@ -17,6 +18,7 @@ __all__ = [
     "User",
     "UserCredential",
     "UserProfile",
+    "user_profile_equipment",
     "Exercise",
     "MuscleGroup",
     "ExerciseMuscle",

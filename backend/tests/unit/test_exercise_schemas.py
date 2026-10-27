@@ -64,7 +64,7 @@ UPSTREAM_RECORD = {
 @pytest.mark.parametrize(
     ("enum", "values"),
     [
-        (Difficulty, ["BEGINNER", "INTERMEDIATE", "ADVANCED"]),
+        (Difficulty, ["BEGINNER", "INTERMEDIATE", "ADVANCED", "UNRATED"]),
         (
             MovementPattern,
             [
@@ -85,7 +85,7 @@ UPSTREAM_RECORD = {
         ),
         (MuscleRole, ["PRIMARY", "SECONDARY"]),
         (WorkoutSection, ["WARM_UP", "MAIN_WORKOUT", "COOL_DOWN"]),
-        (ExerciseSource, ["FORMIQ", "FREE_EXERCISE_DB"]),
+        (ExerciseSource, ["FORMIQ", "FREE_EXERCISE_DB", "EXERCISES_DATASET"]),
     ],
 )
 def test_enums_have_the_allowed_values(enum, values):

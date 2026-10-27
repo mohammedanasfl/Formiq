@@ -14,8 +14,8 @@ import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
-from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any, NamedTuple
+from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
@@ -49,7 +49,20 @@ from app.schemas.exercise import (
 )
 from app.schemas.workout_plan import PlanSection, WorkoutPlanFilters, WorkoutPlanStatus
 from app.tools import completeness
-from app.tools.completeness import FOCUS_RULES, REGION_MUSCLES, REGION_NAMES
+from app.tools.comparison import (
+    plan_rows,
+    proposed_rows,
+    tool_changes,
+    workout_changes,
+    workout_minutes,
+)
+from app.tools.completeness import (
+    FOCUS_RULES,
+    REGION_MUSCLES,
+    REGION_NAMES,
+    movers,
+    regions_named,
+)
 from app.tools.declarations import TOOL_DECLARATIONS
 from app.tools.equipment import (
     NO_EQUIPMENT,
@@ -61,7 +74,6 @@ from app.tools.equipment import (
 from app.tools.errors import ToolError, ToolErrorCode
 from app.tools.exercise_names import name_matches, name_words
 from app.tools.limits import (
-    DEFAULT_REST_SECONDS,
     MAX_ACTIVITY_SETS,
     MAX_EXECUTED_TOOL_CALLS_PER_TURN,
     MAX_EXERCISES,
@@ -75,15 +87,16 @@ from app.tools.limits import (
     MAX_SECTION_MINUTES,
     MAX_SETS,
     MAX_STRETCH_HOLD_SECONDS,
-    MAX_TEXT_LENGTH,
     MIN_COUNTED_SETS,
-    SECONDS_PER_REP,
-    SET_SECONDS,
+    clip,
 )
 from app.tools.muscles import muscles_named
+from app.tools.proposal_view import ProposalViewBuilder
+from app.schemas.timezone import zone_of
+from app.tools.coach_calendar import CoachCalendar, calendar_at
+from app.tools.schedule import DayReading, is_date_only_request, read_requested_day
 from app.tools.schemas import (
     CurrentWorkoutPlanOutput,
-    ExerciseChangeOutput,
     ExerciseOutput,
     ExerciseSummaryOutput,
     GetCurrentWorkoutPlanInput,
@@ -107,16 +120,22 @@ from app.tools.schemas import (
     ProposedExerciseOutput,
     ProposedWorkoutPlanOutput,
     ProposeWorkoutPlanInput,
+    SavedEquipmentOutput,
     SearchExercisesInput,
     SearchExercisesOutput,
     SessionExerciseOutput,
     UserProfileOutput,
     UserScopedInput,
-    WorkoutChangesOutput,
     WorkoutPlanListOutput,
     WorkoutPlanOutput,
     WorkoutSessionOutput,
     WorkoutSetOutput,
+)
+from app.tools.weights import (
+    asks_for_no_weight,
+    rests_on_the_user,
+    same_weight,
+    stated_weights,
 )
 
 if TYPE_CHECKING:
@@ -132,13 +151,6 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
-
-
-def clip(text: str | None) -> str | None:
-    """The text, cut to MAX_TEXT_LENGTH characters."""
-    if text is None or len(text) <= MAX_TEXT_LENGTH:
-        return text
-    return text[: MAX_TEXT_LENGTH - 1] + "…"
 
 
 def error_result(
@@ -170,6 +182,9 @@ GENERAL_ACTIVITIES = frozenset({MovementPattern.CARDIO})
 # lifts first (most_relevant).
 SPECIALISED_CATEGORIES = frozenset({"plyometrics", "olympic weightlifting", "strongman"})
 SECTION_NAMES = {WARM_UP: "warm-up", MAIN: "main workout", COOL_DOWN: "cool-down"}
+# The difficulties a beginner's workout does not hold: too hard, or with no level to
+# judge it by (UNRATED: the exercise's source gives none, and Formiq does not guess).
+NOT_FOR_BEGINNERS = frozenset({Difficulty.ADVANCED, Difficulty.UNRATED})
 
 # What an unknown name in available_equipment is answered with, after the
 # catalog's names: a model that guessed the user's equipment (from a gym
@@ -185,8 +200,10 @@ class FormiqTools:
 
     User-scoped tools read only the data of the user given to run(), which
     comes from the coach request: the model cannot name another user. The
-    current plan and the last workout are found relative to today, the
-    request's date unless one is given.
+    current plan and the last workout are found relative to today: the user's
+    local day in the time zone the request gave (self.calendar,
+    app.tools.coach_calendar), or the UTC day when it gave none; a date may be
+    given instead (tests).
 
     Proposed plans are kept in proposals for the coach's reply, made on
     proposal_terms (Formiq's clock and how long a proposal waits); without
@@ -213,18 +230,38 @@ class FormiqTools:
         catalog: "ExerciseCatalogService",
         end_read: Callable[[], None],
         today: date | None = None,
+        timezone: str | None = None,
         proposal_terms: ProposalTerms | None = None,
         pending_proposals: "PlanProposalService | None" = None,
         conversation: Sequence[tuple[str, str]] | None = None,
         stated: StatedEquipment | None = None,
+        target_plan_id: int | None = None,
     ) -> None:
         self.users = users
         self.profiles = profiles
         self.plans = plans
         self.sessions = sessions
         self.catalog = catalog
-        self.today = today if today is not None else utc_today()
         self.proposal_terms = proposal_terms
+        # The calendar every date here is in (Phase 2.7): the user's local day when the request
+        # gave a time zone, else the UTC day. today and timezone are never mixed: the date given
+        # is read in the zone given, and a zone with no date is worked out from Formiq's clock.
+        if timezone is not None and zone_of(timezone) is None:
+            raise ValueError(f"{timezone!r} is not an IANA time zone")
+        if today is None:
+            today = (
+                utc_today()
+                if timezone is None
+                else calendar_at(
+                    proposal_terms.clock() if proposal_terms else datetime.now(UTC), timezone
+                ).today
+            )
+        self.today = today
+        self.calendar = CoachCalendar(
+            today=today,
+            timezone=timezone or "UTC",
+            source="default" if timezone is None else "request",
+        )
         # the user's proposals awaiting approval, read for the user of the
         # request only (get_pending_proposal); None: none can be read
         self.pending_proposals = pending_proposals
@@ -234,6 +271,10 @@ class FormiqTools:
         # workout search (app.tools.equipment), and a revision must be of a
         # plan it makes clear.
         self.conversation = conversation
+        # The saved plan the user opened the coach to change, from the request
+        # (CoachService checked it is theirs and PLANNED): a proposal in this
+        # request revises it, or none is made, whatever the conversation says.
+        self.target_plan_id = target_plan_id
         self.user_words = (
             None
             if conversation is None
@@ -349,7 +390,9 @@ class FormiqTools:
                 ToolErrorCode.PROFILE_NOT_FOUND, "the user has not created a fitness profile"
             )
         return UserProfileOutput(
-            user_id=request.user_id, profile=ProfileOutput.model_validate(profile)
+            user_id=request.user_id,
+            profile=ProfileOutput.model_validate(profile),
+            equipment=saved_equipment_output(profile),
         )
 
     def get_workout_plan(self, request: GetWorkoutPlanInput) -> WorkoutPlanOutput:
@@ -423,15 +466,31 @@ class FormiqTools:
         """The workout proposal of the user's that awaits their approval: the
         one Formiq showed them last, from its records, for the user of the
         request only. It is read, never changed."""
-        waiting = (
-            [] if self.pending_proposals is None
-            else self.pending_proposals.awaiting_approval(request.user_id)
-        )  # fmt: skip
+        waiting = self._waiting(request.user_id)
         if not waiting:
+            # a request about a plan is told it is that plan's proposal that is missing:
+            # another plan's, which the user may still approve, is not read for it
+            about = (
+                ""
+                if self.target_plan_id is None
+                else f" for workout plan {self.target_plan_id}"
+            )
+            elsewhere = ""
+            if self.target_plan_id is not None and self.pending_proposals is not None:
+                # said so the reply never turns "none for this workout" into "none at all"
+                others = len(self.pending_proposals.awaiting_approval(request.user_id))
+                if others:
+                    elsewhere = (
+                        f"; the user does have {others} other workout "
+                        f"{'proposal' if others == 1 else 'proposals'} awaiting approval, for "
+                        "other workouts, which this request does not read: say only that none "
+                        "was made for this workout, never that they have none"
+                    )
             raise ToolError(
                 ToolErrorCode.RESOURCE_NOT_FOUND,
-                "the user has no workout proposal awaiting approval: none was made, or it was "
-                "approved or expired; there is no id to ask for",
+                f"the user has no workout proposal awaiting approval{about}: none was made"
+                f"{' for it' if about else ''}, or it was approved, rejected or expired, or can "
+                f"no longer be approved; there is no id to ask for{elsewhere}",
             )
         stored = waiting[0]
         output = self._pending_output(request.user_id, stored, earlier=len(waiting) - 1)
@@ -458,138 +517,47 @@ class FormiqTools:
             )  # fmt: skip
         return output
 
+    def _waiting(self, user_id: int, revising: int | None = None) -> list[Any]:
+        """The proposals awaiting the user's approval that this request may read
+        and show again (PlanProposalService.approvable: what the user could still
+        approve), the latest first. A request that names a plan (target_plan_id) is
+        about that plan: only a proposal that revises it, a newer version of its
+        workout, is read; a new workout or another plan's revision is not, though
+        the user may still approve it themselves. With revising, only the
+        proposals that revise that plan."""
+        if self.pending_proposals is None:
+            return []
+        plan = self.target_plan_id if revising is None else revising
+        return self.pending_proposals.awaiting_approval(user_id, revising=plan)
+
     def _pending_output(self, user_id: int, stored: Any, *, earlier: int) -> PendingProposalOutput:
-        values = stored.parameters
-        exercises = []
-        for kept in sorted(values["exercises"], key=lambda item: item["exercise_order"]):
-            exercise = self.catalog.get_exercise_by_id(kept["exercise_id"])
-            exercises.append(
-                ProposedExerciseOutput(
-                    exercise_order=kept["exercise_order"],
-                    section=kept["section"],
-                    exercise_id=kept["exercise_id"],
-                    exercise_name=exercise.name
-                    if exercise is not None
-                    else f"exercise {kept['exercise_id']}",
-                    equipment=[]
-                    if exercise is None
-                    else [item.name for item in exercise.equipment],
-                    sets=kept["sets"],
-                    reps=kept.get("reps"),
-                    duration_seconds=kept.get("duration_seconds"),
-                    rest_seconds=kept.get("rest_seconds"),
-                    notes=clip(kept.get("notes")),
-                )
+        view = ProposalViewBuilder(self.catalog, self.plans).stored(user_id, stored.parameters)
+        changes = unchanged = None
+        if view.replaces_plan_id is not None:
+            # a plan the user no longer has leaves nothing to compare with, and an approval fails
+            unchanged = view.replaced is not None and view.replaced.unchanged
+            if view.replaced is not None:
+                changes = tool_changes(view.replaced.changes)
+        elif (current := self.plans.get_current_plan(user_id, self.today)) is not None:
+            changes = workout_changes(
+                proposed_rows(view.exercises), view.name, view.scheduled_date, current
             )
-        minutes = {
-            section: section_minutes(item for item in exercises if item.section is section)
-            for section in PlanSection
-        }
-        scheduled = date.fromisoformat(values["scheduled_date"])
-        coverage = None
-        if (focus := values.get("focus")) is not None:
-            coverage = self._recorded_coverage(
-                SessionFocus(focus),
-                [item for item in exercises if item.section is MAIN],
-                values.get("max_minutes"),
-            )
-        revision = changes = unchanged = None
-        replaced_id = values.get("replaces_plan_id")
-        compared = None
-        if replaced_id is not None:
-            compared = self.plans.get_plan(user_id, replaced_id)
-            unchanged = (
-                compared is not None
-                and compared.status == WorkoutPlanStatus.PLANNED
-                and self.plans.version_of(compared) == values.get("replaces_plan_digest")
-            )
-            if compared is not None and values.get("revision") is not None:
-                before = {
-                    completeness.name_key(row.name)
-                    for row in plan_rows(compared)
-                    if row.section is MAIN
-                }
-                revision = ProposalRevision(
-                    replaces_plan_id=compared.id,
-                    replaces_plan_name=compared.name,
-                    kind=values["revision"],
-                    kept_exercises=[
-                        item.exercise_name
-                        for item in exercises
-                        if item.section is MAIN
-                        and completeness.name_key(item.exercise_name) in before
-                    ],
-                )
-        else:
-            compared = self.plans.get_current_plan(user_id, self.today)
-        if compared is not None:
-            changes = workout_changes(proposed_rows(exercises), values["name"], scheduled, compared)
         now = self.proposal_terms.clock() if self.proposal_terms else datetime.now(UTC)
         return PendingProposalOutput(
-            name=values["name"],
-            scheduled_date=scheduled,
-            days_from_today=(scheduled - self.today).days,
+            name=view.name,
+            scheduled_date=view.scheduled_date,
+            days_from_today=(view.scheduled_date - self.today).days,
             expires_in_minutes=max(0, math.ceil((stored.expires_at - now).total_seconds() / 60)),
-            exercises=exercises,
-            warm_up_minutes=minutes[WARM_UP],
-            main_minutes=minutes[MAIN],
-            cool_down_minutes=minutes[COOL_DOWN],
-            estimated_minutes=sum(minutes.values()),
-            coverage=coverage,
-            revision=revision,
+            exercises=view.exercises,
+            warm_up_minutes=view.minutes[WARM_UP],
+            main_minutes=view.minutes[MAIN],
+            cool_down_minutes=view.minutes[COOL_DOWN],
+            estimated_minutes=sum(view.minutes.values()),
+            coverage=view.coverage,
+            revision=None if view.replaced is None else view.replaced.revision,
             replaced_plan_unchanged=unchanged,
             changes=changes,
             earlier_proposals_awaiting_approval=earlier,
-        )
-
-    def _recorded_coverage(
-        self, focus: SessionFocus, main: Sequence[ProposedExerciseOutput], max_minutes: int | None
-    ) -> ProposalCoverage:
-        """A stored proposal's coverage, judged again from what it prescribes.
-        Formiq accepted it, so whatever it misses, the catalog had nothing the
-        user could do for when it was proposed."""
-        catalog = [self.catalog.get_exercise_by_id(item.exercise_id) for item in main]
-        assessment = completeness.assess(
-            focus,
-            [
-                (exercise, item.sets)
-                for exercise, item in zip(catalog, main, strict=True)
-                if exercise is not None
-            ],
-            max_minutes,
-        )
-        limitations = [
-            CoverageLimitation(
-                code="NO_SUITABLE_EXERCISE",
-                region=region,
-                message=(
-                    f"Formiq's catalog had no {REGION_NAMES[region]} exercise (with "
-                    f"{movers(region)} as a primary muscle) that suited the user's equipment and "
-                    "experience when this was proposed, so this workout does not train it."
-                ),
-            )
-            for region in completeness.in_order(assessment.missing)
-        ]
-        if assessment.counted < assessment.required:
-            limitations.append(
-                CoverageLimitation(
-                    code="TOO_FEW_SUITABLE_EXERCISES",
-                    region=None,
-                    message=(
-                        f"It has {assessment.counted} exercises that count for a {focus} "
-                        f"workout, fewer than the {assessment.required} it needs: the catalog "
-                        "had no more that suited the user when this was proposed."
-                    ),
-                )
-            )
-        return ProposalCoverage(
-            complete=not limitations,
-            focus=focus,
-            trained_regions=completeness.in_order(assessment.trained),
-            missing_regions=completeness.in_order(assessment.missing),
-            main_exercises_counted=assessment.counted,
-            main_exercises_required=assessment.required,
-            limitations=limitations,
         )
 
     def get_current_workout_plan(
@@ -663,7 +631,7 @@ class FormiqTools:
             workout_session,
             LatestWorkoutSessionOutput,
             today=self.today,
-            days_ago=(self.today - done.astimezone(UTC).date()).days,
+            days_ago=(self.today - self.calendar.local_date(done)).days,
         )
 
     def _session_output(
@@ -714,14 +682,17 @@ class FormiqTools:
         saves nothing."""
         if self.proposal_terms is None:
             raise ToolError(ToolErrorCode.TOOL_ERROR, "a plan cannot be proposed here")
-        scheduled = request.scheduled_date or self.today
-        days = (scheduled - self.today).days
-        if not 0 <= days <= MAX_PROPOSAL_DAYS_AHEAD:
+        if self.target_plan_id is not None and request.revises_plan_id != self.target_plan_id:
             raise ToolError(
                 ToolErrorCode.INVALID_INPUT,
-                f"scheduled_date must be today or up to {MAX_PROPOSAL_DAYS_AHEAD} days later",
+                f"the user is changing workout plan {self.target_plan_id}: propose a revision "
+                f"of it, with revises_plan_id {self.target_plan_id} and a revision (ADJUST for "
+                "the changes they asked for, ALTERNATIVE for a different workout); never a new "
+                "workout or another plan",
             )
         original = self._plan_to_revise(request)
+        scheduled = self._scheduled_day(request, original)
+        days = (scheduled - self.today).days
         unavailable = (
             self._unavailable_equipment(request.unavailable_equipment)
             | self._equipment_lacking(request.available_equipment)
@@ -787,6 +758,7 @@ class FormiqTools:
             for section, items in sections
             for item, exercise in zip(items, found[section], strict=True)
         ]
+        weights = self._weights(original, chosen, problems)
         exercises = [
             ProposedExerciseOutput(
                 exercise_order=order,
@@ -798,14 +770,12 @@ class FormiqTools:
                 reps=item.reps,
                 duration_seconds=getattr(item, "duration_seconds", None),
                 rest_seconds=getattr(item, "rest_seconds", None),
+                weight_kg=weights[order - 1],
                 notes=item.notes,
             )
             for order, (section, item, exercise) in enumerate(chosen, start=1)
         ]
-        minutes = {
-            section: section_minutes(item for item in exercises if item.section is section)
-            for section in PlanSection
-        }
+        minutes = workout_minutes(exercises)
         for section in (WARM_UP, COOL_DOWN):
             if minutes[section] > MAX_SECTION_MINUTES:
                 problems.append(
@@ -839,8 +809,8 @@ class FormiqTools:
         revision = None
         if original is not None:
             kept = self._revision_problems(
-                request, original, found[MAIN], exercises, unavailable, beginner, problems,
-                suggestions,
+                request, original, found[MAIN], exercises, scheduled, unavailable, beginner,
+                problems, suggestions,
             )  # fmt: skip
             revision = ProposalRevision(
                 replaces_plan_id=original.id,
@@ -919,6 +889,134 @@ class FormiqTools:
         self.proposals.append((proposal, output))
         return output
 
+    def _scheduled_day(self, request: ProposeWorkoutPlanInput, original: Any) -> date:
+        """The day the proposal is for.
+
+        A new workout is for the day the model gives, today by default, within
+        MAX_PROPOSAL_DAYS_AHEAD days. A revision keeps the day of the plan it
+        revises, whatever that day is (before today for a user whose own day is
+        behind it, or past the window): a workout is never moved by Formiq's
+        "today". Another day is a move, which the model may make only within the
+        window, and only to THE day the user asked for (_checked_day): the
+        proposal's comparison with the plan then shows it. A plan with no day has
+        none to keep.
+
+        Every date is in the request's calendar (self.calendar: the user's local
+        day, or UTC when the app sent no time zone)."""
+        asked = request.scheduled_date
+        kept = None if original is None else original.scheduled_date
+        if original is None:
+            scheduled = asked or self.today
+        elif asked is None or asked == kept:
+            if kept is None:
+                raise ToolError(
+                    ToolErrorCode.INVALID_INPUT,
+                    f"workout plan {original.id} has no day to keep: give scheduled_date, today "
+                    f"or up to {MAX_PROPOSAL_DAYS_AHEAD} days later (ask the user which day when "
+                    "it is unclear)",
+                )
+            return kept
+        else:
+            scheduled = asked
+        if not 0 <= (scheduled - self.today).days <= MAX_PROPOSAL_DAYS_AHEAD:
+            raise ToolError(
+                ToolErrorCode.INVALID_INPUT,
+                f"scheduled_date must be today or up to {MAX_PROPOSAL_DAYS_AHEAD} days later",
+            )
+        if kept is not None and scheduled != kept:
+            # a move: it needs the user's word, and the day they named
+            self._checked_day(request.user_id, original, scheduled, moving=True)
+        elif asked is not None and asked != self.today:
+            # a day chosen for a new workout, or for a plan with no day: today is the default and
+            # needs nothing; another day must be the one the user named, when they named one
+            self._checked_day(request.user_id, original, scheduled, moving=False)
+        return scheduled
+
+    def _asks_only_to_move(self, user_id: int, original: Any) -> bool:
+        """Whether the user's newest message asks for nothing but a move to another day, and no
+        proposal for this plan waits for a refinement (one that does carries changes the user is
+        looking at, which a move must not lose). Phase 2.7, after the live pass in which "move it
+        to tomorrow" was proposed with other exercises."""
+        words = self.user_words
+        if not words or not is_date_only_request(words[-1], self.today):
+            return False
+        return not self._waiting(user_id, revising=original.id)
+
+    def _requested_day(self) -> DayReading:
+        """What the user's own turns say of the day (app.tools.schedule): from the calendar's
+        today, in the user's zone. Without a conversation there are no words. Read when a
+        proposal chooses a day, never kept: it is a few regular expressions."""
+        return read_requested_day(self.user_words or (), self.today, MAX_PROPOSAL_DAYS_AHEAD)
+
+    def _checked_day(self, user_id: int, original: Any, day: date, *, moving: bool) -> None:
+        """Raises ToolError unless this day is the one the user's words ask for (Phase 2.7).
+        Before it Formiq checked only that the user had named *some* day, and the model chose
+        which: "tomorrow" came out as the wrong date, and "the weekend" as a day nobody picked.
+
+        - their words name one day: the day must be it ("tomorrow" is the calendar's tomorrow,
+          a weekday the next one, "this Friday, Oct 30" a conflict that asks);
+        - their words leave the day open (a period, a weekday that fits two days, two days):
+          nothing is proposed and the model asks which, never choosing;
+        - their words name a day outside the window: the model says so, and chooses none;
+        - their words name no day: a move is refused (unless the proposal awaiting approval
+          that revises this plan is already for this day: a refinement carries the move on),
+          and a day chosen for a new workout stays as it was (the user did not say, as before).
+        Without a conversation (nothing is known of the user's words) a move is refused."""
+        reading = self._requested_day()
+        label = self.calendar.label
+        what = (
+            f"move workout plan {original.id} to"
+            if moving
+            else "schedule the workout for"
+        )
+        carried = (
+            moving
+            and original is not None
+            and any(
+                stored.parameters.get("scheduled_date") == day.isoformat()
+                for stored in self._waiting(user_id, revising=original.id)
+            )
+        )
+        if reading.kind == "none":
+            if not moving or carried:
+                return
+            raise ToolError(
+                ToolErrorCode.INVALID_INPUT,
+                f"the user did not name a day to move workout plan {original.id} to, and it is "
+                f"for {original.scheduled_date.isoformat()}: leave scheduled_date out and the "
+                "revision keeps that day; give another day only when the user asked for one, and "
+                "ask them (ASK_CLARIFICATION) when it is unclear",
+            )
+        if reading.kind == "day" and day in reading.dates:
+            return
+        if reading.kind == "ambiguous" and carried and day in reading.dates:
+            # the day of the proposal the user is refining, which was one of the days they allowed
+            return
+        today = f"today is {label(self.today)}, in the time zone {self.calendar.timezone}"
+        if reading.kind == "ambiguous":
+            options = ", ".join(label(option) for option in reading.dates) or "none inside the window"
+            raise ToolError(
+                ToolErrorCode.INVALID_INPUT,
+                f"the user's words ({reading.words!r}) do not name one day to {what}: they could "
+                f"mean {options} ({today}). Do not choose a day: propose nothing and ask them "
+                "which day they mean (ASK_CLARIFICATION), naming those days",
+            )
+        if reading.kind == "outside":
+            raise ToolError(
+                ToolErrorCode.INVALID_INPUT,
+                f"the user asked for {reading.words!r}, which is not within today and the "
+                f"{MAX_PROPOSAL_DAYS_AHEAD} days after it ({today}; the last day is "
+                f"{label(self.today + timedelta(days=MAX_PROPOSAL_DAYS_AHEAD))}): a workout can "
+                "only be planned that far ahead. Tell them so; do not choose another day for them",
+            )
+        (named,) = reading.dates
+        raise ToolError(
+            ToolErrorCode.INVALID_INPUT,
+            f"the user asked for {reading.words!r}, which is {label(named)}, not "
+            f"{label(day)}: to {what} that day give scheduled_date {named.isoformat()} "
+            f"({today}); Formiq does not accept another day than the one they named",
+        )
+
     def _plan_to_revise(self, request: ProposeWorkoutPlanInput) -> Any:
         """The user's saved plan the proposal revises, when it revises one: it
         must be theirs, and PLANNED."""
@@ -944,12 +1042,13 @@ class FormiqTools:
     def _unclear_revision(self, user_id: int, plan: Any) -> str | None:
         """Why the conversation does not make clear that the user means this
         plan, of their several PLANNED ones, or None: the model must not
-        choose one for them. They mean it when it is their only PLANNED plan,
-        when they or the coach named it (its id or its name) in the
-        conversation, when the proposal awaiting their approval revises it,
-        or when it is their current plan and they speak of today's or their
-        next workout. Nothing to check when the conversation is not known."""
-        if self.conversation is None:
+        choose one for them. They mean it when it is the plan the request
+        names (target_plan_id), when it is their only PLANNED plan, when they
+        or the coach named it (its id or its name) in the conversation, when
+        the proposal awaiting their approval revises it, or when it is their
+        current plan and they speak of today's or their next workout. Nothing
+        to check when the conversation is not known."""
+        if self.conversation is None or plan.id == self.target_plan_id:
             return None
         planned = self.plans.list_plans(
             user_id, WorkoutPlanFilters(status=WorkoutPlanStatus.PLANNED)
@@ -960,10 +1059,7 @@ class FormiqTools:
         message = self.conversation[-1][1].casefold()
         name = " ".join(plan.name.casefold().split())
         current = self.plans.get_current_plan(user_id, self.today)
-        waiting = (
-            [] if self.pending_proposals is None
-            else self.pending_proposals.awaiting_approval(user_id)
-        )  # fmt: skip
+        waiting = self._waiting(user_id)
         if (
             re.search(rf"(?<!\d){plan.id}(?!\d)", " ".join(self.user_words or ()))
             or (name and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", " ".join(said.split())))
@@ -993,9 +1089,7 @@ class FormiqTools:
         """Whether the workout is the user's proposal awaiting approval again,
         unchanged: the same day, plan revised and prescription, every
         section's."""
-        if self.pending_proposals is None:
-            return False
-        waiting = self.pending_proposals.awaiting_approval(user_id)
+        waiting = self._waiting(user_id)
         if not waiting:
             return False
         values = waiting[0].parameters
@@ -1003,6 +1097,7 @@ class FormiqTools:
             (
                 kept["section"], kept["exercise_id"], kept["sets"], kept.get("reps"),
                 kept.get("duration_seconds"), kept.get("rest_seconds"),
+                None if kept.get("weight_kg") is None else round(float(kept["weight_kg"]), 2),
             )
             for kept in sorted(values["exercises"], key=lambda item: item["exercise_order"])
         ]  # fmt: skip
@@ -1010,6 +1105,7 @@ class FormiqTools:
             (
                 str(item.section), item.exercise_id, item.sets, item.reps,
                 item.duration_seconds, item.rest_seconds,
+                None if item.weight_kg is None else round(float(item.weight_kg), 2),
             )
             for item in exercises
         ]  # fmt: skip
@@ -1019,12 +1115,98 @@ class FormiqTools:
             and values.get("replaces_plan_id") == (original.id if original is not None else None)
         )
 
+    @staticmethod
+    def _unchanged_revision(request: ProposeWorkoutPlanInput, original: Any) -> str:
+        """Why an ADJUST that changes nothing is refused, in the model's terms: the
+        plan is already on the day it gave, or the user asked for no change that
+        shows (a move needs the day they named)."""
+        day = original.scheduled_date
+        if request.scheduled_date is not None and request.scheduled_date == day:
+            return (
+                f"workout plan {original.id} is already planned for {day.isoformat()} and this "
+                "proposal changes nothing else: it is unchanged. Do not propose it again; tell "
+                "the user it is already on that day"
+            )
+        return (
+            f"this is workout plan {original.id} unchanged, on its own day"
+            + (f" {day.isoformat()}" if day is not None else "")
+            + ": make the changes the user asked for. To move it to another day, give "
+            "scheduled_date for the day they named; when they did not name a day, ask which "
+            "(ASK_CLARIFICATION) and do not choose one"
+        )
+
+    def _weights(
+        self,
+        original: Any,
+        chosen: Sequence[tuple[PlanSection, Any, Any]],
+        problems: list[str],
+    ) -> list[float | None]:
+        """The weight of each proposed exercise, in order. Never one the model
+        chose: a revision carries on the weight the saved plan has for the same
+        exercise (the same section and name), whatever the model left out, so a
+        weight is never lost by omission; the model may set one only when it
+        rests on the user's words (app.tools.weights: a figure they gave, or the
+        plan's weight moved by one), or take one off only when they asked for
+        none. Anything else is a problem the proposal is refused for. Without a
+        conversation there are no words: no weight is set and none removed."""
+        saved = [] if original is None else plan_rows(original)
+        words = self.user_words or ()
+        stated = stated_weights(words)
+        no_weight = asks_for_no_weight(words)
+        weights: list[float | None] = []
+        for section, item, exercise in chosen:
+            kept = None
+            match = next(
+                (
+                    row
+                    for row in saved
+                    if row.section == section
+                    and completeness.name_key(row.name) == completeness.name_key(exercise.name)
+                ),
+                None,
+            )
+            if match is not None:
+                saved.remove(match)
+                kept = None if match.weight_kg is None else float(match.weight_kg)
+            given = getattr(item, "weight_kg", None)
+            if getattr(item, "remove_weight", False):
+                if kept is not None and not no_weight:
+                    problems.append(
+                        f"exercise {exercise.id} ({exercise.name}): the user did not ask for "
+                        f"no weight, and the plan has {kept:g} kg for it: leave remove_weight "
+                        "out and the revision keeps the weight"
+                    )
+                    weights.append(kept)
+                else:
+                    weights.append(None)
+            elif given is None:
+                weights.append(kept)
+            elif kept is not None and same_weight(given, kept):
+                weights.append(kept)
+            elif rests_on_the_user(given, kept, stated):
+                weights.append(round(given, 2))
+            else:
+                problems.append(
+                    f"exercise {exercise.id} ({exercise.name}): the user did not give a weight "
+                    f"of {given:g} kg, and you never choose one: leave weight_kg out"
+                    + (
+                        f" and the revision keeps the plan's {kept:g} kg"
+                        if kept is not None
+                        else ""
+                    )
+                    + "; when they want a heavier or lighter weight without saying which, ask "
+                    "them how many kg (ASK_CLARIFICATION)"
+                )
+                weights.append(kept)
+        return weights
+
     def _revision_problems(
         self,
         request: ProposeWorkoutPlanInput,
         original: Any,
         main: Sequence[Any],
         exercises: Sequence[ProposedExerciseOutput],
+        scheduled: date,
         unavailable: set[str],
         beginner: bool,
         problems: list[str],
@@ -1032,8 +1214,10 @@ class FormiqTools:
     ) -> list[Any]:
         """The main exercises the proposal keeps from the plan it revises (the
         same exercise, or one of the same name), adding to problems how it
-        fails to revise it: an ADJUST that changes nothing, or an ALTERNATIVE
-        that keeps an exercise the catalog has a replacement for.
+        fails to revise it: an ADJUST that changes nothing (no exercise, set,
+        rep, rest or weight, and not the day: moving the workout to another day
+        is a change on its own), or an ALTERNATIVE that keeps an exercise the
+        catalog has a replacement for.
 
         An ALTERNATIVE may keep an exercise only when the catalog leaves no
         choice: no other main exercise the user can do (their equipment and
@@ -1041,6 +1225,20 @@ class FormiqTools:
         nor the proposal holds already. How many may be kept is the
         catalog's to say, not a fixed share."""
         before = sorted(original.exercises, key=lambda item: item.exercise_order)
+        if (
+            original.scheduled_date is not None
+            and scheduled != original.scheduled_date
+            and self._asks_only_to_move(request.user_id, original)
+            and prescribed(exercises) != prescribed(before)
+        ):
+            # the user's newest message only names a day: nothing else about the workout is theirs to change
+            problems.append(
+                f"the user asked only to move workout plan {original.id} to "
+                f"{self.calendar.label(scheduled)}: keep every exercise, set, rep, rest time and "
+                "weight exactly as the plan has them (propose the same workout on that day); "
+                "change something else only when the user asked for it, and ask them when it is "
+                "unclear"
+            )
         before_main = [item.exercise for item in before if item.section == MAIN]
         before_keys = {completeness.name_key(exercise.name) for exercise in before_main}
         kept = [
@@ -1048,11 +1246,8 @@ class FormiqTools:
         ]
 
         if request.revision is RevisionKind.ADJUST:
-            if prescribed(exercises) == prescribed(before):
-                problems.append(
-                    f"this is workout plan {original.id} unchanged: make the changes the user "
-                    "asked for"
-                )
+            if prescribed(exercises) == prescribed(before) and scheduled == original.scheduled_date:
+                problems.append(self._unchanged_revision(request, original))
             return kept
 
         rule = FOCUS_RULES[request.focus]
@@ -1127,9 +1322,15 @@ class FormiqTools:
                 f"choose one whose uses include {section}",
             )
         if section is not MAIN and exercise.difficulty != Difficulty.BEGINNER:
+            # an UNRATED exercise (its source gives no level) is not known to be light
+            problem = (
+                "has no difficulty level (UNRATED), so it cannot be a light"
+                if exercise.difficulty == Difficulty.UNRATED
+                else "is not a light"
+            )
             raise ToolError(
                 ToolErrorCode.INVALID_INPUT,
-                f"exercise {item.exercise_id} ({exercise.name}) is not a light "
+                f"exercise {item.exercise_id} ({exercise.name}) {problem} "
                 f"{SECTION_NAMES[section]} activity: choose a BEGINNER one",
             )
         if (
@@ -1142,6 +1343,13 @@ class FormiqTools:
                 f"exercise {item.exercise_id} ({exercise.name}) is a held stretch: hold it at "
                 f"most {MAX_STRETCH_HOLD_SECONDS} seconds a set (about 30 is usual), and use up "
                 f"to {MAX_ACTIVITY_SETS} sets, or another activity, for more time",
+            )
+        if beginner and exercise.difficulty == Difficulty.UNRATED:
+            raise ToolError(
+                ToolErrorCode.INVALID_INPUT,
+                f"exercise {item.exercise_id} ({exercise.name}) has no difficulty level "
+                "(UNRATED), so it is not offered to a beginner: choose a BEGINNER or "
+                "INTERMEDIATE one (search_exercises with difficulty BEGINNER finds them)",
             )
         if beginner and exercise.difficulty == Difficulty.ADVANCED:
             raise ToolError(
@@ -1231,13 +1439,23 @@ class FormiqTools:
                     )
                 elif assessment.counted < min(assessment.required, available):
                     suggestions.for_focus()
+                    varied = "".join(
+                        f"; exercise {exercise.id} ({exercise.name}) only varies exercise "
+                        f"{earlier.id} ({earlier.name}), so the two count once"
+                        for exercise, earlier in assessment.variations
+                    )
                     problems.append(
                         f"the main workout has {assessment.counted} exercises that count for a "
                         f"{focus} workout (each different, for "
                         f"{regions_named(FOCUS_RULES[focus].counted)}, of at least "
                         f"{MIN_COUNTED_SETS} sets), fewer than the {assessment.required} it "
-                        f"needs{session}: "
-                        "add main exercises from the catalog"
+                        f"needs{session}{varied}: "
+                        + (
+                            "add main exercises that are different movements, not variations "
+                            "of one"
+                            if varied
+                            else "add main exercises from the catalog"
+                        )
                     )
                 if 0 < available < assessment.required:
                     limitations.append(
@@ -1276,7 +1494,7 @@ class FormiqTools:
             for exercise in self.catalog.list_exercises(
                 ExerciseFilters(use=MAIN), available_equipment_ids=available
             )
-            if not (beginner and exercise.difficulty == Difficulty.ADVANCED)
+            if not (beginner and exercise.difficulty in NOT_FOR_BEGINNERS)
         ]
 
     def get_exercise(self, request: GetExerciseInput) -> ExerciseOutput:
@@ -1437,7 +1655,7 @@ class FormiqTools:
         for exercise in everyone:
             if not name_matches(exercise.name, name):
                 continue
-            kept = DUPLICATE_OF.get(exercise.source_id)
+            kept = DUPLICATE_OF.get(exercise.source_id) if from_free_exercise_db(exercise) else None
             if kept is None:
                 ids.add(exercise.id)
                 if name_words(exercise.name) == wanted:
@@ -1548,6 +1766,19 @@ class FormiqTools:
             if exercise is not None:
                 names[exercise_id] = exercise.name
         return names
+
+
+def saved_equipment_output(profile: Any) -> SavedEquipmentOutput:
+    """The equipment the user's profile says they have, as the model reads it: the
+    active catalog equipment they chose by name (one retired since is not offered),
+    or none at all, or nothing said. The same reading as the coach service's
+    (UserProfileService.get_saved_equipment), which the tools filter by."""
+    if profile.no_equipment:
+        return SavedEquipmentOutput(status="NONE", equipment=[])
+    names = sorted(item.name for item in profile.equipment if item.is_active)
+    if names:
+        return SavedEquipmentOutput(status="LISTED", equipment=names)
+    return SavedEquipmentOutput(status="NOT_SAVED", equipment=[])
 
 
 def _ids_by_name(items: Sequence[Any], names: Sequence[str], kind: str) -> list[int]:
@@ -1673,8 +1904,12 @@ def most_relevant(
        crowd the lunges and squats out of the few returned;
     7. the exercises Formiq classified (with a movement pattern), then the ones
        it has not;
-    8. then one exercise per primary muscle in turn, so that the few returned
-       cover several muscles rather than the first names in the alphabet;
+    8. then one exercise per movement and primary muscle in turn, so that the few
+       returned are different movements for several muscles rather than the first
+       names in the alphabet or the variations of one (completeness.movement_key:
+       a core search of 45 matches returned the first 15 by name, eight of them
+       crunches, Bug 2, 2026-10-27); outside a warm-up or cool-down search only,
+       whose order is above;
     9. by name, then id.
     """
     activity = use in (WARM_UP, COOL_DOWN)
@@ -1708,13 +1943,20 @@ def most_relevant(
             exercise.movement_pattern is None,
         )
 
-    # each exercise's turn among those of its tier with the same primary muscle
+    # Each exercise's turn among those of its tier with the same primary muscle, and the
+    # same variation level of its movement: the first of each movement, then the second.
     turns: Counter[tuple] = Counter()
+    variations: Counter[tuple] = Counter()
     ranked = []
     for exercise in sorted(exercises, key=lambda item: (tier(item), item.name, item.id)):
         group = (tier(exercise), primary_muscle(exercise))
-        ranked.append(((tier(exercise), turns[group], exercise.name, exercise.id), exercise))
-        turns[group] += 1
+        movement = (group, completeness.movement_key(exercise))
+        level = 0 if activity else variations[movement]
+        variations[movement] += 1
+        ranked.append(
+            ((tier(exercise), level, turns[group, level], exercise.name, exercise.id), exercise)
+        )
+        turns[group, level] += 1
     return [exercise for _, exercise in sorted(ranked, key=lambda pair: pair[0])]
 
 
@@ -1770,7 +2012,18 @@ def visible(exercises: Iterable[Any]) -> list[Any]:
     pattern or muscle), where they would sit beside the exercise kept in their
     place. They stay in the catalog, readable by id, and in the plans that hold
     them."""
-    return [exercise for exercise in exercises if exercise.source_id not in HIDDEN_DUPLICATE_IDS]
+    return [
+        exercise
+        for exercise in exercises
+        if not (from_free_exercise_db(exercise) and exercise.source_id in HIDDEN_DUPLICATE_IDS)
+    ]
+
+
+def from_free_exercise_db(exercise: Any) -> bool:
+    """Whether the exercise was imported from free-exercise-db. The ids Formiq's
+    classification names (hidden duplicates, among them) are that dataset's: another
+    source's id is never read as one of them."""
+    return exercise.source == ExerciseSource.FREE_EXERCISE_DB
 
 
 def repeated(exercises: Sequence[Any]) -> list[str]:
@@ -1789,16 +2042,6 @@ def repeated(exercises: Sequence[Any]) -> list[str]:
                 f"({earlier.name})"
             )
     return repeats
-
-
-def movers(region: Any) -> str:
-    """The region's main movers, as "A, B or C"."""
-    *others, last = REGION_MUSCLES[region]
-    return f"{', '.join(others)} or {last}" if others else last
-
-
-def regions_named(regions: Iterable[Any]) -> str:
-    return ", ".join(REGION_NAMES[region] for region in completeness.in_order(regions))
 
 
 def searches_main(call: ToolCall) -> bool:
@@ -1845,7 +2088,8 @@ class Suggestions:
         self.beginner = beginner
         self.focus = focus
         self.made: list[dict[str, Any]] = []
-        # the names already in the workout, or suggested
+        # the names and movements already in the workout, or suggested: a variation of one
+        # of them would not help (completeness.movement_key)
         self._used: set[str] = set()
         self._pool: list[Any] | None = None
 
@@ -1856,16 +2100,21 @@ class Suggestions:
             self._pool = self.tools._main_pool(self.unavailable, self.beginner)
         return self._pool
 
+    @staticmethod
+    def _keys(exercise: Any) -> set[str]:
+        return {completeness.name_key(exercise.name), completeness.movement_key(exercise)}
+
     def exclude(self, exercises: Iterable[Any]) -> None:
-        self._used |= {completeness.name_key(exercise.name) for exercise in exercises}
+        for exercise in exercises:
+            self._used |= self._keys(exercise)
 
     def add(self, exercises: Iterable[Any], reason: str) -> None:
         added = 0
         for exercise in exercises:
-            key = completeness.name_key(exercise.name)
-            if key in self._used:
+            keys = self._keys(exercise)
+            if keys & self._used:
                 continue
-            self._used.add(key)
+            self._used |= keys
             self.made.append(
                 {
                     "exercise_id": exercise.id,
@@ -1926,115 +2175,11 @@ class Suggestions:
         self.add(most_relevant(cardio, use=section, muscle=None), f"the {SECTION_NAMES[section]}")
 
 
-class Row(NamedTuple):
-    """What a workout prescribes for one of its exercises."""
-
-    section: PlanSection
-    name: str
-    sets: int
-    reps: int | None
-    duration_seconds: int | None
-    rest_seconds: int | None
-    weight_kg: float | None
-
-
-def plan_rows(plan: Any) -> list[Row]:
-    """A saved plan's exercises as prescribed, in order."""
-    return [
-        Row(
-            PlanSection(item.section),
-            item.exercise.name if item.exercise is not None else f"exercise {item.exercise_id}",
-            item.sets,
-            item.reps,
-            item.duration_seconds,
-            item.rest_seconds,
-            item.weight_kg,
-        )
-        for item in sorted(plan.exercises, key=lambda item: (item.exercise_order, item.id))
-    ]
-
-
-def proposed_rows(exercises: Iterable[ProposedExerciseOutput]) -> list[Row]:
-    """A proposal's exercises as prescribed, in order (a proposal sets no weight)."""
-    return [
-        Row(
-            item.section,
-            item.exercise_name,
-            item.sets,
-            item.reps,
-            item.duration_seconds,
-            item.rest_seconds,
-            None,
-        )
-        for item in exercises
-    ]
-
-
-def prescription(row: Row) -> str:
-    """What a row prescribes, as "3 sets of 10 reps, 60 s rest"."""
-    target = f"{row.reps} reps" if row.reps is not None else f"{row.duration_seconds} s"
-    text = f"{row.sets} {'set' if row.sets == 1 else 'sets'} of {target}"
-    if row.weight_kg is not None:
-        text += f" at {row.weight_kg:g} kg"
-    if row.rest_seconds:
-        text += f", {row.rest_seconds} s rest"
-    return text
-
-
-def workout_changes(
-    rows: Sequence[Row], name: str, scheduled_date: date | None, plan: Any
-) -> WorkoutChangesOutput:
-    """How a workout (its rows, name and date) differs from a saved plan: each
-    exercise matched by section and name, so nothing is said to differ that
-    does not."""
-    unmatched = plan_rows(plan)
-    added, changed, unchanged = [], [], []
-    for row in rows:
-        same = next(
-            (
-                item
-                for item in unmatched
-                if item.section == row.section
-                and completeness.name_key(item.name) == completeness.name_key(row.name)
-            ),
-            None,
-        )
-        if same is None:
-            added.append(ExerciseChangeOutput(
-                section=row.section, exercise_name=row.name, before=None, after=prescription(row)
-            ))  # fmt: skip
-            continue
-        unmatched.remove(same)
-        if prescription(same) == prescription(row):
-            unchanged.append(row.name)
-        else:
-            changed.append(ExerciseChangeOutput(
-                section=row.section, exercise_name=row.name, before=prescription(same),
-                after=prescription(row),
-            ))  # fmt: skip
-    removed = [
-        ExerciseChangeOutput(
-            section=item.section, exercise_name=item.name, before=prescription(item), after=None
-        )
-        for item in unmatched
-    ]
-    return WorkoutChangesOutput(
-        compared_with_plan_id=plan.id,
-        compared_with_plan_name=plan.name,
-        added=added,
-        removed=removed,
-        changed=changed,
-        unchanged=unchanged,
-        name_changed=name != plan.name,
-        scheduled_date_changed=scheduled_date != plan.scheduled_date,
-        identical=not (added or removed or changed),
-    )
-
-
 def prescribed(items: Iterable[Any]) -> list[tuple]:
     """What a workout's exercises prescribe, in order: how a revision tells
-    whether it changed the plan. Weights and notes aside: a proposal sets no
-    weight, so dropping a plan's weights alone is no revision."""
+    whether it changed the plan: sets, reps or time, rest and weight (a weight
+    is part of what is prescribed: a change of weight alone is a revision, and a
+    weight carried on is no change). Notes aside."""
     return [
         (
             str(item.section),
@@ -2043,24 +2188,10 @@ def prescribed(items: Iterable[Any]) -> list[tuple]:
             item.reps,
             item.duration_seconds,
             item.rest_seconds,
+            None if item.weight_kg is None else round(float(item.weight_kg), 2),
         )
         for item in items
     ]
-
-
-def section_minutes(exercises: Iterable[ProposedExerciseOutput]) -> int:
-    """How long a section's exercises take, roughly: each set and the rest
-    after it. A timed set lasts its duration; a set of reps SET_SECONDS, or
-    SECONDS_PER_REP a rep when its reps take longer. A main exercise without a
-    rest gets the default; a warm-up or cool-down activity has none."""
-    seconds = 0
-    for item in exercises:
-        rest = item.rest_seconds
-        if rest is None:
-            rest = DEFAULT_REST_SECONDS if item.section is MAIN else 0
-        work = item.duration_seconds or max(SET_SECONDS, (item.reps or 0) * SECONDS_PER_REP)
-        seconds += item.sets * (work + rest)
-    return math.ceil(seconds / 60)
 
 
 def describe(error: ValidationError) -> str:

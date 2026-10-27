@@ -717,6 +717,18 @@ button:disabled {
   border-radius: var(--radius-card);
 }
 
+.plan-log {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.plan-log .saved {
+  margin: 0;
+}
+
 .plan h2 {
   font-size: 1.5rem;
   margin-bottom: 8px;

@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path, status
+from fastapi import APIRouter, HTTPException, Path, Response, status
 
 from app.agent import ConversationTurn
 from app.ai import AIProviderError, AIProviderNotConfiguredError
@@ -8,8 +8,9 @@ from app.api.dependencies import AIProvider, CoachTracer, CurrentUser, DbSession
 from app.schemas import (
     CoachMessageRequest,
     CoachMessageResponse,
+    PendingProposalsResponse,
     ProposalApprovalRequest,
-    WorkoutPlanProposalResponse,
+    ProposalRejectionRequest,
     WorkoutPlanResponse,
 )
 from app.services import CoachService, PlanProposalService
@@ -19,7 +20,10 @@ from app.services.exceptions import (
     InvalidWorkoutPlanError,
     ProposalNotApprovableError,
     ProposalNotFoundError,
+    ProposalNotRejectableError,
     UserNotFoundError,
+    WorkoutPlanNotFoundError,
+    WorkoutPlanNotRevisableError,
 )
 
 router = APIRouter(prefix="/coach", tags=["coach"])
@@ -45,9 +49,14 @@ def send_coach_message(
             current_user.id,
             message_data.message,
             [ConversationTurn(turn.role, turn.text) for turn in message_data.history],
+            message_data.workout_plan_id,
+            message_data.timezone,
         )
-    except UserNotFoundError as error:
+    except (UserNotFoundError, WorkoutPlanNotFoundError) as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    # the plan the user opened the coach to change is not one it may change
+    except WorkoutPlanNotRevisableError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     # The provider errors' own messages stay in the server log: the client only
     # learns that the coach is unavailable.
     except AIProviderNotConfiguredError as error:
@@ -63,27 +72,22 @@ def send_coach_message(
     if answer.proposal is None:
         return CoachMessageResponse(reply=answer.reply)
     proposal, shown = answer.proposal
+    # with what it replaces, read now: revision and changes are always given
+    # (null for a new workout), so a client never infers them
     return CoachMessageResponse(
         reply=answer.reply,
-        proposal=WorkoutPlanProposalResponse(
-            proposal_id=proposal.proposal_id,
-            binding=proposal.binding(),
-            **shown.model_dump(
-                include={
-                    "expires_at",
-                    "name",
-                    "scheduled_date",
-                    "exercises",
-                    "warm_up_minutes",
-                    "main_minutes",
-                    "cool_down_minutes",
-                    "estimated_minutes",
-                    "coverage",
-                }
-            ),
-            # always given: null for a new workout, so a client never infers it
-            revision=shown.revision,
-        ),
+        proposal=PlanProposalService(db, proposals).present(proposal, shown),
+    )
+
+
+@router.get("/proposals/pending", response_model=PendingProposalsResponse)
+def list_pending_proposals(current_user: CurrentUser, db: DbSession, proposals: Proposals):
+    """The signed-in user's workout plan proposals that can still be approved,
+    the most recently made first, as they were shown (the same binding): for a
+    client that lost them, such as after a restart. It proposes, approves and
+    changes nothing."""
+    return PendingProposalsResponse(
+        proposals=PlanProposalService(db, proposals).pending(current_user.id)
     )
 
 
@@ -95,16 +99,22 @@ def send_coach_message(
 def approve_workout_plan_proposal(
     proposal_id: ProposalId,
     approval: ProposalApprovalRequest,
+    response: Response,
     current_user: CurrentUser,
     db: DbSession,
     proposals: Proposals,
 ):
     """The signed-in user approves a workout plan the coach proposed to them,
-    as it was shown (its binding): the plan is saved, once, and returned."""
+    as it was shown (its binding): the plan is saved, once, and returned (201).
+    Approving a proposal they already approved saves nothing more: it returns
+    the plan that approval saved (200), while it is still as it was saved."""
     try:
-        return PlanProposalService(db, proposals).approve(
+        approved = PlanProposalService(db, proposals).approve(
             current_user.id, proposal_id, approval.binding
         )
+        if not approved.created:
+            response.status_code = status.HTTP_200_OK
+        return approved.plan
     except ProposalNotFoundError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     except ProposalNotApprovableError as error:
@@ -115,3 +125,24 @@ def approve_workout_plan_proposal(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"this proposal can no longer be saved: {error}",
         ) from error
+
+
+@router.post("/proposals/{proposal_id}/reject", status_code=status.HTTP_204_NO_CONTENT)
+def reject_workout_plan_proposal(
+    proposal_id: ProposalId,
+    rejection: ProposalRejectionRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+    proposals: Proposals,
+):
+    """The signed-in user rejects a workout plan the coach proposed to them, as
+    it was shown (its binding): it can then no longer be approved. Rejecting it
+    again is no error (204) for as long as the proposal is kept, an expired one
+    included; once an expired proposal is cleared it is a 404, as is another
+    user's or one that never was. One that was approved cannot be rejected."""
+    try:
+        PlanProposalService(db, proposals).reject(current_user.id, proposal_id, rejection.binding)
+    except ProposalNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except ProposalNotRejectableError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error

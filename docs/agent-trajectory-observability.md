@@ -16,6 +16,7 @@ recorded are in `docs/agent-production-contract.md` section 9.
 | one log line `coach_turn_summary {json}` (logger `app.observability.trajectory`, INFO) | the full summary | the playground prints it to its console; an application logs it at INFO |
 | playground `X-Playground-Execution` header | the flat aggregates and the codes | the local playground |
 | one log line `coach_event {json}` | `proposal_approved` | an approval that saved a plan |
+| the developer's terminal (stderr) | the same events, live and in order, with the turn's requests, calls and guards around them | `AGENT_DEBUG` is `events` or `content` (local development only: `docs/agent-debug.md`) |
 
 No API response changes: a user is never shown any of this.
 
@@ -200,11 +201,27 @@ one is chosen.
   no `proposal_validation_rejected` event. `proposal_rejected_irrecoverable` is left for what
   proposing again cannot fix (no profile, a failed read). A reply rejected for giving the workout
   a length the proposal does not have is a `reply_rejected` with category `duration_mismatch`.
+- (2026-10-23, Phase 2.5) Four more reply-rejection categories, from the lifecycle check
+  (`app.agent.trust.Lifecycle`): `applied_claim` (a workout or its changes said to be saved, applied,
+  updated or approved without the records), `pending_denied` and `pending_denied_elsewhere` (no
+  proposal awaits approval, said while one does, or while others do that the request does not read)
+  and `refused_proposal_presented` (a workout presented or offered for approval after Formiq refused
+  the turn's proposal). A first-person completed action stays `change_claim`.
 - Metadata lists may hold 64 items (they held 25), for the event codes.
 
 ## Not recorded, by design
 
 The message, the history, the instructions, reasoning, tool arguments' values, results, profile and
-workout data, replies, keys, passwords, tokens, exception text, and the user id. A debugging case that
-needs content is reported as a limitation: `LANGFUSE_CAPTURE_CONTENT` stays off, and nothing here reads
-it. A recording that fails is logged by the exception's type only, and the turn goes on.
+workout data, replies, keys, passwords, tokens and exception text. The trajectory (its summary, its
+events, its log lines) does not carry the user either. The Langfuse trace does: its root is
+created with the trusted numeric user id as its user (`user.id`) and the request id, as section 9 of the
+contract says (an earlier version of this paragraph listed the user id as never recorded, which was
+true of the trajectory and not of the trace). A debugging case that needs content is reported as a
+limitation: `LANGFUSE_CAPTURE_CONTENT` stays off, and nothing here reads it. A recording that fails
+is logged by the exception's type only, and the turn goes on.
+
+To watch a turn rather than read its summary, `AGENT_DEBUG` prints this trajectory's events, live, to the
+developer's own terminal, with the prompt's identity, the requests sent, the tool calls and the
+guards between them, and at its `content` level the text of Formiq's own constants and the tool data
+that is safe to show, never the user's words or profile. It is a sink of its own, apart from Langfuse and
+from `LANGFUSE_CAPTURE_CONTENT`: see `docs/agent-debug.md`.

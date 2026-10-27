@@ -9,6 +9,7 @@ with a test-only secret.
 """
 
 import ast
+import io
 import json
 import os
 import re
@@ -24,7 +25,7 @@ from fastapi.testclient import TestClient
 from google.genai import types
 
 from app.ai import AIProviderError, GeminiProvider, ModelTurn, ToolCall
-from app.api.dependencies import get_access_tokens, get_ai_provider
+from app.api.dependencies import get_access_tokens, get_ai_provider, get_tracer
 from app.core.config import settings
 from app.core.security import AccessTokens
 from app.db.database import get_db
@@ -350,6 +351,56 @@ def test_the_configured_tracing_still_receives_every_call():
     assert record["status"] == "success" and record["request_id"] == "r1"
 
 
+# --- the local debug output (AGENT_DEBUG) passes through the playground's tracer ---
+
+
+def test_the_playgrounds_tracer_keeps_the_debug_output_and_the_capture_setting_it_was_given():
+    from app.observability.debug import DebugSink
+
+    sink = DebugSink("events", io.StringIO())
+
+    kept = server.recording_tracer(Tracer(MemoryBackend(), capture_content=True, debug=sink))
+    plain = server.recording_tracer(Tracer(MemoryBackend()))
+
+    assert kept.debug is sink and kept.capture_content is True
+    assert plain.debug is None and plain.capture_content is False
+
+
+def test_a_request_through_the_real_route_is_printed_and_answers_exactly_as_without(client, db, model):
+    from tests.observability import debugging, parse
+
+    def ask(tracer):
+        server.app.dependency_overrides[get_tracer] = lambda: tracer
+        model.generate_turn.side_effect = [respond("SENTINEL-REPLY")]
+        try:
+            return client.post(
+                "/coach/message",
+                headers=bearer(7),
+                json={
+                    "message": "SENTINEL-MESSAGE",
+                    "history": [{"role": "user", "text": "SENTINEL-HISTORY"}],
+                },
+            )
+        finally:
+            server.app.dependency_overrides.pop(get_tracer, None)
+
+    plain = ask(server.recording_tracer(Tracer(MemoryBackend())))
+    debugger = debugging("content")
+    shown = ask(server.recording_tracer(debugger.tracer))
+
+    # the API's answer is the same, status, body and headers (apart from their values)
+    assert (shown.status_code, shown.json()) == (plain.status_code, plain.json())
+    assert set(shown.headers) == set(plain.headers)
+    # and the turn was printed, from the service's input to its summary, with nothing private
+    output = debugger.stream.getvalue()
+    labels = [line.label for line in parse(output)]
+    for label in ("input", "safety_check", "request", "response", "response_source", "turn_completed", "summary", "end"):
+        assert label in labels
+    assert " | user 7 | AGENT_DEBUG=content ===" in output
+    assert "SENTINEL" not in output
+    assert "SENTINEL" not in json.dumps(dict(shown.headers))
+
+
 # --- what the playground is not ---
 
 
@@ -398,10 +449,12 @@ def test_the_playground_holds_no_credentials_and_reaches_no_database():
     assert [path.name for path in files if secret.search(path.read_text())] == []
     # the page calls the existing API only, on its own origin, and never sends
     # cookies: the coach, the approval of the coach's proposal, the reads of the
-    # signed-in user's saved plans, and the login
+    # signed-in user's saved plans, the workout sessions of the "Completed" button,
+    # and the login
     script = (STATIC / "app.js").read_text()
     assert re.findall(r"fetch\(([^,]+),", script) == [
         "P.COACH_PATH",
+        "path",
         "path",
         "path",
         "P.LOGIN_PATH",
@@ -410,7 +463,26 @@ def test_the_playground_holds_no_credentials_and_reaches_no_database():
     assert re.findall(r"await getPlans\((\w+)\)", script) == ["path", "path"]
     assert "const path = P.plansPath(session);" in script
     assert "const path = P.planPath(session, planId);" in script
-    assert script.count('credentials: "omit"') == 4
+    assert script.count('credentials: "omit"') == 5
+    # The "Completed" button reaches the API only through P.logPlan, whose calls are
+    # the signed-in user's own workout sessions: it reads them, starts one from the plan,
+    # logs its exercises and sets, completes it, and deletes it if a step failed. It
+    # never writes a plan, and builds every path from the token (P.sessionsPath).
+    assert (
+        "result = await P.logPlan(who, plan, (method, path, body) => call(method, path, body, headers));"
+        in script
+    )
+    logic = (STATIC / "playground.js").read_text()
+    assert re.findall(r'await call\("(\w+)", (\w+)', logic) == [
+        ("GET", "listPath"),
+        ("POST", "startPath"),
+        ("POST", "sessionExercisesPath"),
+        ("POST", "sessionSetsPath"),
+        ("PATCH", "sessionPath"),
+        ("DELETE", "sessionPath"),
+    ]
+    flow = logic.split("// --- logging a saved plan's workout as done ---")[1].split("// --- the user's profile ---")[0]
+    assert "workout-plans" not in flow and "workout-sessions" in flow
     assert not re.search(r"https?://", script + (STATIC / "playground.js").read_text())
     # the launcher reaches data only through the application's API
     imported = set()
